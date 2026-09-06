@@ -11,7 +11,9 @@ flags.
 Build the engine in the Meshloop clone. **Run the loop in a throwaway git
 repo**, not in this product tree.
 
-WSL2, packaging: unverified. Concurrency is 1. Fixture =
+WSL2 and prebuilt GitHub Release binaries: unverified. crates.io
+source-install is enabled (`cargo install meshloop-cli --locked`); no
+registry upload yet. Concurrency is 1. Fixture =
 [CI appendix](#ci-appendix-fixture-double).
 
 ## What you should see
@@ -32,8 +34,10 @@ WSL2, packaging: unverified. Concurrency is 1. Fixture =
 
 ## 0. Two directories
 
-1. **Engine (this clone):** `cargo build -p meshloop-cli`. Install skills from
-   `skills/` or `cargo run -p xtask -- bundle`. Optional: `meshloop mcp`.
+1. **Engine:** `cargo install meshloop-cli --locked` (once published) or, from
+   this clone, `cargo build -p meshloop-cli`. Install skills from `skills/`
+   or `meshloop bundle` (`cargo run -p xtask -- bundle` from a clone).
+   Optional: `meshloop mcp`.
 2. **Target (throwaway git repo):** copy `config/meshloop.example.toml` there,
    keep only kinds you have logged in, and run every `/meshloop:*` **in that
    repo**.
@@ -43,6 +47,7 @@ herdr status
 git clone https://github.com/smota/meshloop.git
 cd meshloop
 cargo build -p meshloop-cli
+meshloop bundle
 ```
 
 Then `cd` to the throwaway repo (or pass `--config` at that repo). Default

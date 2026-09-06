@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Domain types for Meshloop: task graphs, evidence, policy, and role ids."
+readme = "README.md"
+keywords = ["orchestration", "agents"]
+categories = ["development-tools"]
 
 [lints]
 workspace = true

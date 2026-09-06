@@ -7,8 +7,8 @@ accept. It does not store credentials.
 
 **Release 1** — native Windows, Herdr 0.8 live workers, concurrency 1. Fixture
 subprocess is the CI double (`--fixture-only`). Tests may split **non-origin**
-panes; they must never split the supervisor pane. WSL2 and packaging are
-unverified.
+panes; they must never split the supervisor pane. WSL2 and prebuilt binaries
+are unverified. crates.io source-install is enabled; no registry upload yet.
 
 ```mermaid
 flowchart TB
@@ -49,7 +49,7 @@ Live workers are the default. `run` does not merge onto your current branch.
 
 ## Product and decisions
 
-Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017** are Accepted.
+Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017 / 0018** are Accepted.
 
 1. [Product brief](product/brief.md)
 2. [Requirements](product/requirements.md) — ML-001–014 are targets; R1 does not claim all of them
@@ -60,7 +60,7 @@ Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017** are Accepted.
 ## Architecture (after the hub)
 
 [Overview](architecture/overview.md) describes the v1 shape and names R1
-residuals (WSL2, concurrency > 1, packaging, queried quota).
+residuals (WSL2, concurrency > 1, prebuilt binaries, crates.io upload, queried quota).
 
 - [Component boundaries](architecture/boundaries.md)
 - [Execution lifecycle](architecture/execution-lifecycle.md)

@@ -66,8 +66,9 @@ The five names are the **intended configured set**, not a compatibility matrix.
 | Origin pane | Supervisor-only; never split |
 | Fixture | CI double (`--fixture-only`) |
 | Credentials / your branch | Not stored / untouched until integrate |
-| Concurrency / packaging / WSL2 / queried quota | 1 / no / unverified / not queried |
-| ADRs 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 | Accepted |
+| Concurrency / prebuilt binaries / WSL2 / queried quota | 1 / no / unverified / not queried |
+| crates.io publish path | Enabled (`cargo install meshloop-cli --locked`; no registry upload yet) |
+| ADRs 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 · 0018 | Accepted |
 
 ## Safety
 
@@ -93,7 +94,15 @@ cargo build -p meshloop-cli
 cargo run -p xtask -- check    # fmt, clippy, fixture tests
 cargo run -p xtask -- smoke
 cargo run -p xtask -- bundle
+cargo run -p xtask -- publish-dry
 cargo run -p xtask -- live     # fails if Herdr is down
+```
+
+Published install (native Windows; first crates.io upload is a separate maintainer action):
+
+```text
+cargo install meshloop-cli --locked
+meshloop bundle
 ```
 
 The binary is the **engine**. Skills/MCP are the **operator surface**.

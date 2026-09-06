@@ -40,7 +40,7 @@ not need a five-harness local setup. Live workers need Herdr; fixture covers CI.
   workstation. No global tool installs and no privilege elevation as part of
   contributing.
 - Checks: `cargo run -p xtask -- check` (fmt, clippy `-D warnings`, workspace
-  tests). Optional: `smoke`, `bundle`.
+  tests). Optional: `smoke`, `bundle`, `publish-dry`.
 - Details: [testing](docs/engineering/testing.md), [Rust](docs/engineering/rust.md),
   [workflow](docs/engineering/agent-workflow.md).
 
@@ -73,7 +73,9 @@ Merge requires maintainer authorization ([@smota](https://github.com/smota)).
 AI review is supporting evidence, not proof of correctness. High-risk
 security, unsafe Rust (currently forbidden), destructive data changes, and
 release acceptance need human review of a concrete result. Local green is not
-remote success. R1 has no packaging or publish step.
+remote success. crates.io upload and GitHub Releases are maintainer-gated
+(ADR 0018); `xtask publish-dry` is not an upload. Do not `cargo publish`
+without that authorization.
 
 ## Conduct and legal
 

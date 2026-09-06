@@ -1,0 +1,41 @@
+# Maintainer-gated crates.io publish (ADR 0018).
+# Default is dry-run. A real upload needs CARGO_REGISTRY_TOKEN or trusted publishing
+# and explicit dry_run=false. Do not treat a green dry-run as an upload.
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Package and verify without uploading to crates.io
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Package isolation
+        run: cargo run -p xtask -- publish-dry
+      - name: Publish crates
+        if: ${{ inputs.dry_run == false }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          $crates = @('meshloop-domain','meshloop-engine','meshloop-adapters','meshloop-cli')
+          foreach ($name in $crates) {
+            $ok = $false
+            for ($i = 0; $i -lt 8 -and -not $ok; $i++) {
+              cargo publish -p $name --locked
+              if ($LASTEXITCODE -eq 0) { $ok = $true }
+              else { Start-Sleep -Seconds 30 }
+            }
+            if (-not $ok) { throw "cargo publish -p $name failed" }
+          }

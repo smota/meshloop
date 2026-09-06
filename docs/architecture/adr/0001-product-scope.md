@@ -1,7 +1,7 @@
 # 0001 Product scope, platforms, and operating surface
 
 - Status: Accepted
-- Implementation: implemented — native Windows; agent-session UX (skills + local MCP); compiled `meshloop` binary is the engine/saga (ML-014). WSL2 Linux side unverified. Packaging not started.
+- Implementation: implemented — native Windows; agent-session UX (skills + local MCP); compiled `meshloop` binary is the engine/saga (ML-014). WSL2 Linux side unverified. crates.io publish path: ADR 0018 (no registry upload yet). Prebuilt GitHub Release binaries not started.
 - Date: 2026-09-05
 - Accepted: 2026-09-06
 - Author/executor: Claude (Sonnet 5) consolidated; Grok rewrote operating-surface text under human product direction

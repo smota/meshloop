@@ -135,6 +135,7 @@ pub fn bundled_commands() -> &'static [&'static str] {
         "meshloop:doctor",
         "meshloop:orchestrate",
         "meshloop:mcp",
+        "meshloop:bundle",
     ]
 }
 

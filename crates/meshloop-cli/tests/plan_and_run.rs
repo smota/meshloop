@@ -598,3 +598,35 @@ fn review_plan_adjust_rewrites_and_stays_awaiting_review() {
     assert!(stdout.contains("adjust"));
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn bundle_emits_version_locked_session_pack() {
+    let dest = std::env::temp_dir().join(format!(
+        "meshloop-cli-bundle-{}-{}",
+        std::process::id(),
+        "pack"
+    ));
+    let _ = fs::remove_dir_all(&dest);
+    let output = meshloop()
+        .args(["bundle", "--dest"])
+        .arg(&dest)
+        .output()
+        .expect("meshloop bundle");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("bundled to"));
+    let plan = dest.join("skills/meshloop-plan/SKILL.md");
+    assert!(plan.is_file(), "missing {}", plan.display());
+    let catalog = fs::read_to_string(dest.join("meshloop-mcp-tools.json")).expect("catalog");
+    assert!(catalog.contains("\"namespace\": \"meshloop:\""));
+    assert!(catalog.contains(env!("CARGO_PKG_VERSION")));
+    assert!(catalog.contains("meshloop mcp"));
+    let skill = fs::read_to_string(plan).expect("skill");
+    assert!(skill.contains("meshloop:plan"));
+    assert!(!skill.contains("unprefixed plan should be used"));
+    fs::remove_dir_all(&dest).ok();
+}

@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Meshloop adapters: Herdr, git worktrees, SQLite, and the fixture harness."
+readme = "README.md"
+keywords = ["orchestration", "agents", "herdr"]
+categories = ["development-tools"]
 
 [lints]
 workspace = true
@@ -12,8 +18,8 @@ workspace = true
 # rusqlite (bundled): ADR 0007/runtime-design.md §4's embedded local persistence — bundled
 # avoids depending on a system-installed SQLite across Windows/WSL.
 [dependencies]
-meshloop-domain = { path = "../meshloop-domain" }
-meshloop-engine = { path = "../meshloop-engine" }
+meshloop-domain = { workspace = true }
+meshloop-engine = { workspace = true }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 

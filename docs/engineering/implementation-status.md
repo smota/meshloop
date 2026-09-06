@@ -15,7 +15,8 @@ Native Windows (`rustc 1.98.0`).
 | `cargo run -p xtask -- check` | fmt, clippy `-D warnings`, workspace tests (live Herdr **skips** if down) |
 | `cargo run -p xtask -- live` | Launch gate — **fails** if Herdr is down |
 | `cargo run -p xtask -- smoke` | Prefixed CLI / doctor / review-plan in `--help` |
-| `cargo run -p xtask -- bundle` | `dist/meshloop-session-bundle/` |
+| `cargo run -p xtask -- bundle` | `dist/meshloop-session-bundle/` (also `meshloop bundle`) |
+| `cargo run -p xtask -- publish-dry` | `cargo package` isolation for the four publishable crates |
 
 - **meshloop-domain:** task graph, lifecycle including `PlanDeclined`,
   `PlanDecision` (Accept / Decline / Adjust), evidence, policy, prefixed ids
@@ -28,7 +29,7 @@ Native Windows (`rustc 1.98.0`).
   runs, WAL).
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
   `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (origin pane),
-  `orchestrate`, `mcp`. Store: `.meshloop/state.sqlite`.
+  `orchestrate`, `mcp`, `bundle`. Store: `.meshloop/state.sqlite`.
 
 Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
 accept+resume, review-plan accept/decline/adjust. Live tests may split
@@ -44,7 +45,8 @@ accept+resume, review-plan accept/decline/adjust. Live tests may split
 
 ## Residuals — not product claims
 
-- WSL2 / packaging
+- WSL2 / prebuilt GitHub Release binaries
+- crates.io enablement (ADR 0018); no registry upload yet
 - Vendor quota numbers not queried
 - Tier assignment = dependency-count heuristic
 - Concurrency = 1

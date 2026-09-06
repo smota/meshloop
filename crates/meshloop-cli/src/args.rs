@@ -99,6 +99,9 @@ pub enum Command {
         model_b: String,
         fixture_only: bool,
     },
+    Bundle {
+        dest: PathBuf,
+    },
 }
 
 pub fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -301,6 +304,14 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 fixture_only: has_flag(rest, "--fixture-only"),
             })
         }
+        Some(v) if v == "bundle" => {
+            let rest = &args[1..];
+            Ok(Command::Bundle {
+                dest: flag_value(rest, "--dest")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("dist/meshloop-session-bundle")),
+            })
+        }
         Some(v)
             if matches!(
                 v.as_str(),
@@ -319,7 +330,7 @@ pub fn help_text() -> &'static str {
     "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
-     \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mcp\n\
+     \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mcp | meshloop:bundle\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -331,6 +342,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop doctor [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
      \x20 meshloop mcp\n\
+     \x20 meshloop bundle [--dest <dir>]\n\
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
      \x20 or MESHLOOP_ORIGIN_HARNESS / MESHLOOP_ORIGIN_SESSION.\n\
      Live workers are the default (Herdr). --fixture-only forces the CI subprocess double."

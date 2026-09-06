@@ -6,6 +6,7 @@ mod config;
 mod json_out;
 mod mcp;
 mod report;
+mod session_bundle;
 
 use std::collections::HashMap;
 use std::env;
@@ -214,6 +215,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             inv.json,
             inv.origin,
         ),
+        Command::Bundle { dest } => cmd_bundle(dest, inv.json, inv.origin),
     }
 }
 
@@ -1022,6 +1024,42 @@ fn cmd_integrate(
             }
         },
     )
+}
+
+fn cmd_bundle(dest: PathBuf, json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
+    match session_bundle::write_to(&dest) {
+        Ok(files) => {
+            if json {
+                let paths: Vec<String> = files
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                println!(
+                    "{}",
+                    json_out::ok(
+                        "meshloop:bundle",
+                        origin,
+                        serde_json::json!({
+                            "dest": dest.to_string_lossy(),
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "files": paths,
+                        }),
+                    )
+                );
+            } else {
+                println!("bundled to {}", dest.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", json_out::err("meshloop:bundle", origin, e));
+            } else {
+                eprintln!("{e}");
+            }
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn cmd_roles(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {

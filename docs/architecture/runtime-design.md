@@ -31,12 +31,19 @@ linker per platform (MSVC/Windows SDK on native Windows; a standard build toolch
 gcc/build-essential or equivalent — inside WSL/Linux). This is a build-time requirement
 only and does not contradict the shipped binary having zero runtime dependencies.
 
-**Packaging.** One static binary per Tier A target: `meshloop-windows-x86_64.exe` and
-`meshloop-linux-x86_64`, produced by a locked `cargo build --release` per target. No
-installer, no service registration, no global configuration writes. Versioned by the
-workspace `Cargo.toml` version plus a git tag; a WSL user runs the Linux binary inside
-their WSL distribution like any other Linux tool, never the Windows `.exe` reaching across
-the boundary. Tier B (macOS) packaging is decided when Tier B moves toward support.
+**Packaging (ADR 0018).** Source-install: publish `meshloop-domain`,
+`meshloop-engine`, `meshloop-adapters`, and `meshloop-cli` to crates.io;
+`xtask` stays unpublished. `cargo install meshloop-cli --locked` then
+`meshloop bundle` emits the version-locked session pack. Library crates are
+implementation crates, not a stable Rust API. No installer, no service
+registration, no global configuration writes. Versioned by the workspace
+`Cargo.toml` version plus a git tag `v<version>`. First crates.io upload is a
+human-gated maintainer action; enablement is not evidence of an upload.
+
+Prebuilt binaries (`meshloop-windows-x86_64.exe`, `meshloop-linux-x86_64`)
+remain deferred (Phase 9). A WSL user would run a Linux binary inside their
+WSL distribution, never the Windows `.exe` reaching across the boundary.
+Tier B (macOS) packaging is decided when Tier B moves toward support.
 
 **Operating surface (ADR 0001, Accepted).** The compiled `meshloop` binary is the
 sole **engine**: every capability must be reachable through it, with no saga in

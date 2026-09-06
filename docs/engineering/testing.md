@@ -12,7 +12,8 @@ binary against `fixture_harness` on disposable git repos (canned plan, `--accept
 gate, empty-diff failure, accept then resume to Integrated). Live tests may split
 **non-origin** panes when `herdr status` is running; they skip if the server is down.
 `cargo run -p xtask -- live` **fails** if Herdr is down (launch gate). Never split
-the origin supervisor pane.
+the origin supervisor pane. `cargo run -p xtask -- publish-dry` packages the four
+publishable crates in isolation (ADR 0018); it is not a crates.io upload.
 
 Future critical cases: DAG cycles, dependency failure, concurrency limits, cancellation,
 timeout, fallback exhaustion, recovery, stale evidence, path escape, test tampering,

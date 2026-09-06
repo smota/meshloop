@@ -34,6 +34,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0012 | ADR and AI engineering governance | Accepted |
 | 0016 | Release 1: closed-loop orchestration with live Herdr workers | Accepted |
 | 0017 | Session control plane, Herdr live transport, meshloop: namespace | Accepted |
+| 0018 | Publishing: crates.io source-install and version-locked session pack | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

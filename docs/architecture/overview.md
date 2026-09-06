@@ -3,7 +3,8 @@
 Public map: [docs/README.md](../README.md). R1: [ADR 0016](adr/0016-r1-closed-loop.md).
 
 This page is the **v1 shape**. R1 ships the subset in ADR 0016 on **native
-Windows**. Named residuals: WSL2 unverified, concurrency = 1, no packaging,
+Windows**. Named residuals: WSL2 unverified, concurrency = 1, prebuilt
+binaries not started, crates.io not yet uploaded,
 quota windows not queried from vendors.
 
 ## Two surfaces (ADR 0001)
