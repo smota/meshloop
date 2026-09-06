@@ -1,0 +1,15 @@
+[package]
+name = "meshloop-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# serde: task graphs cross the agent-dispatch boundary as JSON (ADR 0009/runtime-design.md
+# §5's decomposition output contract); no I/O added, domain stays pure data + (de)serialization.
+[dependencies]
+serde = { version = "1", features = ["derive"] }

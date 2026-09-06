@@ -1,0 +1,18 @@
+# Configuration shape loaded by meshloop-cli's compose module (ADR 0001/0003/0009).
+# No credentials, real model IDs, or per-harness CLI flags are shipped by Meshloop itself —
+# every entry below must be supplied by you. The [harnesses.fixture] section demonstrates
+# the shape using the safe fixture-harness test binary; add your own [harnesses.<name>]
+# sections (matching entries in selected_harnesses) for real harnesses.
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 2
+task_timeout_seconds = 300
+
+[harnesses.fixture]
+executable = "target/debug/fixture_harness"
+version_args = ["--version"]
+invoke_args_template = ["--prompt-file", "{prompt_file}"]
+model_ref = "fixture-model"
+model_tier = "top"

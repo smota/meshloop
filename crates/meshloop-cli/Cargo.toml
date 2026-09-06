@@ -1,0 +1,24 @@
+[package]
+name = "meshloop-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# toml: parses config/meshloop.example.toml-shaped configuration (ADR 0001/0003/0009);
+# serde/serde_json: task-graph (de)serialization for `plan`'s output file and `run`'s input.
+[dependencies]
+meshloop-domain = { path = "../meshloop-domain" }
+meshloop-engine = { path = "../meshloop-engine" }
+meshloop-adapters = { path = "../meshloop-adapters" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[[bin]]
+name = "meshloop"
+path = "src/main.rs"
