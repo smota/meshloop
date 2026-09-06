@@ -1,62 +1,74 @@
 # Architecture overview
 
-Public map: [docs/README.md](../README.md). Release 1 subset:
-[ADR 0016](adr/0016-r1-closed-loop.md). This page describes the **v1 target
-architecture**. Do not treat every paragraph as shipping product. Native
-Windows is the R1 platform; WSL2 is unverified.
+Public map: [docs/README.md](../README.md). R1: [ADR 0016](adr/0016-r1-closed-loop.md).
 
-## Problem and solution
+This page is the **v1 shape**. R1 ships the subset in ADR 0016 on **native
+Windows**. Named residuals: WSL2 unverified, concurrency = 1, no packaging,
+quota windows not queried from vendors.
 
-Herdr already runs one local, authenticated CLI harness in a terminal pane. Meshloop's
-premise, stated concretely: Codex, Claude Code, Pi, Grok, and Agy are each a flat-rate
-subscription with its own capability set and its own rate-limit window, not a metered API —
-used one at a time, that capacity sits idle or gets exhausted unevenly, and nothing
-verifies what a session produced or recovers if it dies mid-task. Meshloop is the
-planning-and-orchestration layer on top of Herdr: planning and routing (ADR 0009) turn one
-engineering objective into a task graph by dispatching that decomposition itself as a
-bounded agent call, not a hardcoded algorithm, then pick which harness and model tier
-handles each node via Quota-Aware Capability Routing — extensible, verified capability,
-observed subscription quota, never dollar cost, never a hardcoded default; each node
-dispatches as a bounded agent (ADR 0003); results are verified and recovered cleanly from
-interruption. The compiled CLI (ADR 0001, still Proposed) is the intended sole operating
-surface for all of this. The v1 platform pairing is Windows native plus Linux
-via WSL2 on the same host; **R1 is native Windows only**.
+## Two surfaces (ADR 0001)
 
-Full product framing: docs/product/brief.md. Acceptance targets: docs/product/requirements.md.
+| Surface | Role |
+|---|---|
+| `meshloop:` skills + local MCP | Operator UX (slash `/meshloop:plan`) |
+| Compiled `meshloop` binary | Engine / saga (ML-014). Skills contain no orchestration. |
 
-## Architecture
+You sit in an authenticated agent pane (`meshloop:origin`). Meshloop asks Herdr
+to open **other** panes for planner, worker, and reviewers. Isolation is git
+worktrees, not panes. The origin pane is never split.
 
-The accepted development structure separates pure domain contracts, engine use cases,
-external adapters, and CLI composition. Product runtime choices remain proposed.
-
-```text
-CLI -> Engine -> Domain
- |        ^        ^
- +-> Adapters -----+
+```mermaid
+flowchart LR
+  Skills["Skills / MCP / slash"] --> CLI["meshloop-cli"]
+  CLI --> Engine["meshloop-engine"]
+  Engine --> Domain["meshloop-domain"]
+  CLI --> Adapters["meshloop-adapters"]
+  Adapters --> Engine
+  Adapters --> Herdr["Herdr 0.8"]
+  Adapters --> Git["git worktrees"]
+  Adapters --> SQLite["SQLite WAL"]
 ```
 
 | Layer | Owns |
 |---|---|
-| meshloop-domain | Task graph, the 10-state execution lifecycle, evidence, policy, and harness-capability/error-taxonomy value types — no I/O |
-| meshloop-engine | Planner, router (QACR), agent dispatch, orchestrator, and recovery use cases, defined against ports it does not implement |
-| meshloop-adapters | Herdr (CLI-subprocess), per-harness capability probes, Git worktree isolation, SQLite-backed store |
-| meshloop-cli | Argument parsing, composing adapters into engine ports, human-readable reports |
+| meshloop-domain | Task graph, lifecycle, evidence, policy — no I/O |
+| meshloop-engine | Planner, QACR router, RunLoop saga, recovery — ports only |
+| meshloop-adapters | Herdr CLI, CliHarness (fixture), Git, SQLite |
+| meshloop-cli | Argv, compose, JSON envelope, MCP stdio |
 
-Execution moves a task through `pending -> ready -> running -> verifying ->
-awaiting-review -> accepted -> integrated` (or `failed`/`cancelled`/`blocked`), one attempt
-at a time, with every transition logged as an event carrying executor, revision, and
-evidence reference — see execution-lifecycle.md. Isolation is by Git worktree with one
-integration owner (ADR 0005); Herdr panes are never treated as a security boundary.
-Verification separates deterministic evidence, advisory model review, and mandatory human
-acceptance at Tier 3 (ADR 0007), which also owns local SQLite persistence, versioned and
-redacted. Routing follows Quota-Aware Capability Routing: verified capability, risk tier,
-observed subscription quota, and historical success — never a static model-name table or
-dollar-cost budget (ADR 0009). Agent dispatch (ADR 0003) turns a routed task into a bounded
-prompt and worktree-scoped execution; the worktree diff, not harness stdout, is the primary
-output verification evaluates.
+## Engine states (R1)
 
-See boundaries.md, execution-lifecycle.md, threat-model.md, the ADR index, and
-docs/engineering/implementation-plan.md for the staged build-out toward that architecture,
-runtime-design.md for the mechanism behind every ADR above, and
-docs/engineering/design-patterns.md for the concrete pattern behind each contract and how
-to design, implement, and validate it.
+Operator pane loop: [Getting started](../start.md). This diagram is the
+persisted machine, not the slash order.
+
+```mermaid
+stateDiagram-v2
+  [*] --> AwaitingPlanReview: plan / review-plan --adjust
+  AwaitingPlanReview --> PlanAccepted: review-plan --accept<br/>or run --accept-plan
+  AwaitingPlanReview --> PlanDeclined: review-plan --decline
+  PlanDeclined --> AwaitingPlanReview: review-plan --adjust
+  PlanAccepted --> Ready: first node
+  Ready --> Running: QACR dispatch
+  Running --> Verifying: harness exited
+  Verifying --> AwaitingReview: git-diff passed
+  AwaitingReview --> Accepted: accept --as
+  Accepted --> Integrated: resume merge in integrate worktree
+```
+
+Per-node table: [execution-lifecycle.md](execution-lifecycle.md). Plan gate:
+[ADR 0009](adr/0009-routing-budgets.md). Transport: [ADR 0017](adr/0017-session-control-plane.md).
+
+## Routing, in one paragraph
+
+QACR runs at **dispatch**, not inside the planner. Candidates = configured
+TOML only. Hard filters: `probe` dispatchable, `tier_fits`, cooldown if
+exhaustion was observed. Score: tier efficiency, historical success after
+git-diff pass, load (headroom map is empty in R1 → neutral), coupling
+(penalty currently 0). Feedback cannot add a harness the user did not
+configure. [ADR 0009](adr/0009-routing-budgets.md).
+
+## Where to go next
+
+- Mechanism behind every ADR: [runtime-design.md](runtime-design.md)
+- Ports vs adapters: [boundaries.md](boundaries.md)
+- What is actually built: [implementation status](../engineering/implementation-status.md)

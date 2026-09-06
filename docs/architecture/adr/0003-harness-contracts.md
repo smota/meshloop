@@ -1,11 +1,12 @@
 # 0003 Harness capability and agent dispatch contract
 
-- Status: Proposed
-- Implementation: in-progress — HarnessCapabilities, the error taxonomy, and AgentSpec/prompt dispatch implemented and contract-tested against a fixture binary; `probe` also run for real against installed herdr/claude/pi/grok binaries; `invoke` never dispatched against a real subscription-backed harness. See docs/engineering/implementation-status.md.
+- Status: Accepted
+- Implementation: implemented for R1 — `HarnessCapabilities` (fixture subprocess + live Herdr worker); worktree diff is the deliverable. Residual: per-harness CLI argv templates are unused on the live path (`Herdr --kind` is).
 - Date: 2026-09-05
+- Accepted: 2026-09-06
 - Author/executor: Claude (Sonnet 5), consolidated from prior Codex/user planning; absorbs former ADR 0013 (agent dispatch)
-- Reviewer: pending
-- Approval evidence: none for this runtime decision
+- Decision owner: Samuel
+- Approval evidence: user approved the 2026-09-06 launch plan (live Herdr workers are R1)
 - Supersedes: none
 - Superseded by: none
 

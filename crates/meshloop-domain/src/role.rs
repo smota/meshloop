@@ -55,7 +55,7 @@ impl MeshloopId {
         }
         // Accept MCP underscore form meshloop_plan and slash meshloop-plan as the same id.
         if let Some(rest) = trimmed.strip_prefix("meshloop_") {
-            return Self::parse(&format!("{PREFIX}{rest}"));
+            return Self::parse(&format!("{PREFIX}{}", rest.replace('_', "-")));
         }
         if let Some(rest) = trimmed.strip_prefix("meshloop-") {
             return Self::parse(&format!("{PREFIX}{rest}"));
@@ -72,7 +72,7 @@ impl MeshloopId {
     }
 
     pub fn mcp_tool(&self) -> String {
-        self.0.replace(':', "_")
+        self.0.replace([':', '-'], "_")
     }
 
     pub fn cli_verb(&self) -> &str {
@@ -123,6 +123,7 @@ pub fn bundled_roles() -> Vec<RoleDefinition> {
 pub fn bundled_commands() -> &'static [&'static str] {
     &[
         "meshloop:plan",
+        "meshloop:review-plan",
         "meshloop:run",
         "meshloop:status",
         "meshloop:accept",
@@ -171,6 +172,10 @@ mod tests {
         assert_eq!(b, c);
         assert_eq!(a.slash(), "/meshloop:reviewer");
         assert_eq!(a.mcp_tool(), "meshloop_reviewer");
+        let rp = MeshloopId::parse("meshloop:review-plan").unwrap();
+        assert_eq!(MeshloopId::parse("meshloop_review_plan").unwrap(), rp);
+        assert_eq!(rp.cli_verb(), "review-plan");
+        assert_eq!(rp.mcp_tool(), "meshloop_review_plan");
     }
 
     #[test]

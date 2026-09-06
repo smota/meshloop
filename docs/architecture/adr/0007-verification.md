@@ -1,11 +1,12 @@
 # 0007 Verification and persistence
 
-- Status: Proposed
-- Implementation: in-progress — the three evidence types and the tier-based required-evidence gate implemented and tested; SQLite-backed EvidenceStore/RoutingFeedbackStore implemented and tested (schema-version guard included) via bundled rusqlite, which compiled successfully here; `run`'s v1 CLI records only exit-code-based DeterministicEvidence, not real linter/test tool output. See docs/engineering/implementation-status.md.
+- Status: Accepted
+- Implementation: implemented for R1 — three evidence types, git-diff verification, SQLite WAL schema v4 (`pane_id` on attempts, `review_note` on runs). Residual: optional `verify_command` is empty in the example; no credential storage (by design).
 - Date: 2026-09-05
+- Accepted: 2026-09-06
 - Author/executor: Claude (Sonnet 5), consolidated from prior Codex/user planning; absorbs former ADR 0008 (persistence and privacy)
-- Reviewer: pending
-- Approval evidence: none for this runtime decision
+- Decision owner: Samuel
+- Approval evidence: user approved the 2026-09-06 launch plan
 - Supersedes: none
 - Superseded by: none
 

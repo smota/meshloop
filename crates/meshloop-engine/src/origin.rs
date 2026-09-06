@@ -8,9 +8,21 @@ pub struct Origin {
     pub session: Option<String>,
 }
 
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+}
+
 impl Origin {
     pub fn from_flags(harness: Option<String>, session: Option<String>) -> Self {
         Self { harness, session }
+    }
+
+    /// Flags win; otherwise `MESHLOOP_ORIGIN_HARNESS` / `MESHLOOP_ORIGIN_SESSION`.
+    pub fn from_flags_or_env(harness: Option<String>, session: Option<String>) -> Self {
+        Self {
+            harness: harness.or_else(|| env_nonempty("MESHLOOP_ORIGIN_HARNESS")),
+            session: session.or_else(|| env_nonempty("MESHLOOP_ORIGIN_SESSION")),
+        }
     }
 
     pub fn is_set(&self) -> bool {

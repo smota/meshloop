@@ -10,7 +10,9 @@ use meshloop_domain::evidence::{
     AttemptId, CandidateRef, DeterministicEvidence, Evidence, HumanAcceptanceEvidence,
 };
 use meshloop_domain::policy::CouplingPenalty;
-use meshloop_domain::state::{Event, PlanState, TaskState, plan_transition, transition};
+use meshloop_domain::state::{
+    Event, PlanDecision, PlanState, TaskState, plan_transition, transition,
+};
 use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
@@ -34,6 +36,8 @@ pub enum OrchestratorError {
     Illegal(String),
     DuplicateGraph { graph_id: String, resume: bool },
     MissingGraph(String),
+    PlanDeclined(String),
+    PlanAlreadyAccepted(String),
     NotAwaitingReview(TaskId),
     AlreadyAccepted(TaskId),
     EmptyIdentity,
@@ -103,7 +107,8 @@ pub struct RunLoop<'a> {
     pub checks: &'a dyn CheckRunner,
     pub router: Router,
     pub limits: RunLimits,
-    pub allow_live_harness: bool,
+    /// When true, refuse non-`fixture` harnesses (CI double). Default is live Herdr.
+    pub fixture_only: bool,
     pub verify_command: Vec<String>,
     pub worktree_base: PathBuf,
     pub active_graph: Option<String>,
@@ -182,8 +187,8 @@ impl<'a> RunLoop<'a> {
         format!("meshloop/{graph_id}/plan")
     }
 
-    fn require_live_ok(&self, harness: &str) -> Result<(), OrchestratorError> {
-        if !is_fixture(harness) && !self.allow_live_harness {
+    fn require_dispatch_ok(&self, harness: &str) -> Result<(), OrchestratorError> {
+        if self.fixture_only && !is_fixture(harness) {
             return Err(OrchestratorError::LiveHarnessRefused(harness.into()));
         }
         Ok(())
@@ -244,7 +249,7 @@ impl<'a> RunLoop<'a> {
             &ctx,
         );
         let top = selected.first().ok_or(OrchestratorError::NoCandidate)?;
-        self.require_live_ok(&top.harness)?;
+        self.require_dispatch_ok(&top.harness)?;
         let harness = *self
             .harnesses
             .get(&top.harness)
@@ -291,15 +296,27 @@ impl<'a> RunLoop<'a> {
         assign_tiers(&mut graph, &DefaultTierAssigner);
         let graph_id = graph.graph_id.clone();
         if let Some(existing) = self.store.load_run(&graph_id)? {
-            let tasks = self.tasks(&graph_id).unwrap_or_default();
-            let live = graph
-                .nodes
-                .iter()
-                .any(|n| tasks.get(&n.id).map(|s| !terminal(*s)).unwrap_or(true));
-            return Err(OrchestratorError::DuplicateGraph {
-                graph_id,
-                resume: live || existing.plan_state == PlanState::AwaitingPlanReview,
-            });
+            match existing.plan_state {
+                PlanState::PlanDeclined => {
+                    return Err(OrchestratorError::PlanDeclined(graph_id));
+                }
+                PlanState::PlanAccepted | PlanState::AwaitingPlanReview => {
+                    let tasks = self.tasks(&graph_id).unwrap_or_default();
+                    if tasks.is_empty() {
+                        self.ensure_integrate(&graph_id, &existing.run_base)?;
+                        self.active_graph = Some(graph_id);
+                        return Ok(());
+                    }
+                    let live = graph
+                        .nodes
+                        .iter()
+                        .any(|n| tasks.get(&n.id).map(|s| !terminal(*s)).unwrap_or(true));
+                    return Err(OrchestratorError::DuplicateGraph {
+                        graph_id,
+                        resume: live,
+                    });
+                }
+            }
         }
         let integrate = self.integrate_path(&graph_id);
         let ibranch = self.integrate_branch(&graph_id);
@@ -321,6 +338,7 @@ impl<'a> RunLoop<'a> {
             plan_json: json.clone(),
             plan_sha256: digest(&json),
             created_at: stamp(),
+            review_note: None,
         };
         self.store.save_run(&row)?;
         let mesh = self.workspace.repo_root().join(".meshloop");
@@ -331,15 +349,97 @@ impl<'a> RunLoop<'a> {
     }
 
     pub fn accept_plan(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
+        self.decide_plan(graph_id, PlanDecision::Accept, None)
+            .map(|_| ())
+    }
+
+    fn ensure_integrate(&self, graph_id: &str, run_base: &str) -> Result<(), OrchestratorError> {
+        let integrate = self.integrate_path(graph_id);
+        let ibranch = self.integrate_branch(graph_id);
+        if self.workspace.worktree_exists(&integrate) {
+            return Ok(());
+        }
+        if self.workspace.branch_exists(&ibranch)? {
+            return Err(OrchestratorError::Illegal(
+                "integrate branch exists without a worktree; remove leftover meshloop worktrees and retry"
+                    .into(),
+            ));
+        }
+        let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
+        self.workspace
+            .add_worktree_from(&integrate, &ibranch, run_base)?;
+        Ok(())
+    }
+
+    /// Persist a graph as awaiting review without starting workers.
+    pub fn stage_plan(
+        &mut self,
+        mut graph: TaskGraph,
+        run_base: String,
+    ) -> Result<String, OrchestratorError> {
+        graph
+            .validate()
+            .map_err(|e| OrchestratorError::Illegal(format!("{e:?}")))?;
+        assign_tiers(&mut graph, &DefaultTierAssigner);
+        let graph_id = graph.graph_id.clone();
+        let json = serde_json::to_string_pretty(&graph)
+            .map_err(|e| OrchestratorError::Illegal(e.to_string()))?;
+        let ibranch = self.integrate_branch(&graph_id);
+        if let Some(mut existing) = self.store.load_run(&graph_id)? {
+            match existing.plan_state {
+                PlanState::PlanAccepted => {
+                    return Err(OrchestratorError::PlanAlreadyAccepted(graph_id));
+                }
+                PlanState::AwaitingPlanReview | PlanState::PlanDeclined => {
+                    existing.plan_json = json.clone();
+                    existing.plan_sha256 = digest(&json);
+                    existing.plan_state = PlanState::AwaitingPlanReview;
+                    existing.run_base = run_base;
+                    self.store.save_run(&existing)?;
+                }
+            }
+        } else {
+            self.store.save_run(&RunRow {
+                graph_id: graph_id.clone(),
+                plan_state: PlanState::AwaitingPlanReview,
+                run_base,
+                integrate_ref: ibranch,
+                plan_json: json.clone(),
+                plan_sha256: digest(&json),
+                created_at: stamp(),
+                review_note: None,
+            })?;
+        }
+        let mesh = self.workspace.repo_root().join(".meshloop");
+        let _ = std::fs::create_dir_all(&mesh);
+        let _ = std::fs::write(mesh.join("plan.json"), json);
+        self.active_graph = Some(graph_id.clone());
+        Ok(graph_id)
+    }
+
+    pub fn decide_plan(
+        &mut self,
+        graph_id: &str,
+        decision: PlanDecision,
+        note: Option<String>,
+    ) -> Result<PlanState, OrchestratorError> {
         let mut row = self
             .store
             .load_run(graph_id)?
             .ok_or_else(|| OrchestratorError::MissingGraph(graph_id.into()))?;
-        row.plan_state = plan_transition(row.plan_state, true)
-            .map_err(|_| OrchestratorError::Illegal("plan already decided".into()))?;
+        let next = plan_transition(row.plan_state, decision).map_err(|_| {
+            OrchestratorError::Illegal(format!(
+                "illegal plan decision {decision:?} from {:?}",
+                row.plan_state
+            ))
+        })?;
+        row.plan_state = next;
+        if note.is_some() {
+            row.review_note = note;
+        }
         self.store.save_run(&row)?;
         self.active_graph = Some(graph_id.into());
-        Ok(())
+        Ok(next)
     }
 
     pub fn tick(&mut self) -> Result<Tick, OrchestratorError> {
@@ -601,7 +701,7 @@ impl<'a> RunLoop<'a> {
             .find(|c| !used.contains(&c.harness))
             .cloned()
             .unwrap_or_else(|| selected[0].clone());
-        self.require_live_ok(&candidate.harness)?;
+        self.require_dispatch_ok(&candidate.harness)?;
 
         let attempt_id = self.store.next_attempt_id()?;
         let wt = self.attempt_path(graph_id, task_id, attempt_id);
@@ -653,6 +753,7 @@ impl<'a> RunLoop<'a> {
             worktree_path: Some(wt.clone()),
             pid: None,
             image_name: None,
+            pane_id: None,
             started_at: Some(stamp()),
             ended_at: None,
             outcome: Some(format!("base:{start}")),
@@ -710,6 +811,8 @@ impl<'a> RunLoop<'a> {
                 .map(|s| s.to_string_lossy().into_owned());
                 self.store
                     .update_attempt_pid(attempt_id, handle.pid, image.as_deref())?;
+                self.store
+                    .update_attempt_pane(attempt_id, handle.pane_id.as_deref())?;
                 match harness.collect(&handle) {
                     Err(e) => {
                         self.record_quota(&candidate.harness, &e)?;
@@ -980,19 +1083,22 @@ impl<'a> RunLoop<'a> {
             }
             if state == TaskState::Running
                 && let Some(a) = self.store.latest_attempt_for_task(graph_id, id)?
-                && let Some(pid) = a.pid
+                && let Some(name) = &a.harness
+                && let Some(h) = self.harnesses.get(name)
             {
-                let hint = ProcessHint {
+                let live_pid = a.pid.map(|pid| ProcessHint {
                     pid,
                     image_name: a.image_name.clone(),
-                };
-                if self.processes.is_live(&hint) == LiveCheck::Live
-                    && let Some(name) = &a.harness
-                    && let Some(h) = self.harnesses.get(name)
-                {
+                });
+                let should_cancel = a.pane_id.is_some()
+                    || live_pid
+                        .as_ref()
+                        .is_some_and(|hint| self.processes.is_live(hint) == LiveCheck::Live);
+                if should_cancel {
                     let _ = h.cancel(&crate::ports::HarnessHandle {
                         attempt_id: a.attempt_id,
                         pid: a.pid,
+                        pane_id: a.pane_id.clone(),
                     });
                 }
             }

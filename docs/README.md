@@ -1,64 +1,85 @@
 # Meshloop docs
 
-Meshloop is a local Rust orchestration engine for authenticated CLI agents and
-Herdr. It plans one engineering objective into a task graph, routes work,
-verifies diffs, and recovers. It does not store credentials.
+Meshloop is a local orchestration engine for authenticated CLI agents and Herdr.
+You operate **from inside** Claude Code, Codex, Pi, Grok, or Agy. It plans one
+objective, farms live workers, verifies diffs, and will not merge until you
+accept. It does not store credentials.
 
-**Release 1** is a fixture-backed closed loop on native Windows. Commands exist:
-`plan`, `run --accept-plan`, `status`, `resume`, `cancel`, `inspect`, `accept`,
-`integrate`, `roles`, `doctor`, `orchestrate`, `mcp`. Live workers need Herdr and
-`--allow-live-harness`. Tests never split live panes. Real dispatch against
-Claude Code, Codex, Pi, Grok, or Agy is **not** an R1 stamp. Concurrency is 1.
-No packaging. WSL2 is unverified.
+**Release 1** — native Windows, Herdr 0.8 live workers, concurrency 1. Fixture
+subprocess is the CI double (`--fixture-only`). Tests may split **non-origin**
+panes; they must never split the supervisor pane. WSL2 and packaging are
+unverified.
 
-Start here by what you need.
+```mermaid
+flowchart TB
+  subgraph operators [Operators]
+    Start[Getting started]
+    Skills[Skills]
+    Brief[Product brief]
+  end
+  subgraph builders [Builders — after the hub]
+    Status[Implementation status]
+    Overview[Architecture overview]
+    ADRs[ADR index]
+  end
+  Start --> Skills
+  Start --> Brief
+  Status --> Overview
+  Overview --> ADRs
+```
 
-## Try it (operators)
+## Who are you?
 
-1. [Getting started](start.md) — fixture loop on native Windows
+| You | Open |
+|---|---|
+| Operator in a Herdr agent session | [Getting started](start.md) (install [skills](../skills/README.md) as step 0) |
+| Wanting the problem statement | [Product brief](product/brief.md) |
+| Changing code or reviewing a diff | [Implementation status](engineering/implementation-status.md), then [AGENTS.md](../AGENTS.md) |
+
+## Operator loop
+
+`plan` · `review-plan` · `run` · `status` · `resume` · `cancel` · `inspect` ·
+`accept` · `integrate` · `roles` · `doctor` · `orchestrate` · `mcp`
+
+Live workers are the default. `run` does not merge onto your current branch.
+
+1. [Getting started](start.md)
 2. Example config: [`config/meshloop.example.toml`](../config/meshloop.example.toml)
-3. Session control plane (skills / slash / MCP): [`skills/README.md`](../skills/README.md)
+3. [Skills](../skills/README.md)
 
-`run` does not merge onto your current branch. Integrate is a separate,
-explicit command.
+## Product and decisions
 
-## Understand the product
+Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017** are Accepted.
 
-1. [Product brief](product/brief.md) — problem and value
-2. [Requirements](product/requirements.md) — ML-001–014 are *targets*, not a claim that R1 implements all of them
-3. [R1 decision](architecture/adr/0016-r1-closed-loop.md) — what Release 1 includes and excludes
-4. [Session control plane](architecture/adr/0017-session-control-plane.md) — `meshloop:` prefix, supervisor-only origin
+1. [Product brief](product/brief.md)
+2. [Requirements](product/requirements.md) — ML-001–014 are targets; R1 does not claim all of them
+3. [ADR 0016](architecture/adr/0016-r1-closed-loop.md) — live workers, fixture as CI
+4. [ADR 0017](architecture/adr/0017-session-control-plane.md) — `meshloop:` prefix, supervisor-only origin
+5. [ADR index](architecture/adr/README.md)
 
-## Contribute
+## Architecture (after the hub)
 
-1. [Contributing](../CONTRIBUTING.md)
-2. [Code of conduct](../.github/CODE_OF_CONDUCT.md)
-3. [Engineering workflow](engineering/agent-workflow.md)
-4. [Testing](engineering/testing.md) — `cargo run -p xtask -- check`
+[Overview](architecture/overview.md) describes the v1 shape and names R1
+residuals (WSL2, concurrency > 1, packaging, queried quota).
 
-## Decisions and architecture (read after the hub)
+- [Component boundaries](architecture/boundaries.md)
+- [Execution lifecycle](architecture/execution-lifecycle.md)
+- [Threat model](architecture/threat-model.md) — design requirements, not a guarantee
 
-R1 first: [ADR 0016](architecture/adr/0016-r1-closed-loop.md).
-Full v1 runtime ADRs are **Proposed**, not accepted, and not all implemented.
+## Engineering internals
 
-1. [ADR index](architecture/adr/README.md)
-2. [Architecture overview](architecture/overview.md) — v1 shape; do not treat every paragraph as shipping
-3. [Component boundaries](architecture/boundaries.md)
-4. [Execution lifecycle](architecture/execution-lifecycle.md)
-5. [Threat model](architecture/threat-model.md) — design requirements, not a guarantee the scaffold enforces them
+Do not start here unless you are changing code.
 
-## Engineering internals (builders and agents)
-
-Do not start here unless you are changing code or running a harness against this repo.
-
-- [Implementation status](engineering/implementation-status.md) — executor log of what was built
+- [Implementation status](engineering/implementation-status.md)
+- [Testing](engineering/testing.md) — `xtask check` and `xtask live`
 - [Rust conventions](engineering/rust.md)
-- [Harness contract](engineering/harnesses.md) — developing Meshloop *with* the selected CLIs, not a claim they are R1 workers
+- [Harness contract](engineering/harnesses.md) — developing Meshloop *with* the selected CLIs
 - [Design patterns](engineering/design-patterns.md)
-- Canonical agent policy: [`AGENTS.md`](../AGENTS.md)
+- [Contributing](../CONTRIBUTING.md)
+- Historical R1 lab notes (superseded): [r1-closed-loop-design.md](architecture/r1-closed-loop-design.md)
 
 ## Help, security, legal
 
-- [Support](../.github/SUPPORT.md) — how to ask; no SLA
-- [Security policy](../.github/SECURITY.md) — private reports only
+- [Support](../.github/SUPPORT.md) — no SLA
+- [Security](../.github/SECURITY.md) — private reports only
 - [License](../LICENSE) (Apache-2.0) · [NOTICE](../NOTICE) · [Trademarks](../TRADEMARKS.md)

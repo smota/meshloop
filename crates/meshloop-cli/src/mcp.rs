@@ -123,6 +123,12 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg(id.cli_verb()).arg("--json");
+    if let Some(h) = arguments.get("origin_harness").and_then(|v| v.as_str()) {
+        cmd.arg("--origin-harness").arg(h);
+    }
+    if let Some(s) = arguments.get("origin_session").and_then(|v| v.as_str()) {
+        cmd.arg("--origin-session").arg(s);
+    }
     for a in extra {
         cmd.arg(a);
     }

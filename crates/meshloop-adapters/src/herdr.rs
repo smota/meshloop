@@ -1,13 +1,16 @@
 //! Herdr 0.8.x CLI-subprocess transport (ADR 0005 / 0017). Structured arguments only.
-//! Live pane split is never used in fixture tests.
+//! Never split the origin supervisor pane.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
-use meshloop_domain::capability::HarnessError;
+use meshloop_domain::capability::{Compatibility, HarnessError, HarnessProfile};
 use meshloop_engine::agent::AgentSpec;
 use meshloop_engine::ports::{
-    HerdrSessionPort, ReviewError, ReviewTransport, SessionHandle, SessionStatus,
+    HarnessCapabilities, HarnessHandle, HarnessOutcome, HerdrSessionPort, ReviewError,
+    ReviewTransport, SessionHandle, SessionStatus,
 };
 use serde_json::Value;
 
@@ -140,6 +143,11 @@ impl HerdrCliAdapter {
     pub fn list_pane_ids(&self) -> Result<Vec<String>, HarnessError> {
         let raw = self.run(&self.list_panes_args())?;
         Ok(parse_pane_ids(&raw))
+    }
+
+    pub fn current_pane_id(&self) -> Result<Option<String>, HarnessError> {
+        let raw = self.run(&Self::current_pane_args())?;
+        Ok(parse_split_pane_id(&raw).or_else(|| parse_pane_ids(&raw).into_iter().next()))
     }
 }
 
@@ -295,6 +303,136 @@ impl ReviewTransport for HerdrCliAdapter {
     fn close_pane(&self, pane_id: &str) -> Result<(), ReviewError> {
         let _ = self.run(&self.close_pane_args(pane_id));
         Ok(())
+    }
+}
+
+fn map_review(err: ReviewError) -> HarnessError {
+    match err {
+        ReviewError::Timeout => HarnessError::Timeout,
+        ReviewError::OriginPane => HarnessError::ProcessFault {
+            detail: "refusing to split meshloop:origin supervisor pane".into(),
+        },
+        ReviewError::Transport(detail) => HarnessError::ProcessFault { detail },
+    }
+}
+
+/// Live worker/planner dispatch via Herdr panes. Isolation is the attempt worktree, not the pane.
+pub struct HerdrWorkerHarness {
+    adapter: HerdrCliAdapter,
+    kind: String,
+    harness_name: String,
+    origin_pane: Option<String>,
+    outputs: Mutex<HashMap<u32, String>>,
+}
+
+impl HerdrWorkerHarness {
+    pub fn new(
+        herdr_path: PathBuf,
+        harness_name: impl Into<String>,
+        kind: impl Into<String>,
+        origin_pane: Option<String>,
+    ) -> Self {
+        Self {
+            adapter: HerdrCliAdapter::new(herdr_path),
+            kind: kind.into(),
+            harness_name: harness_name.into(),
+            origin_pane,
+            outputs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn agent_name(&self, spec: &AgentSpec) -> String {
+        let leaf = if spec.worktree_path.file_name().and_then(|s| s.to_str()) == Some("plan") {
+            "planner"
+        } else {
+            "worker"
+        };
+        format!(
+            "meshloop-{leaf}-{}-a{}",
+            self.harness_name, spec.attempt_id.0
+        )
+    }
+}
+
+impl HarnessCapabilities for HerdrWorkerHarness {
+    fn probe(&self) -> Result<HarnessProfile, HarnessError> {
+        let status = self.adapter.probe_status()?;
+        if !status.server_running {
+            return Err(HarnessError::ProcessFault {
+                detail: "herdr server is not running".into(),
+            });
+        }
+        Ok(HarnessProfile {
+            harness: self.harness_name.clone(),
+            version: status.version.unwrap_or_else(|| "herdr".into()),
+            compatibility: Compatibility::Compatible,
+            supports_noninteractive: true,
+            supports_structured_output: false,
+            supports_cancellation: true,
+        })
+    }
+
+    fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
+        let avoid = self.origin_pane.as_deref();
+        let pane = self
+            .adapter
+            .split_pane(&spec.worktree_path, avoid)
+            .map_err(map_review)?;
+        if Some(pane.as_str()) == avoid {
+            let _ = self.adapter.close_pane(&pane);
+            return Err(HarnessError::ProcessFault {
+                detail: "refusing to split meshloop:origin supervisor pane".into(),
+            });
+        }
+        self.adapter
+            .start_agent(&self.agent_name(spec), &self.kind, &pane)
+            .map_err(map_review)?;
+        let timeout_ms = spec.timeout.as_millis().max(1) as u64;
+        let output = self
+            .adapter
+            .prompt_and_wait(&pane, &spec.prompt, timeout_ms)
+            .map_err(map_review)?;
+        self.outputs
+            .lock()
+            .map_err(|_| HarnessError::ProcessFault {
+                detail: "herdr worker registry mutex poisoned".into(),
+            })?
+            .insert(spec.attempt_id.0, output);
+        Ok(HarnessHandle {
+            attempt_id: spec.attempt_id,
+            pid: None,
+            pane_id: Some(pane),
+        })
+    }
+
+    fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {
+        if let Some(pane) = &handle.pane_id {
+            let _ = self.adapter.close_pane(pane);
+        }
+        Ok(())
+    }
+
+    fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
+        let stored = self
+            .outputs
+            .lock()
+            .map_err(|_| HarnessError::ProcessFault {
+                detail: "herdr worker registry mutex poisoned".into(),
+            })?
+            .remove(&handle.attempt_id.0);
+        let output = match stored {
+            Some(text) => text,
+            None => handle
+                .pane_id
+                .as_deref()
+                .and_then(|pane| self.adapter.read_output(pane).ok())
+                .unwrap_or_default(),
+        };
+        Ok(HarnessOutcome {
+            exit_code: 0,
+            output_redacted: output,
+            worktree_changed: true,
+        })
     }
 }
 

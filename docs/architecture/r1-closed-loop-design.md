@@ -1,10 +1,12 @@
 # Meshloop Release 1 — Closed-Loop Single-Writer Orchestration
 
-> **Historical design input** for ADR 0016. Audience: maintainers and agents,
-> not the product landing page. The “Meshloop today…” overview below describes
-> the **pre-R1 lab** and is not current product. What actually works:
-> [implementation status](../engineering/implementation-status.md). Operator
-> path: [Getting started](../start.md). Public map: [docs/README.md](../README.md).
+> **Do not implement from this file.** Historical design input only.
+> **Current product:** [Getting started](../start.md) · [ADR 0016](adr/0016-r1-closed-loop.md)
+> · [implementation status](../engineering/implementation-status.md).
+>
+> The body below still describes a fixture-first lab and `--allow-live-harness`.
+> Those claims are **superseded**: live Herdr is the product path; fixture is CI;
+> `meshloop:review-plan` is the plan gate. Audience: archaeology, not operators.
 
 | Field | Value |
 |---|---|

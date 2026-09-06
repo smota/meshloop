@@ -1,11 +1,21 @@
-# Proposed execution lifecycle
+# Execution lifecycle
 
-This is input to ADR 0005; accepting ADR 0005 accepts this table as part of the decision,
-not as a separately-approved document.
+Accepted with ADR 0005. Plan-level states (`AwaitingPlanReview` / `PlanAccepted` /
+`PlanDeclined`) are the ADR 0009 gate, implemented as `meshloop:review-plan`.
 
-## States
-pending -> ready -> running -> verifying -> awaiting-review -> accepted -> integrated.
-Side states reachable from running/verifying/awaiting-review/accepted: failed, cancelled, blocked.
+## Task states
+
+`pending → ready → running → verifying → awaiting-review → accepted → integrated`.
+Side states: `failed`, `cancelled`, `blocked`.
+
+Per-node states (plan gate is the section below):
+
+```mermaid
+flowchart LR
+  pending --> ready --> running --> verifying
+  verifying -->|diff ok| awaitingReview[awaiting-review]
+  awaitingReview -->|accept --as| accepted --> integrated
+```
 
 | From | To | Trigger | Precondition |
 |---|---|---|---|
@@ -42,13 +52,16 @@ land in `failed`/`cancelled` — never `accepted` or `integrated`, even partiall
 
 ## Plan-level gate (ADR 0009)
 Before any node in a graph is scheduled, the graph itself passes through
-`awaiting-plan-review -> plan-accepted`, parallel to and preceding the per-node states
-above — this gates the whole graph on human acceptance for any objective at or above the
-lowest risk tier, since decomposition quality is not mechanically checkable the way a
+`awaiting-plan-review`, then `meshloop:review-plan` `--accept` → `plan-accepted`,
+`--decline` → `plan-declined`, or `--adjust` → stay in `awaiting-plan-review` with a
+replacement graph. This is parallel to and preceding the per-node states above — it
+gates the whole graph on human acceptance for any objective at or above the lowest
+risk tier, since decomposition quality is not mechanically checkable the way a
 single node's deterministic evidence is. No node reaches `ready` while its graph is still
-`awaiting-plan-review`.
+`awaiting-plan-review` or `plan-declined`. A declined plan must `--adjust` before it can
+be accepted. `run --accept-plan` remains a one-step accept+start for the CLI.
 
-## Open questions for ADR 0005 acceptance
+## Open residuals after ADR 0005 acceptance
 Exactly-once integration semantics when the integration owner process itself crashes
 mid-merge, and whether `blocked` needs sub-reasons (dependency-failed vs. scope-revoked)
 as distinct states rather than one state with a reason field, are unresolved. Publication

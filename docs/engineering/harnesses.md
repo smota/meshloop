@@ -1,7 +1,11 @@
 # Development harness contract
 
 Selected set: codex, claude-code, pi, grok, agy. All five remain required for full
-cross-harness acceptance. AGENTS.md is canonical; no skills are installed or required.
+cross-harness acceptance. AGENTS.md is canonical for **developing Meshloop**.
+
+Product operator skills (`skills/meshloop-*`, slash `/meshloop:…`) are the R1 UX
+(ADR 0001 / 0017). They wrap the compiled binary only. They are not AFD discovery
+and do not replace AGENTS.md while hacking on this repo.
 
 At initialization, installed AFD 0.6.4 recognizes Codex, Claude Code, and Pi instruction
 surfaces. Its audit marks Grok unsupported and Agy discovery generated-only; a filename

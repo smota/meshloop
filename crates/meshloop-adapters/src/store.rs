@@ -15,7 +15,7 @@ use meshloop_engine::ports::{
     RoutingFeedbackStore, RunRow, RunStore, StoreError, TransitionRecord,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct SqliteStore {
     conn: Connection,
@@ -79,7 +79,8 @@ impl SqliteStore {
                  integrate_ref TEXT NOT NULL,
                  plan_json TEXT NOT NULL,
                  plan_sha256 TEXT NOT NULL,
-                 created_at TEXT NOT NULL
+                 created_at TEXT NOT NULL,
+                 review_note TEXT
              );
              CREATE TABLE IF NOT EXISTS attempts (
                  attempt_id INTEGER PRIMARY KEY,
@@ -92,7 +93,8 @@ impl SqliteStore {
                  image_name TEXT,
                  started_at TEXT,
                  ended_at TEXT,
-                 outcome TEXT
+                 outcome TEXT,
+                 pane_id TEXT
              );
              CREATE TABLE IF NOT EXISTS quota_state (
                  harness TEXT PRIMARY KEY,
@@ -102,6 +104,15 @@ impl SqliteStore {
              );",
         )
         .map_err(|e| StoreError::Io(e.to_string()))?;
+
+        if !column_exists(conn, "attempts", "pane_id")? {
+            conn.execute("ALTER TABLE attempts ADD COLUMN pane_id TEXT", [])
+                .map_err(|e| StoreError::Io(e.to_string()))?;
+        }
+        if !column_exists(conn, "runs", "review_note")? {
+            conn.execute("ALTER TABLE runs ADD COLUMN review_note TEXT", [])
+                .map_err(|e| StoreError::Io(e.to_string()))?;
+        }
 
         let existing: Option<i64> = conn
             .query_row("SELECT version FROM schema_meta LIMIT 1", [], |r| r.get(0))
@@ -132,6 +143,21 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    for name in names {
+        if name.map_err(|e| StoreError::Io(e.to_string()))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parse_state(s: &str) -> Result<TaskState, StoreError> {
@@ -174,6 +200,7 @@ fn parse_plan_state(s: &str) -> Result<PlanState, StoreError> {
     match s {
         "AwaitingPlanReview" => Ok(PlanState::AwaitingPlanReview),
         "PlanAccepted" => Ok(PlanState::PlanAccepted),
+        "PlanDeclined" => Ok(PlanState::PlanDeclined),
         other => Err(StoreError::Corrupt(format!("unknown plan state {other}"))),
     }
 }
@@ -391,13 +418,14 @@ impl RunStore for SqliteStore {
         let plan_state = match row.plan_state {
             PlanState::AwaitingPlanReview => "AwaitingPlanReview",
             PlanState::PlanAccepted => "PlanAccepted",
+            PlanState::PlanDeclined => "PlanDeclined",
         };
         self.conn
             .execute(
-                "INSERT INTO runs (graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO runs (graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at, review_note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(graph_id) DO UPDATE SET
-                    plan_state=?2, run_base=?3, integrate_ref=?4, plan_json=?5, plan_sha256=?6",
+                    plan_state=?2, run_base=?3, integrate_ref=?4, plan_json=?5, plan_sha256=?6, review_note=?8",
                 params![
                     row.graph_id,
                     plan_state,
@@ -406,6 +434,7 @@ impl RunStore for SqliteStore {
                     row.plan_json,
                     row.plan_sha256,
                     row.created_at,
+                    row.review_note,
                 ],
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
@@ -415,7 +444,7 @@ impl RunStore for SqliteStore {
     fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError> {
         self.conn
             .query_row(
-                "SELECT graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at
+                "SELECT graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at, review_note
                  FROM runs WHERE graph_id = ?1",
                 params![graph_id],
                 |r| {
@@ -427,12 +456,13 @@ impl RunStore for SqliteStore {
                         r.get::<_, String>(4)?,
                         r.get::<_, String>(5)?,
                         r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| StoreError::Io(e.to_string()))?
-            .map(|(gid, ps, rb, ir, pj, ph, ca)| {
+            .map(|(gid, ps, rb, ir, pj, ph, ca, note)| {
                 Ok(RunRow {
                     graph_id: gid,
                     plan_state: parse_plan_state(&ps)?,
@@ -441,6 +471,7 @@ impl RunStore for SqliteStore {
                     plan_json: pj,
                     plan_sha256: ph,
                     created_at: ca,
+                    review_note: note,
                 })
             })
             .transpose()
@@ -496,10 +527,10 @@ impl RunStore for SqliteStore {
     fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
         self.conn
             .execute(
-                "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, started_at, ended_at, outcome)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(attempt_id) DO UPDATE SET
-                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, started_at=?9, ended_at=?10, outcome=?11",
+                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, pane_id=?9, started_at=?10, ended_at=?11, outcome=?12",
                 params![
                     row.attempt_id.0,
                     row.graph_id,
@@ -509,6 +540,7 @@ impl RunStore for SqliteStore {
                     row.worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                     row.pid.map(|p| p as i64),
                     row.image_name,
+                    row.pane_id,
                     row.started_at,
                     row.ended_at,
                     row.outcome,
@@ -521,7 +553,7 @@ impl RunStore for SqliteStore {
     fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError> {
         self.conn
             .query_row(
-                "SELECT attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, started_at, ended_at, outcome
+                "SELECT attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome
                  FROM attempts WHERE attempt_id = ?1",
                 params![attempt_id.0],
                 |r| {
@@ -534,9 +566,10 @@ impl RunStore for SqliteStore {
                         worktree_path: r.get::<_, Option<String>>(5)?.map(PathBuf::from),
                         pid: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),
                         image_name: r.get(7)?,
-                        started_at: r.get(8)?,
-                        ended_at: r.get(9)?,
-                        outcome: r.get(10)?,
+                        pane_id: r.get(8)?,
+                        started_at: r.get(9)?,
+                        ended_at: r.get(10)?,
+                        outcome: r.get(11)?,
                     })
                 },
             )
@@ -594,6 +627,20 @@ impl RunStore for SqliteStore {
             .map_err(|e| StoreError::Io(e.to_string()))?;
         Ok(())
     }
+
+    fn update_attempt_pane(
+        &mut self,
+        attempt_id: AttemptId,
+        pane_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE attempts SET pane_id = ?1 WHERE attempt_id = ?2",
+                params![pane_id, attempt_id.0],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[allow(dead_code)]
@@ -616,7 +663,7 @@ pub fn plan_digest(json: &str) -> String {
 mod tests {
     use super::*;
     use meshloop_domain::evidence::DeterministicEvidence;
-    use meshloop_engine::ports::TierKey;
+    use meshloop_engine::ports::{AttemptRow, RunStore, TierKey};
 
     fn candidate() -> CandidateRef {
         CandidateRef {
@@ -624,6 +671,31 @@ mod tests {
             attempt_id: AttemptId(1),
             revision: "deadbeef".into(),
         }
+    }
+
+    #[test]
+    fn attempt_pane_id_round_trips() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let row = AttemptRow {
+            attempt_id: AttemptId(1),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: Some("grok".into()),
+            model_ref: Some("grok".into()),
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: None,
+            ended_at: None,
+            outcome: None,
+        };
+        store.save_attempt(&row).unwrap();
+        store
+            .update_attempt_pane(AttemptId(1), Some("w3:p2"))
+            .unwrap();
+        let loaded = store.load_attempt(AttemptId(1)).unwrap().unwrap();
+        assert_eq!(loaded.pane_id.as_deref(), Some("w3:p2"));
     }
 
     #[test]

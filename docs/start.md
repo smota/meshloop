@@ -1,123 +1,146 @@
 # Getting started
 
-**Audience:** an operator on **native Windows** with Rust 1.98 and Cargo.
-This is the fixture demo. It is not live Claude Code, Codex, Pi, Grok, or Agy.
+**This pane stays.** You are in Claude Code, Codex, Pi, Grok, or Agy inside
+Herdr 0.8. You are `meshloop:origin`. Meshloop opens **other** panes. If work
+starts in *this* pane, stop.
 
-Herdr is **not** required here. Do **not** pass `--allow-live-harness`.
-WSL2, macOS, Linux, and packaged installs are unverified. Concurrency is 1.
+The origin agent asks **Accept / Decline / Adjust in English**. You may answer
+in Portuguese (`aceitar` / `recusar` / `ajustar`). You should not have to type
+flags.
 
-If you only wanted to know whether Meshloop will drive your daily Claude or
-Codex session tonight: **not as an R1 stamp.** You can still inspect the loop.
+Build the engine in the Meshloop clone. **Run the loop in a throwaway git
+repo**, not in this product tree.
 
-## What this will and will not touch
+WSL2, packaging: unverified. Concurrency is 1. Fixture =
+[CI appendix](#ci-appendix-fixture-double).
 
-- Default store: `.meshloop/state.sqlite` in the target git repo.
-- Worktrees: `<repo-parent>/.meshloop-worktrees/<repo-dir>/` (override with
-  `--worktree-base`). They are **kept**. `run` does **not** merge to your
-  current branch.
-- Integrate is a separate command and requires `--accept-integrate`.
-- No credentials are stored. The example config ships none; do not add API keys.
-- `--as` on `accept` is an audit label, not a git author rewrite.
-- Meshloop does not install a Windows service.
+## What you should see
 
-Use a **throwaway git repo** or this clone — not a production checkout — the
-first time. This repository already gitignores `.meshloop/` and
-`.meshloop-worktrees/`. Meshloop does not rewrite a target repo’s gitignore.
+| State | What you should see | What you do |
+|---|---|---|
+| Ready | `herdr_server_running: true`, `origin_session` = **this** pane, no new split | Set `MESHLOOP_ORIGIN_*`, then `/meshloop:plan` |
+| Herdr down | `herdr_server_running: false`. Zero new panes | Start Herdr 0.8. Do not plan |
+| Plan in flight | A **planner** pane **not this one**; `meshloop-plan.json` | Stay. Wait for the 3-way question |
+| Accept | No worker yet. Status `PlanAccepted` | `/meshloop:run` |
+| Decline | Status `PlanDeclined`. No worker. `run` refuses | Stop, or Adjust — never `run --accept-plan` |
+| Adjust | Planner pane **again**; still awaiting review; question repeats | Answer again |
+| Run | **Worker** pane + extra worktree; **this branch unchanged** | `/meshloop:accept` then `/meshloop:resume` |
+| Origin mistake | Planner/worker/reviewer **in this pane** | Cancel. Fix origin. Do not continue |
 
-## 1. Clone and build the dummy worker
+`resume` merges into the **integrate worktree**. Only
+`meshloop integrate --into --accept-integrate` lands on a branch you name.
+
+## 0. Two directories
+
+1. **Engine (this clone):** `cargo build -p meshloop-cli`. Install skills from
+   `skills/` or `cargo run -p xtask -- bundle`. Optional: `meshloop mcp`.
+2. **Target (throwaway git repo):** copy `config/meshloop.example.toml` there,
+   keep only kinds you have logged in, and run every `/meshloop:*` **in that
+   repo**.
 
 ```text
+herdr status
 git clone https://github.com/smota/meshloop.git
 cd meshloop
-cargo build -p meshloop-adapters --bin fixture_harness
 cargo build -p meshloop-cli
-cargo run -p meshloop-cli -- --help
 ```
 
-You should see Release 1, the command list, default store
-`.meshloop/state.sqlite`, that worktrees are kept, that `run` does not merge,
-and that non-fixture harnesses need `--allow-live-harness`.
+Then `cd` to the throwaway repo (or pass `--config` at that repo). Default
+store: `.meshloop/state.sqlite`. Worktrees:
+`<repo-parent>/.meshloop-worktrees/`. No credentials in config. No Windows
+service.
 
-`meshloop` with no arguments prints **status**, not help.
+## 1. Doctor — name this pane
 
-## 2. Plan, run, accept
+Slash: `/meshloop:doctor`.
 
-Stay in the clone for the shortest path. Example config selects **only**
-`fixture` and points at `target/debug/fixture_harness.exe`. You are not
-authorizing Claude.
+You want `herdr_server_running: true`, Herdr 0.8.x, `origin_session` = this
+pane. If Herdr is down, tell the user and **stop**.
 
 ```text
-cargo run -p meshloop-cli -- plan --objective "Add a hello.txt file" --config config/meshloop.example.toml
+MESHLOOP_ORIGIN_HARNESS=codex
+MESHLOOP_ORIGIN_SESSION=w3:p1
 ```
 
-Read the plan. Meshloop checks that the graph is valid. It does **not** check
-that the breakdown is a good idea. Nothing is scheduled until you pass
-`--accept-plan`.
+Later slash skills inject these. Doctor does not split panes.
+
+## 2. Plan
+
+Stay supervisor. Intent can be conversation text or a `.md` (`--intent-file`).
+
+Slash: `/meshloop:plan`. A **planner** pane appears elsewhere. Meshloop checks
+the graph is a DAG, not whether the breakdown is wise. Nothing is scheduled.
+
+## 3. Review-plan — wait for their answer
+
+Slash: `/meshloop:review-plan`. Ask once, in English:
+
+> **Accept** this graph (then we can run), **Decline** it (stop, no worker), or
+> **Adjust** (planner runs again).
+
+Wait. Then send **exactly one** flag. Do not show CLI before they choose.
+
+| Reply | Stored | Next |
+|---|---|---|
+| Accept / aceitar | `PlanAccepted` | `/meshloop:run` |
+| Decline / recusar | `PlanDeclined` | `run` refuses until a later Accept |
+| Adjust / ajustar | still `AwaitingPlanReview` | planner again; ask again |
+
+CLI shortcut (debug, not the skill default): `meshloop run --plan … --accept-plan`.
+
+## 4. Run
+
+Only after Accept. Slash: `/meshloop:run`.
+
+A **worker** pane + attempt worktree. Your current branch does not move.
+Verification is the git diff against the attempt base.
 
 ```text
-cargo run -p meshloop-cli -- run --plan meshloop-plan.json --accept-plan --config config/meshloop.example.toml
-cargo run -p meshloop-cli -- status
+# node gate — not the plan gate
+/meshloop:accept   →  meshloop accept --task 1 --as sam
+/meshloop:resume
 ```
 
-Expected: the dummy worker ran in a **separate worktree**. Your current branch
-is unchanged. Status should show a task waiting for human accept. Verification
-is git-diff (plus an optional `verify_command`; the example leaves it empty).
+`you` is not a magic identity.
+
+## 5. Optional reviewers, then land
+
+`/meshloop:orchestrate` — two `meshloop:reviewer` panes from a pane **other
+than origin**. Synthesis is advisory. Node accept is still required.
 
 ```text
-cargo run -p meshloop-cli -- accept --task 1 --as sam
-cargo run -p meshloop-cli -- resume
-cargo run -p meshloop-cli -- status
+meshloop integrate --graph <id> --into <ref> --accept-integrate
 ```
 
-Replace `sam` with your name or handle. `you` is not a magic keyword.
+Without `--accept-integrate`, refuse. Leftovers: `.meshloop/` and
+`.meshloop-worktrees/`.
 
-## 3. Optional integrate
+<details>
+<summary>Raw engine CLI (debug)</summary>
 
-Only if you want the result on a branch you name:
+Skills inject `--json --origin-harness --origin-session`. Typed by hand:
 
 ```text
-cargo run -p meshloop-cli -- integrate --graph <id> --into <ref> --accept-integrate --config config/meshloop.example.toml
+meshloop doctor --json
+meshloop plan --objective "<intent>" --json --origin-harness <this> --origin-session <id> --config meshloop.toml
+meshloop review-plan --plan meshloop-plan.json --accept --as sam --json
+meshloop run --plan meshloop-plan.json --json --config meshloop.toml
 ```
 
-Without `--accept-integrate`, it must refuse.
+</details>
 
-## 4. Doctor and leftovers
+## CI appendix (fixture double)
+
+Offline `xtask check` uses a dummy worker, not Claude or Codex:
 
 ```text
-cargo run -p meshloop-cli -- doctor --json
-cargo run -p meshloop-cli -- roles --json
+cargo build -p meshloop-adapters --bin fixture_harness
+meshloop plan --objective "Add a hello.txt file" --config config/meshloop.fixture.toml
+meshloop run --plan meshloop-plan.json --accept-plan --config config/meshloop.fixture.toml --fixture-only
 ```
-
-R1 “healthy” means the fixture path and store are usable on native Windows —
-not that live harnesses are ready. Redact anything sensitive before sharing
-JSON.
-
-Leftovers you may delete after a throwaway run:
-
-- `.meshloop/` in the target repo
-- worktrees under `<repo-parent>/.meshloop-worktrees/`
-- the temp repo itself, if you used one
-
-If you followed these steps against this clone only, your other projects were
-not touched.
-
-## Live workers (not the R1 stamp)
-
-To invoke a real CLI agent you must:
-
-1. Configure a non-fixture harness yourself (executable + argv template; no
-   credentials in Meshloop config).
-2. Have Herdr available for pane transport.
-3. Pass `--allow-live-harness` (and origin session flags where required).
-
-Tests never split live panes. Completing that path is **not** required to
-believe Release 1. Fail-closed without the flag is expected.
-
-Call Meshloop from an agent session: [skills](../skills/README.md)
-(`/meshloop:plan`, MCP `meshloop mcp`). Origin session is supervisor-only.
 
 ## Next
 
 - [Docs hub](README.md)
 - [Product brief](product/brief.md)
-- [ADR 0016](architecture/adr/0016-r1-closed-loop.md)
+- [Skills](../skills/README.md)

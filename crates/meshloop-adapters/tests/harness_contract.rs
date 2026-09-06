@@ -123,6 +123,7 @@ fn collect_on_an_unknown_handle_is_unsupported_not_a_panic() {
     let handle = HarnessHandle {
         attempt_id: AttemptId(999),
         pid: None,
+        pane_id: None,
     };
     assert!(matches!(
         harness.collect(&handle),

@@ -1,61 +1,56 @@
-# Implementation status — 2026-09-06 Release 1 closed loop
+# Implementation status — 2026-09-06
 
-> Audience: maintainers and agents. Not the product landing page. Operators:
-> [Getting started](../start.md). Public map: [docs/README.md](../README.md).
+> Maintainers and agents. Operators: [Getting started](../start.md).
+> Hub: [docs/README.md](../README.md).
 
-Executor: Grok, authorized by the user to implement Release 1 autonomously on this
-workstation. This records what was actually built and verified, not a claim that the
-five parent runtime ADRs are accepted.
+Executor: Grok, under human product direction (live Herdr is the product path;
+fixture is the CI double; `meshloop:review-plan` is the plan gate).
 
 ## What exists and is verified
 
-Native Windows (`rustc 1.98.0`). `cargo run -p xtask -- check` is the acceptance bar:
-fmt, clippy `-D warnings`, `cargo test --workspace`.
+Native Windows (`rustc 1.98.0`).
 
-- **meshloop-domain:** task graph (incl. legal `graph_id`, reserved `TaskId(0)`,
-  `allowed_paths` / `empty_diff_ok`), lifecycle table, `satisfies` (presence) plus
-  `all_deterministic_passed` (exit codes), policy, `QuotaState::from_parts`.
-- **meshloop-engine:** QACR (missing headroom no longer scored as full capacity),
-  planner (worktree `meshloop-plan.json` then stdout), prompt envelope, `dispatch_with_fallback`
-  kept for fake tests, **`RunLoop` saga** drives `transition()` + event log, per-task
-  `replay_tasks`, git-diff verification, human accept at every tier, no auto-retry on resume.
-- **meshloop-adapters:** `CliHarness` (`{prompt_file}` and `{model_ref}`, mutex poison →
-  `ProcessFault`, capacity-exhausted stderr), git worktree from a start-point, commit/merge
-  in a named worktree, SQLite schema v2 (events/runs/attempts/quota, WAL on disk),
-  `WindowsProcessView`, `CommandCheckRunner`, fixture `--emit-graph` / `--prompt-file` /
-  `--noop`.
-- **meshloop-cli:** `plan`, `run --accept-plan`, `status`, `resume [--retry]`, `cancel`,
-  `inspect`, `accept --as`, `integrate --into --accept-integrate`. Default store
-  `.meshloop/state.sqlite`. Honest no-args banner. Live harness spawn refused without
-  `--allow-live-harness`.
+| Gate | Meaning |
+|---|---|
+| `cargo run -p xtask -- check` | fmt, clippy `-D warnings`, workspace tests (live Herdr **skips** if down) |
+| `cargo run -p xtask -- live` | Launch gate — **fails** if Herdr is down |
+| `cargo run -p xtask -- smoke` | Prefixed CLI / doctor / review-plan in `--help` |
+| `cargo run -p xtask -- bundle` | `dist/meshloop-session-bundle/` |
 
-End-to-end CLI tests drive the compiled binary against `fixture_harness` on disposable
-git repos: canned plan, `--accept-plan` gate, empty-diff failure, accept then resume
-to Integrated.
+- **meshloop-domain:** task graph, lifecycle including `PlanDeclined`,
+  `PlanDecision` (Accept / Decline / Adjust), evidence, policy, prefixed ids
+  (`meshloop:review-plan` → MCP `meshloop_review_plan`).
+- **meshloop-engine:** QACR, planner, **`RunLoop`** (`stage_plan` /
+  `decide_plan` / live or fixture dispatch), git-diff verify, no auto-retry on
+  resume. Default is live; `fixture_only` refuses non-fixture.
+- **meshloop-adapters:** `CliHarness` (CI), `HerdrWorkerHarness` (live panes),
+  Git worktrees, SQLite **schema v4** (`pane_id` on attempts, `review_note` on
+  runs, WAL).
+- **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
+  `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (origin pane),
+  `orchestrate`, `mcp`. Store: `.meshloop/state.sqlite`.
 
-## Session control plane (ADR 0017) — 2026-09-06
+Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
+accept+resume, review-plan accept/decline/adjust. Live tests may split
+**non-origin** panes; they never split the supervisor pane.
 
-- Prefixed ids: `meshloop:plan|roles|doctor|orchestrate|mcp`, slash `/meshloop:…`, MCP `meshloop_…`.
-- Unprefixed `reviewer`/`planner`/… rejected at CLI.
-- Skills under `skills/meshloop-*`. Local MCP: `meshloop mcp`.
-- Herdr 0.8 adapter argv matches `pane split|run|close` (not the old `--session pane run`).
-- `doctor` probes `herdr status` read-only (no pane split).
-- `meshloop:orchestrate` pins the attempt worktree diff into `.meshloop/reviews/`, writes a two-`meshloop:reviewer` matrix, and with `--allow-live-harness --origin-session` launches Herdr panes (`split --no-focus` from a non-origin pane, `agent start --kind`, `prompt --wait`). Synthesis records `ModelReviewEvidence`. Human accept is still required. Tests never split panes.
-- `cargo run -p xtask -- smoke` and `-- bundle`.
+## Session control plane (ADR 0017)
 
-## Not done — do not treat these as implemented
+- Prefixed ids; unprefixed `reviewer` / `planner` rejected.
+- Skills under `skills/meshloop-*` (including `meshloop-review-plan`).
+- Doctor: `herdr status` + `pane current`; JSON `origin_session`.
+- Orchestrate: pin pack, two reviewer panes from a non-origin pane, synthesis.
+- Origin flags from argv or `MESHLOOP_ORIGIN_*`.
 
-- **No real dispatch against Claude Code, Codex, Pi, Grok, or Agy.** Probe may work;
-  invoke is gated on `--allow-live-harness` and is not an R1 stamp requirement.
-- **No live Herdr session.** Adapter argv exists; CLI does not compose it.
-- **`integrate --into` is implemented but not the default of `run`.** Operator branch is
-  untouched until that command.
-- **No WSL2/Linux verification. No packaging.**
-- **Tier assignment remains the unvalidated dependency-count heuristic** (does not
-  overwrite a human-supplied tier).
-- **Concurrency remains 1.** `max_retries` is maximum *attempts* per task.
+## Residuals — not product claims
+
+- WSL2 / packaging
+- Vendor quota numbers not queried
+- Tier assignment = dependency-count heuristic
+- Concurrency = 1
+- `integrate --into` is explicit, not the default of `run`
 
 ## Commit
 
-R1 closed loop and the `meshloop:` session control plane landed on `main` as
-`64430f2`. This file is the executor log of that work, not a public roadmap.
+Live-Herdr flip and `meshloop:review-plan` land on the working tree after
+`64430f2`. This file is the executor log, not a public roadmap.

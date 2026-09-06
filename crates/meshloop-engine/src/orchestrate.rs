@@ -1,6 +1,6 @@
 //! meshloop:orchestrate — pin evidence, assign/launch meshloop:reviewer leaves, synthesize.
-//! Live Herdr fan-out is opt-in (`--allow-live-harness`). Reviewers never write worktrees.
-//! Human accept remains a separate command.
+//! Live Herdr is the default when origin session is set and `--fixture-only` is absent.
+//! Reviewers never write worktrees. Human accept remains a separate command.
 
 use std::path::{Path, PathBuf};
 

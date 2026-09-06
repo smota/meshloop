@@ -99,6 +99,7 @@ mod tests {
             Ok(HarnessHandle {
                 attempt_id: AttemptId(1),
                 pid: None,
+                pane_id: None,
             })
         }
         fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {

@@ -1,0 +1,18 @@
+# CI / unit-test double. Not the product default.
+# Product config: config/meshloop.example.toml (live Herdr kinds).
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 2
+task_timeout_seconds = 300
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "target/debug/fixture_harness.exe"
+version_args = ["--version"]
+invoke_args_template = ["--prompt-file", "{prompt_file}"]
+model_ref = "fixture-model"
+model_tier = "top"

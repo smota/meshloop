@@ -1,8 +1,9 @@
 # Implementation plan
 
-> Audience: maintainers and agents. Not a public roadmap. Public map:
-> [docs/README.md](../README.md). Current built surface:
-> [implementation status](implementation-status.md).
+> **Superseded as status.** Sequencing notes only. What exists:
+> [implementation status](implementation-status.md). Operator path:
+> [Getting started](../start.md). ADR 0001 is Accepted: skills/MCP are UX;
+> the CLI is the engine, not the product front door.
 
 This is proposed sequencing, not an accepted ADR. For what has actually been built and
 verified as of 2026-09-05, see docs/engineering/implementation-status.md — Phases 0-7 below

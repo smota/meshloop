@@ -283,6 +283,20 @@ fn roles_json_is_prefixed_and_namespaced_alias_works() {
 }
 
 #[test]
+fn doctor_json_includes_origin_and_live_default() {
+    let output = meshloop()
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("meshloop:doctor"));
+    assert!(stdout.contains("origin_session"));
+    assert!(stdout.contains("live_default"));
+    assert!(stdout.contains("ci-double"));
+}
+
+#[test]
 fn unprefixed_reviewer_is_rejected() {
     let output = meshloop().args(["reviewer"]).output().expect("reviewer");
     assert!(!output.status.success());
@@ -322,7 +336,7 @@ fn orchestrate_prints_prefixed_reviewer_matrix() {
 }
 
 #[test]
-fn live_orchestrate_without_origin_session_is_refused() {
+fn orchestrate_without_origin_session_is_matrix_only() {
     let output = meshloop()
         .args([
             "orchestrate",
@@ -332,18 +346,17 @@ fn live_orchestrate_without_origin_session_is_refused() {
             "claude",
             "--model-b",
             "codex",
-            "--allow-live-harness",
             "--json",
         ])
         .output()
-        .expect("live without origin");
-    assert!(!output.status.success());
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
+        .expect("orchestrate without origin");
+    assert!(
+        output.status.success(),
+        "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(text.contains("origin-session"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"live_executed\": false"));
 }
 
 #[test]
@@ -420,5 +433,168 @@ fn orchestrate_pins_fixture_attempt_diff() {
         "expected evidence pack under {}",
         pack.display()
     );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn review_plan_requires_exactly_one_decision() {
+    let output = meshloop()
+        .args(["review-plan", "--plan", "meshloop-plan.json"])
+        .output()
+        .expect("review-plan");
+    assert!(!output.status.success());
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(err.contains("--accept"));
+    assert!(err.contains("--decline"));
+    assert!(err.contains("--adjust"));
+}
+
+#[test]
+fn review_plan_accept_then_run_without_accept_plan_flag() {
+    let dir = disposable_repo("review-accept");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"revacc","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let reviewed = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept", "--as", "sam", "--json", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("review-plan accept");
+    let stdout = String::from_utf8_lossy(&reviewed.stdout);
+    assert!(
+        reviewed.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    assert!(stdout.contains("meshloop:review-plan"));
+    assert!(stdout.contains("PlanAccepted"));
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(dir.join("worktrees"))
+        .output()
+        .expect("run after review-plan accept");
+    assert!(
+        run.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn review_plan_decline_blocks_run() {
+    let dir = disposable_repo("review-decline");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"revdec","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let reviewed = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args([
+            "--decline",
+            "--reason",
+            "scope too wide",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("review-plan decline");
+    assert!(reviewed.status.success());
+    let stdout = String::from_utf8_lossy(&reviewed.stdout);
+    assert!(stdout.contains("PlanDeclined"));
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run after decline");
+    assert!(!run.status.success());
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(err.contains("declined"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn review_plan_adjust_rewrites_and_stays_awaiting_review() {
+    let dir = disposable_repo("review-adjust");
+    let config_path = write_config(&dir, r#"["--emit-graph"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"revadj","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let reviewed = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args([
+            "--adjust",
+            "--objective",
+            "split into smaller tasks",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("review-plan adjust");
+    let stdout = String::from_utf8_lossy(&reviewed.stdout);
+    assert!(
+        reviewed.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    assert!(stdout.contains("AwaitingPlanReview"));
+    assert!(stdout.contains("adjust"));
     fs::remove_dir_all(&dir).ok();
 }

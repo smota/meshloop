@@ -1,11 +1,12 @@
 # 0005 Execution, transport, isolation, and recovery
 
-- Status: Proposed
-- Implementation: in-progress — state machine, attempt/idempotency, and event-log replay/reconciliation implemented and tested; Git worktree isolation implemented and tested against disposable repos; Herdr CLI argument construction implemented and unit-tested but never exercised against a live herdr session; no git integration/merge-back yet. See docs/engineering/implementation-status.md.
+- Status: Accepted
+- Implementation: implemented for R1 — state machine, kept worktrees, integrate worktree, Herdr CLI transport composed for live workers, `pane_id` on attempts. Residual: concurrency remains 1; native Herdr protocol still deferred.
 - Date: 2026-09-05
+- Accepted: 2026-09-06
 - Author/executor: Claude (Sonnet 5), consolidated from prior Codex/user planning; absorbs former ADRs 0004 (herdr transport) and 0006 (isolation and integration)
-- Reviewer: pending
-- Approval evidence: none for this runtime decision
+- Decision owner: Samuel
+- Approval evidence: user approved the 2026-09-06 launch plan (Herdr is the live transport)
 - Supersedes: none
 - Superseded by: none
 

@@ -23,7 +23,9 @@ Public map: [docs/README.md](../README.md). R1 is a named subset — see
 - ML-013: Require explicit human acceptance of a produced task graph before scheduling any
   of its nodes, for any objective at or above the lowest risk tier — decomposition quality
   is not mechanically verifiable.
-- ML-014: Treat the compiled CLI as the sole functional entry point to every capability;
-  any convenience wrapper (skill or otherwise) must add zero engine-side logic or dependency.
+- ML-014: Treat the compiled CLI as the sole **engine** (every capability's saga lives
+  in the binary); any convenience wrapper (skill or otherwise) must add zero engine-side
+  logic or dependency. R1 operator UX is those wrappers (`meshloop:` skills + local MCP),
+  per ADR 0001.
 
 Each implementation task must add concrete scenarios and link applicable ADRs before coding.

@@ -7,128 +7,100 @@
 # Meshloop
 
 Turn the CLI coding agents you already pay for into one verified engineering
-loop — locally, without storing credentials.
+loop — locally, from inside the session you are already in, without storing
+credentials.
 
 [![License](https://img.shields.io/github/license/smota/meshloop?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.1.0-informational?style=flat-square)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.98-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#status)
-[![R1](https://img.shields.io/badge/R1-fixture--backed-C4843C?style=flat-square)](#status)
+[![R1](https://img.shields.io/badge/R1-live--Herdr-1A6B66?style=flat-square)](#status)
 [![unsafe](https://img.shields.io/badge/unsafe-forbidden-1A6B66?style=flat-square)](Cargo.toml)
 
-> **Release 1** is a fixture-backed, single-writer closed loop on native Windows.
-> Completing a live Claude Code, Codex, Pi, Grok, or Agy dispatch is **not** the
-> R1 stamp. Concurrency is 1. No packaging. WSL2 is unverified.
+> **Release 1** (native Windows + Herdr 0.8): you stay in Claude Code, Codex,
+> Pi, Grok, or Agy. Meshloop opens **other** panes for planner, worker, and
+> reviewers, verifies the git diff, and will not merge until you accept.
+> Fixture subprocess is CI, not the product.
+
+| You — this pane (`meshloop:origin`) | Meshloop — other Herdr panes |
+|---|---|
+| Direct. Never implement the work here. | Planner, worker (+ git worktree), reviewers |
+| Never split. Bind `MESHLOOP_ORIGIN_SESSION` from `/meshloop:doctor`. | Isolation is the worktree, not the pane |
+
+If a planner, worker, or reviewer appears **in this pane**, stop. Origin was
+not injected.
+
+## The loop (one story)
+
+1. `/meshloop:doctor` — bind origin (this pane id). If Herdr is down, stop.
+2. `/meshloop:plan` — planner pane **elsewhere**; graph file.
+3. `/meshloop:review-plan` — **Accept / Decline / Adjust** (English prompt; answer in any language).
+4. `/meshloop:run` — **after Accept only** — worker pane + worktree; **current branch unchanged**.
+5. `/meshloop:accept` then `/meshloop:resume` — node merges into the **integrate worktree**, not your branch.
+6. Optional `/meshloop:orchestrate` — two reviewer panes, never origin.
+7. Optional `meshloop integrate --into --accept-integrate` — only step that lands on a branch you name.
+
+Full steps, throwaway repo, and failure screens: **[Getting started](docs/start.md)**.
 
 ## Why
 
 **Idle subscriptions.** Codex, Claude Code, Pi, Grok, and Agy are flat-rate
-CLI subscriptions, not metered APIs. Used one at a time, that capacity sits idle
-or burns unevenly.
+CLI subscriptions, not metered APIs.
 
-**Unverified scripts.** Ad-hoc glue can spawn a session. It does not plan a
-task graph, isolate the diff, or recover when the session dies mid-task.
+**Unverified scripts.** Spawning a session is easy. Planning a graph, isolating
+the diff, and recovering mid-task is not.
 
-**Local, human-gated.** Meshloop plans one engineering objective, runs workers
-in git worktrees, verifies the diff, and will not merge until you accept. It
-uses sessions you already authenticated. It does not store credentials.
+**Local, human-gated.** Meshloop uses logins you already have. It does not
+store credentials. It does not merge to `main` by itself.
 
-The five names above are the **intended configured set**, not a compatibility
-matrix. Selection is not discovery, and discovery is not invoke.
+The five names are the **intended configured set**, not a compatibility matrix.
 
 ## Status
 
 | Capability | Release 1 (0.1.0) |
 |---|---|
-| Fixture-backed `plan` → `run --accept-plan` → verify git diff → `accept` → `resume` → `integrate` | Yes, native Windows |
-| Commands: `plan`, `run`, `status`, `resume`, `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor`, `orchestrate`, `mcp` | Present |
-| Human gates: `--accept-plan`, `accept --as`, `integrate --accept-integrate` | Required |
-| Credentials | Not stored |
-| Current branch | Untouched until explicit integrate |
-| Live Claude / Codex / Pi / Grok / Agy dispatch | **Not an R1 stamp.** Opt-in `--allow-live-harness` only |
-| Live Herdr pane split | Fail-closed; tests never split panes |
-| Concurrency | 1 |
-| Packaging / crates.io | No (`publish = false`) |
-| WSL2 / Linux / macOS | Unverified |
-| Runtime ADRs 0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017 | Proposed (human acceptance pending) |
-
-Source of truth for what exists: [implementation status](docs/engineering/implementation-status.md).
-R1 subset: [ADR 0016](docs/architecture/adr/0016-r1-closed-loop.md).
+| Loop above, live Herdr workers | Yes, native Windows + Herdr 0.8 (`xtask live` is the launch gate) |
+| Commands | `plan`, `review-plan`, `run`, `status`, `resume`, `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor`, `orchestrate`, `mcp` |
+| Plan gate | `review-plan` Accept / Decline / Adjust (CLI shortcut: `run --accept-plan`) |
+| Node / land gates | `accept --as` then `resume`; `integrate --accept-integrate` |
+| Origin pane | Supervisor-only; never split |
+| Fixture | CI double (`--fixture-only`) |
+| Credentials / your branch | Not stored / untouched until integrate |
+| Concurrency / packaging / WSL2 / queried quota | 1 / no / unverified / not queried |
+| ADRs 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 | Accepted |
 
 ## Safety
 
-- **No credential store.** Config must not contain API keys. Meshloop invokes
-  CLIs you already logged into.
-- **`run` does not merge** onto your current branch. Workers use extra git
-  worktrees. Default base: `<repo-parent>/.meshloop-worktrees/<repo-dir>/`.
-- **Integrate is explicit:** `meshloop integrate --graph <id> --into <ref> --accept-integrate`.
-- **One worker.** It will not fan out five live agents against your tree.
-- **No Windows service.** Foreground CLI; it exits.
-- **Throwaway first.** Use a disposable git repo, not a production checkout.
-
-`--as` on `accept` is an **audit label** (who accepted), not a git author rewrite.
-
-## Try it (fixture demo)
-
-Native Windows, Rust 1.98, git, Cargo. This path uses the **dummy** worker
-`fixture_harness`. It is not Claude or Codex.
-
-```text
-git clone https://github.com/smota/meshloop.git
-cd meshloop
-cargo build -p meshloop-adapters --bin fixture_harness
-cargo build -p meshloop-cli
-cargo run -p meshloop-cli -- --help
-cargo run -p meshloop-cli -- plan --objective "Add a hello.txt file" --config config/meshloop.example.toml
-cargo run -p meshloop-cli -- run --plan meshloop-plan.json --accept-plan --config config/meshloop.example.toml
-cargo run -p meshloop-cli -- status
-cargo run -p meshloop-cli -- accept --task 1 --as sam
-cargo run -p meshloop-cli -- resume
-```
-
-Default store: `.meshloop/state.sqlite` (gitignored in this repo). Worktrees are
-kept. Do **not** pass `--allow-live-harness` on this path.
-
-Full fixture loop, leftover paths, and optional integrate:
-**[Getting started](docs/start.md)**.
-
-No-args `meshloop` prints **status**, not help.
-
-## What Release 1 is not
-
-- Not a cloud service, credential manager, or background service
-- Not `cargo install`, crates.io, Homebrew, or a GitHub Release binary
-- Not a verified multi-harness runtime
-- Not a Herdr fork, and not a replacement for the CLIs you already use
-- Not automatic merge to `main`
-
-Herdr is **not** required for the fixture demo. Live workers need Herdr **and**
-`--allow-live-harness`. That path is opt-in and unstamped.
+- No API keys in config. No Windows service.
+- Workers use extra git worktrees under `<repo-parent>/.meshloop-worktrees/`.
+- `--as` is an audit label, not a git author rewrite.
+- Throwaway git repo first — **not** this product clone as the target tree.
+- One writer at a time.
 
 ## Documentation
 
-Start at the **[docs hub](docs/README.md)**.
-
-| If you want | Read |
-|---|---|
-| Problem and value | [Product brief](docs/product/brief.md) |
-| Operator steps | [Getting started](docs/start.md) |
-| Call Meshloop from an agent session | [Skills / session control plane](skills/README.md) |
-| What was actually built | [Implementation status](docs/engineering/implementation-status.md) |
+**[Docs hub](docs/README.md)** ·
+**[Getting started](docs/start.md)** ·
+**[Product brief](docs/product/brief.md)** ·
+**[Skills](skills/README.md)**
 
 ## Development
 
-Pinned Rust **1.98.0** with rustfmt and Clippy. This workstation uses mise; no
-global tool installation is part of contributing.
+Pinned Rust **1.98.0**. Mise-managed toolchain; no global installs.
 
 ```text
-cargo run -p xtask -- check
+cargo build -p meshloop-cli
+cargo run -p xtask -- check    # fmt, clippy, fixture tests
 cargo run -p xtask -- smoke
 cargo run -p xtask -- bundle
+cargo run -p xtask -- live     # fails if Herdr is down
 ```
 
-`check` is the acceptance bar: fmt, clippy `-D warnings`, `cargo test --workspace`.
-See [testing](docs/engineering/testing.md) and [AGENTS.md](AGENTS.md).
+The binary is the **engine**. Skills/MCP are the **operator surface**.
+No-args `meshloop` prints **status**, not help.
+
+Live tests may split **non-origin** panes. See
+[testing](docs/engineering/testing.md) and [AGENTS.md](AGENTS.md).
 
 ## License, trademarks, provenance
 

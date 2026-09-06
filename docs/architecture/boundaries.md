@@ -11,7 +11,7 @@ Declared path dependencies enforce direction at crate level. Module folders will
 when behavior is implemented; empty product modules do not imply supported functionality.
 Crate-local integration tests own component contracts; root scenarios are wired through xtask.
 
-## Proposed module breakdown
+## Module breakdown
 
 Named here so implementation has a concrete target; each module is still added only when
 its owning ADR is accepted and its behavior is actually implemented, per the rule above.

@@ -1,28 +1,37 @@
 # Meshloop skills (session control plane)
 
-Human map: [docs/README.md](../docs/README.md). This page is the session control
-plane (slash / MCP / CLI wrappers). Skills wrap the compiled `meshloop` binary
-only (ML-014).
+Operator steps: [Getting started](../docs/start.md). Hub:
+[docs/README.md](../docs/README.md).
 
-Every skill, slash command, and MCP tool is **prefixed**. Bare names (`plan`,
-`reviewer`, `scout`, `orchestrate`) are rejected so they cannot collide with Pi,
-Claude Code, Grok, or other harness vocabularies.
+You stay in this pane. Call, in order:
 
-| Canonical id | Slash | MCP tool | CLI |
+`/meshloop:doctor` → `/meshloop:plan` → `/meshloop:review-plan` → `/meshloop:run`
+
+Every live command injects `--origin-harness` / `--origin-session` from
+`MESHLOOP_ORIGIN_*` or doctor JSON so **this pane is not split**. Live workers
+use Herdr. `--fixture-only` is CI.
+
+Skills wrap `meshloop.exe` only (ML-014). **No saga in SKILL.md.**
+
+Bare names (`plan`, `reviewer`, `scout`) are rejected.
+
+## Slash skills (SKILL.md in this pack)
+
+| Canonical id | Slash | MCP | CLI |
 |---|---|---|---|
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` |
+| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` |
 | `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` |
-| `meshloop:resume` | `/meshloop:resume` | `meshloop_resume` | `meshloop resume` |
-| `meshloop:inspect` | `/meshloop:inspect` | `meshloop_inspect` | `meshloop inspect` |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` |
 | `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` |
-| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` |
 
-They contain no saga.
+## Engine-only (no skill file yet)
+
+`resume` · `inspect` · `cancel` · `integrate` · `mcp` — still `meshloop <verb>`
+and MCP `meshloop_<verb>` where listed by `meshloop mcp`. Integrate is the only
+command that merges onto a branch you name (`--accept-integrate`).
 
 Local MCP: `meshloop mcp` (stdio JSON-RPC).
-
-Origin session is **supervisor-only**. Pass `--origin-harness` and `--origin-session`.
-Live workers require Herdr + `--allow-live-harness`.

@@ -22,7 +22,8 @@ pub fn format_plan(graph: &TaskGraph) -> String {
             deps.join(", ")
         );
     }
-    out += "Re-run with `meshloop run --plan <file> --accept-plan` after reviewing the above.\n";
+    out += "Next: `meshloop review-plan --plan <file> --accept|--decline|--adjust`.\n\
+            Or start in one step with `meshloop run --plan <file> --accept-plan`.\n";
     out
 }
 
@@ -75,10 +76,10 @@ pub fn format_status(status: &RunStatus) -> String {
 }
 
 pub fn banner() -> String {
-    "Meshloop Release 1: closed-loop single-writer orchestration (native Windows).\n\
-     Commands: plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate.\n\
+    "Meshloop: agent-session control plane (native Windows). Binary is the engine; skills/MCP are the UX.\n\
+     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor.\n\
      Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
-     Non-fixture harnesses require --allow-live-harness.\n"
+     Live workers use Herdr. --fixture-only is the CI subprocess double.\n"
         .into()
 }
 

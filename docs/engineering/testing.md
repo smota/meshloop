@@ -5,12 +5,14 @@ Clippy with warnings denied, and workspace tests, offline and locked where appli
 After adding dependencies, fetch approved locked dependencies separately before offline checks.
 
 Classify tests by behavior: pure domain unit tests, engine tests using controlled ports,
-adapter contract tests with synthetic fixtures, and explicitly authorized live integration
-tests against disposable repositories. `tests/scenarios/scaffold_cli.rs` covers help,
-version, missing-argument rejection, and unprefixed-role rejection. End-to-end CLI tests
-drive the compiled binary against `fixture_harness` on disposable git repos (canned plan,
-`--accept-plan` gate, empty-diff failure, accept then resume to Integrated). Live pane
-splits are not an R1 test requirement.
+adapter contract tests with synthetic fixtures, and live Herdr tests against a running
+server. `tests/scenarios/scaffold_cli.rs` covers help, version, missing-argument
+rejection, and unprefixed-role rejection. End-to-end CLI tests drive the compiled
+binary against `fixture_harness` on disposable git repos (canned plan, `--accept-plan`
+gate, empty-diff failure, accept then resume to Integrated). Live tests may split
+**non-origin** panes when `herdr status` is running; they skip if the server is down.
+`cargo run -p xtask -- live` **fails** if Herdr is down (launch gate). Never split
+the origin supervisor pane.
 
 Future critical cases: DAG cycles, dependency failure, concurrency limits, cancellation,
 timeout, fallback exhaustion, recovery, stale evidence, path escape, test tampering,

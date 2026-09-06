@@ -7,14 +7,16 @@ description: Pin evidence and assign fresh meshloop:reviewer leaves. Not /skill:
 
 You are `meshloop:origin` (supervisor). Do not review in this session.
 
-Without `--allow-live-harness`: Meshloop pins the attempt pack and prints the matrix (CI).
-
-With live Herdr:
+If `MESHLOOP_ORIGIN_SESSION` is unset, run `/meshloop:doctor` first. Live
+reviewers require origin so this pane is never split. Without origin, Meshloop
+prints the matrix only (CI).
 
 ```text
-meshloop orchestrate --task <id> --model-a claude --model-b codex --json \
-  --allow-live-harness --origin-harness <this> --origin-session <pane-id> \
+meshloop orchestrate --task <id> --model-a claude --model-b grok --json \
+  --origin-harness <this> --origin-session <pane-id> \
   --config <toml> --db <sqlite>
 ```
 
-`--origin-session` is required when live so this pane is never split. Reviewers are `meshloop:reviewer` leaves. Human `/meshloop:accept` still required. Do not poll; one CLI call. Do not use unprefixed `reviewer`.
+Reviewers are `meshloop:reviewer` leaves. Human `/meshloop:accept` still
+required. Do not poll; one CLI call. Do not use unprefixed `reviewer`.
+`--fixture-only` skips live panes.

@@ -125,6 +125,7 @@ impl HarnessCapabilities for CliHarness {
         Ok(HarnessHandle {
             attempt_id: spec.attempt_id,
             pid: Some(pid),
+            pane_id: None,
         })
     }
 

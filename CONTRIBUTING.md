@@ -2,16 +2,17 @@
 
 **Before you start:** read the [docs hub](docs/README.md), then this file.
 If an agent will author the diff, it must also read [AGENTS.md](AGENTS.md).
-Run `cargo run -p xtask -- check` from the repository root. Tests must not
-split live Herdr panes. Intentional contributions are Apache-2.0 (see below).
+Run `cargo run -p xtask -- check` from the repository root. Live tests may
+split **non-origin** Herdr panes; they must never split the supervisor pane.
+`xtask live` is the launch gate. Intentional contributions are Apache-2.0
+(see below).
 
-Release 1 is a fixture-backed closed loop on native Windows. Do not “fix”
-documented limitations by claiming live Claude, Codex, Pi, Grok, or Agy
-dispatch in a pull request.
+Release 1 is a live-Herdr closed loop on native Windows. Fixture is the CI
+double. Do not reintroduce `--allow-live-harness` as a product gate.
 
 ## Before you write
 
-1. Read [Getting started](docs/start.md) if you have not run the fixture loop.
+1. Read [Getting started](docs/start.md) if you have not run the in-session loop.
 2. Open an issue with a template ([bug](.github/ISSUE_TEMPLATE/bug.yml),
    [docs](.github/ISSUE_TEMPLATE/docs.yml),
    [R1 limitation](.github/ISSUE_TEMPLATE/limitation.yml),
@@ -31,7 +32,7 @@ is first-class.
 Good first surfaces that do not require rewriting the engine: fixture
 scenarios, doctor probes, docs/status contradictions, skills that wrap the
 compiled CLI only, redaction tests, Windows process-view edge cases. You do
-not need a five-harness local setup. R1 is fixture-backed.
+not need a five-harness local setup. Live workers need Herdr; fixture covers CI.
 
 ## Development setup
 

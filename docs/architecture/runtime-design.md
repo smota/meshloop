@@ -7,12 +7,17 @@ Update this file when implementation reveals a detail was wrong or incomplete, w
 new ADR — unless the change alters the decision itself, in which case it goes through the
 owning ADR as a successor, per docs/architecture/adr/README.md.
 
-The full mechanism below is the v1 *target*. Release 1 implements the subset in ADR 0016 (native Windows, one sequential writer, fixture-backed closed loop, Herdr uncomposed). Do not read this file as a claim that every paragraph is product.
+The full mechanism below is the v1 *target*. Release 1 implements the subset in
+ADR 0016 (native Windows, one sequential writer, live Herdr workers, fixture as
+CI double, `meshloop:review-plan` as the plan gate). Residuals (WSL2, concurrency
+> 1, packaging, queried quota) are named in implementation-status.md. Do not read
+unverified paragraphs as product. Operator path: [Getting started](../start.md).
 
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
-**Platforms.** Tier A (supported at v1): Windows 10/11 native, and Linux via WSL2 running
-on that same Windows host — not a separate bare-metal Linux machine. For a given run, the
+**Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes
+Linux via WSL2 on that same host — not a separate bare-metal Linux machine.
+**WSL2 is unverified in R1** (implementation-status.md). For a given run, the
 Meshloop binary, the target repository's worktrees, the Herdr instance, and the harness
 CLIs must all stay on one side of the Windows/WSL boundary: crossing it (a worktree on the
 Windows filesystem accessed from inside WSL via `/mnt/c`, or the reverse via `\\wsl$`) hits
@@ -33,16 +38,12 @@ workspace `Cargo.toml` version plus a git tag; a WSL user runs the Linux binary 
 their WSL distribution like any other Linux tool, never the Windows `.exe` reaching across
 the boundary. Tier B (macOS) packaging is decided when Tier B moves toward support.
 
-**Operating surface.** The compiled `meshloop` binary, via meshloop-cli, is the sole
-functional entry point — every capability (planning, routing, dispatch, verification,
-recovery) must be reachable and testable through it alone, with no hidden dependency on any
-harness's own skill system. Optionally, and only as a zero-engine-dependency convenience
-layer, two thin skills may be added later, named for the product: `mesh-loop-planner`
-(wraps `meshloop plan --objective ...`, stops at the `awaiting-plan-review` gate) and
-`mesh-loop-executor` (wraps `meshloop run ...` on an already plan-accepted graph). Each is
-a single SKILL.md with no orchestration logic of its own — removing either must not change
-what Meshloop can do, only how conveniently a human reaches one of its two natural entry
-points. Building them is out of scope for the initial bootstrap.
+**Operating surface (ADR 0001, Accepted).** The compiled `meshloop` binary is the
+sole **engine**: every capability must be reachable through it, with no saga in
+wrappers. R1 **operator UX** is the `meshloop:` skill pack plus local MCP
+(`meshloop mcp`, slash `/meshloop:plan`). Skills add zero engine logic (ML-014).
+Unprefixed harness words (`plan`, `reviewer`) are rejected. Live workers are
+Herdr panes; fixture is the CI double.
 
 **Scope.** A single local Git repository, already checked out, known working-tree state,
 one Meshloop instance at a time. Multi-repository orchestration, remote repositories, and

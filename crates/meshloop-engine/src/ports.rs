@@ -29,6 +29,7 @@ pub struct TransitionRecord {
 pub struct HarnessHandle {
     pub attempt_id: AttemptId,
     pub pid: Option<u32>,
+    pub pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +153,7 @@ pub enum ReviewError {
     Timeout,
 }
 
-/// Live meshloop:orchestrate transport. Fixture tests must not call this.
+/// Live Herdr worker/reviewer transport. Never split the origin supervisor pane.
 pub trait ReviewTransport {
     fn split_pane(&self, cwd: &Path, avoid_pane: Option<&str>) -> Result<String, ReviewError>;
     fn start_agent(&self, name: &str, kind: &str, pane_id: &str) -> Result<(), ReviewError>;
@@ -175,6 +176,7 @@ pub struct RunRow {
     pub plan_json: String,
     pub plan_sha256: String,
     pub created_at: String,
+    pub review_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +189,7 @@ pub struct AttemptRow {
     pub worktree_path: Option<PathBuf>,
     pub pid: Option<u32>,
     pub image_name: Option<String>,
+    pub pane_id: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub outcome: Option<String>,
@@ -269,6 +272,11 @@ pub trait RunStore: EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore
         attempt_id: AttemptId,
         pid: Option<u32>,
         image_name: Option<&str>,
+    ) -> Result<(), StoreError>;
+    fn update_attempt_pane(
+        &mut self,
+        attempt_id: AttemptId,
+        pane_id: Option<&str>,
     ) -> Result<(), StoreError>;
     fn graph_from_run(&self, graph_id: &str) -> Result<TaskGraph, StoreError> {
         let row = self

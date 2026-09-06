@@ -33,6 +33,9 @@ pub struct VerifyConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct HarnessConfig {
     pub executable: String,
+    /// Herdr `--kind` for live workers. Ignored for `fixture`.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub version_args: Vec<String>,
     #[serde(default)]
@@ -127,6 +130,28 @@ mod tests {
             .unwrap()
             .join("config/meshloop.example.toml");
         let config = load(&path).expect("example config should load");
+        assert!(!config.selected_harnesses.is_empty());
+        assert!(
+            config
+                .selected_harnesses
+                .iter()
+                .all(|n| n != "fixture" && config.harnesses.contains_key(n))
+        );
+        for name in &config.selected_harnesses {
+            let hc = &config.harnesses[name];
+            assert!(hc.kind.as_deref() == Some(name.as_str()) || hc.kind.is_some());
+        }
+    }
+
+    #[test]
+    fn fixture_config_loads_for_ci() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("config/meshloop.fixture.toml");
+        let config = load(&path).expect("fixture config should load");
         assert_eq!(config.selected_harnesses, vec!["fixture"]);
         assert!(config.harnesses.contains_key("fixture"));
     }

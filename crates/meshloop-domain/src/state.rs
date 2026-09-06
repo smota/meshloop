@@ -19,6 +19,14 @@ pub enum TaskState {
 pub enum PlanState {
     AwaitingPlanReview,
     PlanAccepted,
+    PlanDeclined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlanDecision {
+    Accept,
+    Decline,
+    Adjust,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,6 +51,12 @@ pub enum Event {
 pub struct IllegalTransition {
     pub from: TaskState,
     pub event: Event,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IllegalPlanTransition {
+    pub from: PlanState,
+    pub decision: PlanDecision,
 }
 
 /// Pure function of (current state, event) -> next state, mirroring
@@ -74,15 +88,19 @@ pub fn transition(from: TaskState, event: Event) -> Result<TaskState, IllegalTra
 }
 
 /// The graph-level gate from runtime-design.md §5: no node may reach `Ready` while its
-/// graph is still `AwaitingPlanReview`.
-pub fn plan_transition(from: PlanState, accepted: bool) -> Result<PlanState, IllegalTransition> {
-    match (from, accepted) {
-        (PlanState::AwaitingPlanReview, true) => Ok(PlanState::PlanAccepted),
-        (PlanState::AwaitingPlanReview, false) => Err(IllegalTransition {
-            from: TaskState::Blocked,
-            event: Event::ReviewRejected,
-        }),
-        (PlanState::PlanAccepted, _) => Ok(PlanState::PlanAccepted),
+/// graph is still `AwaitingPlanReview`. Decline is terminal until Adjust reopens review.
+pub fn plan_transition(
+    from: PlanState,
+    decision: PlanDecision,
+) -> Result<PlanState, IllegalPlanTransition> {
+    match (from, decision) {
+        (PlanState::AwaitingPlanReview, PlanDecision::Accept) => Ok(PlanState::PlanAccepted),
+        (PlanState::AwaitingPlanReview, PlanDecision::Decline) => Ok(PlanState::PlanDeclined),
+        (PlanState::AwaitingPlanReview, PlanDecision::Adjust) => Ok(PlanState::AwaitingPlanReview),
+        (PlanState::PlanAccepted, PlanDecision::Accept) => Ok(PlanState::PlanAccepted),
+        (PlanState::PlanDeclined, PlanDecision::Decline) => Ok(PlanState::PlanDeclined),
+        (PlanState::PlanDeclined, PlanDecision::Adjust) => Ok(PlanState::AwaitingPlanReview),
+        (from, decision) => Err(IllegalPlanTransition { from, decision }),
     }
 }
 
@@ -175,15 +193,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_gate_blocks_until_accepted() {
+    fn plan_gate_accept_decline_adjust() {
         assert_eq!(
-            plan_transition(PlanState::AwaitingPlanReview, true),
+            plan_transition(PlanState::AwaitingPlanReview, PlanDecision::Accept),
             Ok(PlanState::PlanAccepted)
         );
-        assert!(plan_transition(PlanState::AwaitingPlanReview, false).is_err());
         assert_eq!(
-            plan_transition(PlanState::PlanAccepted, false),
+            plan_transition(PlanState::AwaitingPlanReview, PlanDecision::Decline),
+            Ok(PlanState::PlanDeclined)
+        );
+        assert_eq!(
+            plan_transition(PlanState::AwaitingPlanReview, PlanDecision::Adjust),
+            Ok(PlanState::AwaitingPlanReview)
+        );
+        assert_eq!(
+            plan_transition(PlanState::PlanAccepted, PlanDecision::Accept),
             Ok(PlanState::PlanAccepted)
+        );
+        assert!(plan_transition(PlanState::PlanAccepted, PlanDecision::Decline).is_err());
+        assert!(plan_transition(PlanState::PlanAccepted, PlanDecision::Adjust).is_err());
+        assert!(plan_transition(PlanState::PlanDeclined, PlanDecision::Accept).is_err());
+        assert_eq!(
+            plan_transition(PlanState::PlanDeclined, PlanDecision::Adjust),
+            Ok(PlanState::AwaitingPlanReview)
         );
     }
 }

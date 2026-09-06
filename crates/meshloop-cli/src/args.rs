@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use meshloop_domain::role::MeshloopId;
+use meshloop_domain::state::PlanDecision;
 use meshloop_engine::origin::Origin;
 
 #[derive(Debug, Clone)]
@@ -30,13 +31,26 @@ pub enum Command {
         db: Option<PathBuf>,
         intent_file: Option<PathBuf>,
     },
+    ReviewPlan {
+        plan: PathBuf,
+        decision: PlanDecision,
+        reason: Option<String>,
+        identity: Option<String>,
+        objective: String,
+        intent_file: Option<PathBuf>,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+        out: Option<PathBuf>,
+        scope: Option<String>,
+        fixture_only: bool,
+    },
     Run {
         plan: PathBuf,
         accept_plan: bool,
         config: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
         db: Option<PathBuf>,
-        allow_live_harness: bool,
+        fixture_only: bool,
     },
     Resume {
         graph: Option<String>,
@@ -44,7 +58,7 @@ pub enum Command {
         config: Option<PathBuf>,
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
-        allow_live_harness: bool,
+        fixture_only: bool,
     },
     Cancel {
         graph: Option<String>,
@@ -83,7 +97,7 @@ pub enum Command {
         worktree_base: Option<PathBuf>,
         model_a: String,
         model_b: String,
-        allow_live_harness: bool,
+        fixture_only: bool,
     },
 }
 
@@ -106,7 +120,7 @@ fn verb(raw: &str) -> String {
 
 pub fn parse(args: &[String]) -> Result<Invocation, String> {
     let json = has_flag(args, "--json");
-    let origin = Origin::from_flags(
+    let origin = Origin::from_flags_or_env(
         flag_value(args, "--origin-harness"),
         flag_value(args, "--origin-session"),
     );
@@ -143,6 +157,53 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 intent_file: flag_value(rest, "--intent-file").map(PathBuf::from),
             })
         }
+        Some(v) if v == "review-plan" => {
+            let rest = &args[1..];
+            let accept = has_flag(rest, "--accept");
+            let decline = has_flag(rest, "--decline");
+            let adjust = has_flag(rest, "--adjust");
+            let n = [accept, decline, adjust].into_iter().filter(|b| *b).count();
+            if n != 1 {
+                return Err(
+                    "meshloop:review-plan requires exactly one of --accept, --decline, or --adjust"
+                        .into(),
+                );
+            }
+            let decision = if accept {
+                PlanDecision::Accept
+            } else if decline {
+                PlanDecision::Decline
+            } else {
+                PlanDecision::Adjust
+            };
+            if decision == PlanDecision::Adjust
+                && flag_value(rest, "--objective")
+                    .unwrap_or_default()
+                    .is_empty()
+                && flag_value(rest, "--intent-file").is_none()
+                && flag_value(rest, "--reason").is_none()
+            {
+                return Err(
+                    "meshloop:review-plan --adjust requires --objective, --intent-file, or --reason"
+                        .into(),
+                );
+            }
+            Ok(Command::ReviewPlan {
+                plan: flag_value(rest, "--plan")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("meshloop-plan.json")),
+                decision,
+                reason: flag_value(rest, "--reason"),
+                identity: flag_value(rest, "--as"),
+                objective: flag_value(rest, "--objective").unwrap_or_default(),
+                intent_file: flag_value(rest, "--intent-file").map(PathBuf::from),
+                config: flag_value(rest, "--config").map(PathBuf::from),
+                db: flag_value(rest, "--db").map(PathBuf::from),
+                out: flag_value(rest, "--out").map(PathBuf::from),
+                scope: flag_value(rest, "--scope"),
+                fixture_only: has_flag(rest, "--fixture-only"),
+            })
+        }
         Some(v) if v == "run" => {
             let rest = &args[1..];
             let plan = flag_value(rest, "--plan")
@@ -154,7 +215,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
-                allow_live_harness: has_flag(rest, "--allow-live-harness"),
+                fixture_only: has_flag(rest, "--fixture-only"),
             })
         }
         Some(v) if v == "status" => Ok(Command::Status {
@@ -168,7 +229,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
-                allow_live_harness: has_flag(rest, "--allow-live-harness"),
+                fixture_only: has_flag(rest, "--fixture-only"),
             })
         }
         Some(v) if v == "cancel" => {
@@ -237,7 +298,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
                 model_a: flag_value(rest, "--model-a").unwrap_or_else(|| "model-a".into()),
                 model_b: flag_value(rest, "--model-b").unwrap_or_else(|| "model-b".into()),
-                allow_live_harness: has_flag(rest, "--allow-live-harness"),
+                fixture_only: has_flag(rest, "--fixture-only"),
             })
         }
         Some(v)
@@ -256,19 +317,21 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
 
 pub fn help_text() -> &'static str {
     "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
-     Canonical ids: meshloop:plan | meshloop:run | meshloop:status | meshloop:accept | meshloop:resume\n\
-     \x20 meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles | meshloop:doctor\n\
-     \x20 meshloop:orchestrate | meshloop:mcp\n\
+     Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
+     \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
+     \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mcp\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
      \x20 meshloop plan --objective \"<text>\" [--intent-file <path>] [--config] [--out] [--json]\n\
-     \x20 meshloop run --plan <path> --accept-plan [--allow-live-harness] [--json]\n\
+     \x20 meshloop review-plan --plan <path> --accept|--decline|--adjust [--reason] [--as] [--json]\n\
+     \x20 meshloop run --plan <path> --accept-plan [--fixture-only] [--json]\n\
      \x20 meshloop status [--graph <id>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
      \x20 meshloop mcp\n\
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
-     Live workers require --allow-live-harness and Herdr; fixture subprocess is the CI path."
+     \x20 or MESHLOOP_ORIGIN_HARNESS / MESHLOOP_ORIGIN_SESSION.\n\
+     Live workers are the default (Herdr). --fixture-only forces the CI subprocess double."
 }

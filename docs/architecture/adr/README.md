@@ -24,16 +24,16 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 
 | ID | Topic | Decision status |
 |---|---|---|
-| 0001 | Product scope, platforms, and operating surface | Proposed |
+| 0001 | Product scope, platforms, and operating surface | Accepted |
 | 0002 | Workspace boundaries | Accepted |
-| 0003 | Harness capability and agent dispatch contract | Proposed |
-| 0005 | Execution, transport, isolation, and recovery | Proposed |
-| 0007 | Verification and persistence | Proposed |
-| 0009 | Planning and routing | Proposed |
+| 0003 | Harness capability and agent dispatch contract | Accepted |
+| 0005 | Execution, transport, isolation, and recovery | Accepted |
+| 0007 | Verification and persistence | Accepted |
+| 0009 | Planning and routing | Accepted |
 | 0011 | Apache-2.0 licensing | Accepted |
 | 0012 | ADR and AI engineering governance | Accepted |
-| 0016 | Release 1 subset: closed-loop single-writer orchestration | Proposed |
-| 0017 | Session control plane, Herdr live transport, meshloop: namespace | Proposed |
+| 0016 | Release 1: closed-loop orchestration with live Herdr workers | Accepted |
+| 0017 | Session control plane, Herdr live transport, meshloop: namespace | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

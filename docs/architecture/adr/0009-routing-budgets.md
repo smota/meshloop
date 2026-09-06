@@ -1,11 +1,12 @@
 # 0009 Planning and routing
 
-- Status: Proposed
-- Implementation: in-progress — decomposition-as-dispatch and structural validation implemented and tested; QACR implemented as pluggable RoutingSignals and tested (configured-set enforcement, tier-fit hard filter, cooldown filtering, load-balancing preference, historical-feedback reordering); the `awaiting-plan-review` gate is enforced by the CLI's `--accept-plan` flag rather than a formally driven state-machine transition in this pass; tier assignment is a placeholder heuristic, not a validated policy. See docs/engineering/implementation-status.md.
+- Status: Accepted
+- Implementation: implemented for R1 — decomposition-as-dispatch, `--accept-plan` gate, QACR without invented quota numbers. Residual: quota windows are not queried from vendors; tier assignment remains the unvalidated dependency-count heuristic.
 - Date: 2026-09-05
+- Accepted: 2026-09-06
 - Author/executor: Claude (Sonnet 5), consolidated from prior Codex/user planning; absorbs former ADR 0014 (planning and decomposition)
-- Reviewer: pending
-- Approval evidence: none for this runtime decision
+- Decision owner: Samuel
+- Approval evidence: user approved the 2026-09-06 launch plan
 - Supersedes: none
 - Superseded by: none
 
