@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/smota/meshloop/security/advisories/new
+    about: Private reports only. Do not file a public issue with exploit detail or secrets.
+  - name: Documentation hub
+    url: https://github.com/smota/meshloop/blob/main/docs/README.md
+    about: Start here before opening a how-to question.
+  - name: Release 1 decision
+    url: https://github.com/smota/meshloop/blob/main/docs/architecture/adr/0016-r1-closed-loop.md
+    about: What R1 includes and excludes (not a bug form).

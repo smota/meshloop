@@ -1,5 +1,11 @@
 # Meshloop Release 1 — Closed-Loop Single-Writer Orchestration
 
+> **Historical design input** for ADR 0016. Audience: maintainers and agents,
+> not the product landing page. The “Meshloop today…” overview below describes
+> the **pre-R1 lab** and is not current product. What actually works:
+> [implementation status](../engineering/implementation-status.md). Operator
+> path: [Getting started](../start.md). Public map: [docs/README.md](../README.md).
+
 | Field | Value |
 |---|---|
 | **Document title** | Meshloop Release 1: closed-loop single-writer orchestration |

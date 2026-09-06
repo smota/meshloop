@@ -1,5 +1,9 @@
 # Meshloop skills (session control plane)
 
+Human map: [docs/README.md](../docs/README.md). This page is the session control
+plane (slash / MCP / CLI wrappers). Skills wrap the compiled `meshloop` binary
+only (ML-014).
+
 Every skill, slash command, and MCP tool is **prefixed**. Bare names (`plan`,
 `reviewer`, `scout`, `orchestrate`) are rejected so they cannot collide with Pi,
 Claude Code, Grok, or other harness vocabularies.
@@ -16,7 +20,7 @@ Claude Code, Grok, or other harness vocabularies.
 | `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` |
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` |
 
-Skills wrap the compiled `meshloop` binary only (ML-014). They contain no saga.
+They contain no saga.
 
 Local MCP: `meshloop mcp` (stdio JSON-RPC).
 

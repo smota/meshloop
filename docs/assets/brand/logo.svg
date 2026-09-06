@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Meshloop</title>
+  <desc id="desc">A closed ring with four nodes connected as a square mesh. The bottom node is a square marking human accept.</desc>
+  <circle cx="64" cy="64" r="60" fill="#1B2429"/>
+  <g fill="none" stroke="#8A9AA3" stroke-width="2.5" stroke-linecap="round">
+    <line x1="64" y1="24" x2="104" y2="64"/>
+    <line x1="104" y1="64" x2="64" y2="104"/>
+    <line x1="64" y1="104" x2="24" y2="64"/>
+    <line x1="24" y1="64" x2="64" y2="24"/>
+  </g>
+  <circle cx="64" cy="64" r="40" fill="none" stroke="#4FBFB8" stroke-width="6"/>
+  <circle cx="64" cy="24" r="5.5" fill="#4FBFB8"/>
+  <circle cx="64" cy="24" r="2.2" fill="#1B2429"/>
+  <circle cx="104" cy="64" r="5.5" fill="#4FBFB8"/>
+  <circle cx="104" cy="64" r="2.2" fill="#1B2429"/>
+  <circle cx="24" cy="64" r="5.5" fill="#4FBFB8"/>
+  <circle cx="24" cy="64" r="2.2" fill="#1B2429"/>
+  <rect x="59.5" y="99.5" width="9" height="9" fill="#E0A05A"/>
+  <rect x="61.75" y="101.75" width="4.5" height="4.5" fill="#1B2429"/>
+</svg>

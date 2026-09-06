@@ -1,0 +1,23 @@
+name: Docs
+description: Wrong link, missing hub entry, stale present tense, or findability bug
+title: "[docs] "
+labels: [documentation]
+body:
+  - type: input
+    id: path
+    attributes:
+      label: Path
+      description: File that is misleading (for example `README.md` or `docs/architecture/overview.md`).
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is misleading or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: suggested
+    attributes:
+      label: Suggested correction
+      description: Optional. Do not invent product capabilities.

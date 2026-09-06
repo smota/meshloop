@@ -1,6 +1,8 @@
 # Initial requirements
 
 These are proposed product acceptance targets, not implemented behavior.
+Public map: [docs/README.md](../README.md). R1 is a named subset — see
+[implementation status](../engineering/implementation-status.md).
 
 - ML-001: Validate a versioned task graph, reject cycles and missing dependencies.
 - ML-002: Resolve only verified harness capabilities and explicit model configuration.

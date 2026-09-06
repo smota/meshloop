@@ -1,5 +1,8 @@
 # Initialization evidence
 
+> Audience: maintainers and agents. Bootstrap evidence from 2026-09-05, not the
+> product landing page. Public map: [docs/README.md](../README.md).
+
 Date: 2026-09-05. Executor: Codex. User authorized initialization after approving
 the structure, ADR workflow, five harnesses, and Apache-2.0 selection.
 

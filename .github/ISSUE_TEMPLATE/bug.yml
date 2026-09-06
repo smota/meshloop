@@ -1,0 +1,72 @@
+name: Bug
+description: Fixture loop, CLI, doctor, store, or worktree problem on native Windows
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for unexpected behavior in Release 1 (fixture-backed loop on native Windows).
+        Live Claude/Codex/Pi/Grok/Agy dispatch, WSL2, and packaging are **not** R1 stamps — use **R1 limitation** instead.
+        Do not paste credentials, session transcripts, or private prompts.
+  - type: input
+    id: version
+    attributes:
+      label: Meshloop version
+      description: Output of `meshloop --version`, or the git commit.
+      placeholder: meshloop 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows 10/11 native
+        - WSL2 (unverified)
+        - Linux (unverified)
+        - macOS (unverified)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exact argv. Redact paths that identify you if needed. Never include secrets.
+      placeholder: meshloop run --plan meshloop-plan.json --accept-plan --config config/meshloop.example.toml
+    validations:
+      required: true
+  - type: dropdown
+    id: live
+    attributes:
+      label: Was `--allow-live-harness` set?
+      options:
+        - "No (fixture / default)"
+        - "Yes"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks run
+      description: `cargo run -p xtask -- check` / `doctor --json` if you ran them. Redact secrets.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Redaction
+      options:
+        - label: Logs are redacted; no credentials or private prompts are included
+          required: true

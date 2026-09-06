@@ -1,0 +1,28 @@
+name: Proposal
+description: Architecture, ADR, or product-scope change — not a routine patch
+title: "[proposal] "
+labels: [proposal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Consequential architecture needs an ADR (`docs/architecture/adr/template.md`).
+        Routine work inside accepted boundaries does not. Do not treat Proposed runtime
+        ADRs as accepted product law.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related ADRs / requirements
+      description: Existing IDs only. Do not invent GitHub issue numbers.
+  - type: textarea
+    id: why_not_routine
+    attributes:
+      label: Why this is not a routine change
+    validations:
+      required: true

@@ -1,5 +1,10 @@
 # Architecture overview
 
+Public map: [docs/README.md](../README.md). Release 1 subset:
+[ADR 0016](adr/0016-r1-closed-loop.md). This page describes the **v1 target
+architecture**. Do not treat every paragraph as shipping product. Native
+Windows is the R1 platform; WSL2 is unverified.
+
 ## Problem and solution
 
 Herdr already runs one local, authenticated CLI harness in a terminal pane. Meshloop's
@@ -13,8 +18,9 @@ bounded agent call, not a hardcoded algorithm, then pick which harness and model
 handles each node via Quota-Aware Capability Routing — extensible, verified capability,
 observed subscription quota, never dollar cost, never a hardcoded default; each node
 dispatches as a bounded agent (ADR 0003); results are verified and recovered cleanly from
-interruption. The compiled CLI (ADR 0001) is the sole operating surface for all of this,
-running on Windows natively or on Linux via WSL2 on the same host.
+interruption. The compiled CLI (ADR 0001, still Proposed) is the intended sole operating
+surface for all of this. The v1 platform pairing is Windows native plus Linux
+via WSL2 on the same host; **R1 is native Windows only**.
 
 Full product framing: docs/product/brief.md. Acceptance targets: docs/product/requirements.md.
 

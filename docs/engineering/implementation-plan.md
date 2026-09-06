@@ -1,5 +1,9 @@
 # Implementation plan
 
+> Audience: maintainers and agents. Not a public roadmap. Public map:
+> [docs/README.md](../README.md). Current built surface:
+> [implementation status](implementation-status.md).
+
 This is proposed sequencing, not an accepted ADR. For what has actually been built and
 verified as of 2026-09-05, see docs/engineering/implementation-status.md — Phases 0-7 below
 are substantially implemented on native Windows (Phase 0's WSL2 half is not: no C toolchain

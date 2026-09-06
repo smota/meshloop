@@ -1,0 +1,25 @@
+name: Question
+description: How-to; please read getting started first
+title: "[question] "
+labels: [question]
+body:
+  - type: checkboxes
+    id: read
+    attributes:
+      label: Before asking
+      options:
+        - label: I read [Getting started](https://github.com/smota/meshloop/blob/main/docs/start.md)
+          required: true
+        - label: I read the [docs hub](https://github.com/smota/meshloop/blob/main/docs/README.md)
+          required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: What you already tried
+      description: Commands and redacted output. No credentials or session transcripts.
