@@ -1,5 +1,8 @@
 # Implementation status — 2026-09-06 Release 1 closed loop
 
+> Audience: maintainers and agents. Not the product landing page. Operators:
+> [Getting started](../start.md). Public map: [docs/README.md](../README.md).
+
 Executor: Grok, authorized by the user to implement Release 1 autonomously on this
 workstation. This records what was actually built and verified, not a claim that the
 five parent runtime ADRs are accepted.
@@ -52,6 +55,7 @@ to Integrated.
   overwrite a human-supplied tier).
 - **Concurrency remains 1.** `max_retries` is maximum *attempts* per task.
 
-## Uncommitted
+## Commit
 
-Working-tree implementation pending human review of whether and how to commit.
+R1 closed loop and the `meshloop:` session control plane landed on `main` as
+`64430f2`. This file is the executor log of that work, not a public roadmap.

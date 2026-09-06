@@ -1,5 +1,8 @@
 # Product brief
 
+Public map: [docs/README.md](../README.md). Release 1 is a fixture-backed closed
+loop on native Windows; the full multi-harness vision below remains proposed.
+
 Meshloop is a multi-harness coordinator built on Herdr. It takes one engineering
 objective, plans it into a task graph, and uses model selection to spread the work across
 whichever subscription-based CLI clients are configured (Codex, Claude Code, Pi, Grok,

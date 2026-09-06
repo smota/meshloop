@@ -1,0 +1,37 @@
+name: R1 limitation
+description: I expected live Claude/Codex, WSL2, packaging, or another capability that is not an R1 stamp
+title: "[limitation] "
+labels: [limitation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Release 1 is a **fixture-backed closed loop on native Windows**.
+        Completing a live Claude Code, Codex, Pi, Grok, or Agy dispatch is not the R1 stamp.
+        Use this form when the product did not do something you thought it would — not when the fixture loop misbehaved (that is a **Bug**).
+  - type: dropdown
+    id: expected_capability
+    attributes:
+      label: What did you expect?
+      options:
+        - Live Claude Code / Codex / Pi / Grok / Agy dispatch
+        - Live Herdr pane split without an extra flag
+        - WSL2 / Linux / macOS
+        - Packaged install (cargo install, GitHub Release, Homebrew, …)
+        - Concurrency greater than 1
+        - Credential storage / cloud service / Windows service
+        - Automatic merge to the current branch
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: story
+    attributes:
+      label: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: already_read
+    attributes:
+      label: What did you already read?
+      description: README, docs/start.md, ADR 0016, implementation-status — whatever you opened.
