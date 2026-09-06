@@ -70,6 +70,19 @@ pub enum RequiredEvidence {
     DeterministicAndHumanAcceptance,
 }
 
+/// True iff every `DeterministicEvidence` row has `exit_code == 0`.
+/// Vacuous-false: no deterministic rows → false (same as `satisfies(DeterministicOnly, &[])`).
+pub fn all_deterministic_passed(evidence: &[Evidence]) -> bool {
+    let rows: Vec<_> = evidence
+        .iter()
+        .filter_map(|e| match e {
+            Evidence::Deterministic(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    !rows.is_empty() && rows.iter().all(|d| d.exit_code == 0)
+}
+
 /// Whether a candidate's collected evidence satisfies its tier's requirement. This is the
 /// mechanical half of ADR 0007's gate: it never judges evidence *content*, only presence —
 /// a Tier 3 candidate can never reach `accepted` on model review alone, per that ADR.
@@ -158,6 +171,39 @@ mod tests {
     #[test]
     fn no_evidence_never_satisfies_anything() {
         assert!(!satisfies(RequiredEvidence::DeterministicOnly, &[]));
+    }
+
+    #[test]
+    fn failed_exit_code_does_not_pass_all_deterministic() {
+        let evidence = vec![Evidence::Deterministic(DeterministicEvidence {
+            candidate: candidate(),
+            tool: "git-diff".into(),
+            tool_version: "n/a".into(),
+            exit_code: 1,
+            output_redacted: "empty".into(),
+        })];
+        assert!(satisfies(RequiredEvidence::DeterministicOnly, &evidence));
+        assert!(!all_deterministic_passed(&evidence));
+    }
+
+    #[test]
+    fn mixed_deterministic_rows_fail_if_any_exit_nonzero() {
+        let evidence = vec![
+            deterministic(),
+            Evidence::Deterministic(DeterministicEvidence {
+                candidate: candidate(),
+                tool: "cargo".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: "fail".into(),
+            }),
+        ];
+        assert!(!all_deterministic_passed(&evidence));
+    }
+
+    #[test]
+    fn empty_evidence_fails_all_deterministic_passed() {
+        assert!(!all_deterministic_passed(&[]));
     }
 
     #[test]

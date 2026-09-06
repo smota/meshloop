@@ -122,9 +122,10 @@ fn collect_on_an_unknown_handle_is_unsupported_not_a_panic() {
     let harness = harness_with_invoke();
     let handle = HarnessHandle {
         attempt_id: AttemptId(999),
+        pid: None,
     };
     assert!(matches!(
         harness.collect(&handle),
-        Err(HarnessError::Unsupported)
+        Err(HarnessError::ProcessFault { .. })
     ));
 }

@@ -7,7 +7,7 @@ Update this file when implementation reveals a detail was wrong or incomplete, w
 new ADR — unless the change alters the decision itself, in which case it goes through the
 owning ADR as a successor, per docs/architecture/adr/README.md.
 
-None of this is implemented; the bootstrap does not establish runtime readiness for any of it.
+The full mechanism below is the v1 *target*. Release 1 implements the subset in ADR 0016 (native Windows, one sequential writer, fixture-backed closed loop, Herdr uncomposed). Do not read this file as a claim that every paragraph is product.
 
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 

@@ -58,7 +58,7 @@ pub fn dispatch_with_fallback(
 
         match outcome {
             Ok(outcome) => {
-                feedback.record_outcome(&key, true);
+                let _ = feedback.record_outcome(&key, true);
                 return Ok(DispatchResult {
                     state: TaskState::Verifying,
                     outcome: Some(outcome),
@@ -68,7 +68,7 @@ pub fn dispatch_with_fallback(
             Err(HarnessError::CapacityExhausted { .. })
             | Err(HarnessError::Timeout)
             | Err(HarnessError::ProcessFault { .. }) => {
-                feedback.record_outcome(&key, false);
+                let _ = feedback.record_outcome(&key, false);
                 continue;
             }
             Err(HarnessError::Unsupported) => return Err(OrchestratorError::Unsupported),
@@ -102,6 +102,7 @@ mod tests {
         fn invoke(&self, _spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
             Ok(HarnessHandle {
                 attempt_id: AttemptId(1),
+                pid: None,
             })
         }
         fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
@@ -172,7 +173,7 @@ mod tests {
             model_ref: "m".into(),
             tier: TierKey::Tier1,
         };
-        assert_eq!(feedback.counters(&failed_key).failure, 1);
+        assert_eq!(feedback.counters(&failed_key).unwrap().failure, 1);
     }
 
     #[test]

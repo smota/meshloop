@@ -95,6 +95,8 @@ impl HarnessCapabilities for CliHarness {
             .map(|a| {
                 if a == "{prompt_file}" {
                     prompt_file.to_string_lossy().to_string()
+                } else if a == "{model_ref}" {
+                    spec.model_ref.clone()
                 } else {
                     a.clone()
                 }
@@ -111,19 +113,28 @@ impl HarnessCapabilities for CliHarness {
             .map_err(|e| HarnessError::ProcessFault {
                 detail: e.to_string(),
             })?;
+        let pid = child.id();
 
         self.running
             .lock()
-            .expect("harness registry mutex")
+            .map_err(|_| HarnessError::ProcessFault {
+                detail: "harness registry mutex poisoned".into(),
+            })?
             .insert(spec.attempt_id.0, (child, spec.timeout));
 
         Ok(HarnessHandle {
             attempt_id: spec.attempt_id,
+            pid: Some(pid),
         })
     }
 
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {
-        let mut registry = self.running.lock().expect("harness registry mutex");
+        let mut registry = self
+            .running
+            .lock()
+            .map_err(|_| HarnessError::ProcessFault {
+                detail: "harness registry mutex poisoned".into(),
+            })?;
         // Idempotent against an already-exited/never-tracked process, per ADR 0003.
         if let Some((mut child, _)) = registry.remove(&Self::attempt_key(handle)) {
             let _ = child.kill();
@@ -136,9 +147,13 @@ impl HarnessCapabilities for CliHarness {
         let (mut child, timeout) = self
             .running
             .lock()
-            .expect("harness registry mutex")
+            .map_err(|_| HarnessError::ProcessFault {
+                detail: "harness registry mutex poisoned".into(),
+            })?
             .remove(&Self::attempt_key(handle))
-            .ok_or(HarnessError::Unsupported)?;
+            .ok_or(HarnessError::ProcessFault {
+                detail: "unknown harness handle".into(),
+            })?;
 
         // std::process has no built-in wait-with-timeout; poll bounded by the spec's own
         // timeout (captured at invoke time) rather than blocking indefinitely on a hung process.
@@ -151,10 +166,19 @@ impl HarnessCapabilities for CliHarness {
                     if let Some(mut out) = child.stdout.take() {
                         let _ = out.read_to_string(&mut stdout);
                     }
+                    let mut stderr = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_string(&mut stderr);
+                    }
+                    if stderr.to_ascii_lowercase().contains("capacity exhausted") {
+                        return Err(HarnessError::CapacityExhausted {
+                            retry_after: Duration::from_secs(60),
+                        });
+                    }
                     return Ok(HarnessOutcome {
                         exit_code: status.code().unwrap_or(-1),
-                        output_redacted: stdout,
-                        worktree_changed: status.success(),
+                        output_redacted: crate::redact::redact(&stdout),
+                        worktree_changed: false,
                     });
                 }
                 Ok(None) => {

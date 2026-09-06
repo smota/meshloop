@@ -1,6 +1,8 @@
 //! Human-readable status/evidence output. No orchestration logic — see boundaries.md.
 
+use meshloop_domain::state::TaskState;
 use meshloop_domain::task_graph::TaskGraph;
+use meshloop_engine::run_loop::{IdleReason, RunStatus};
 
 pub fn format_plan(graph: &TaskGraph) -> String {
     let mut out = format!(
@@ -24,25 +26,60 @@ pub fn format_plan(graph: &TaskGraph) -> String {
     out
 }
 
-#[derive(Debug)]
-pub enum NodeOutcome {
-    Verified { harness: String, exit_code: i32 },
-    Blocked,
-    RequiresHumanAcceptance { harness: String },
+pub fn format_idle(reason: IdleReason) -> String {
+    match reason {
+        IdleReason::GraphComplete => "Graph complete: every node is Integrated.\n".into(),
+        IdleReason::AwaitingHumanAcceptance => {
+            "Paused: one or more nodes await `meshloop accept --task <id> --as <you>`.\n\
+             Then `meshloop resume` to merge into the integrate worktree.\n"
+                .into()
+        }
+        IdleReason::NoCapableCandidate => {
+            "No configured, capable, available candidate (ADR 0009). Nodes left Ready.\n\
+             Use `meshloop cancel --task <id>` to unblock dependents.\n"
+                .into()
+        }
+        IdleReason::FailedTerminal => {
+            "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. `resume --retry` may apply.\n"
+                .into()
+        }
+    }
 }
 
-pub fn format_node_result(task_id: u32, outcome: &NodeOutcome) -> String {
-    match outcome {
-        NodeOutcome::Verified { harness, exit_code } => format!(
-            "  [{task_id}] verified via {harness} (exit code {exit_code}) — DeterministicEvidence recorded.\n"
-        ),
-        NodeOutcome::Blocked => format!(
-            "  [{task_id}] BLOCKED — no configured, capable, available candidate (ADR 0009). Not a crash; retry later.\n"
-        ),
-        NodeOutcome::RequiresHumanAcceptance { harness } => format!(
-            "  [{task_id}] verified via {harness} — Tier 3: requires HumanAcceptanceEvidence before `accepted` (ADR 0007). Not yet integrated.\n"
-        ),
+pub fn format_status(status: &RunStatus) -> String {
+    let mut out = format!(
+        "Run '{}': plan_state={:?}\n",
+        status.graph_id, status.plan_state
+    );
+    for n in &status.nodes {
+        let wt = n
+            .worktree
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".into());
+        out += &format!(
+            "  [{}] {:?} {}  worktree={}\n",
+            n.task_id.0, n.state, n.description, wt
+        );
+        if let Some(note) = &n.note {
+            out += &format!("      note: {note}\n");
+        }
+        if n.state == TaskState::AwaitingReview {
+            out += &format!(
+                "      next: meshloop accept --task {} --as <identity>\n",
+                n.task_id.0
+            );
+        }
     }
+    out
+}
+
+pub fn banner() -> String {
+    "Meshloop Release 1: closed-loop single-writer orchestration (native Windows).\n\
+     Commands: plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate.\n\
+     Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
+     Non-fixture harnesses require --allow-live-harness.\n"
+        .into()
 }
 
 #[cfg(test)]
@@ -59,18 +96,13 @@ mod tests {
                 description: "do the thing".into(),
                 depends_on: vec![],
                 tier: Some(Tier::Tier1),
+                allowed_paths: vec![],
+                empty_diff_ok: false,
             }],
         };
         let rendered = format_plan(&graph);
         assert!(rendered.contains("awaiting-plan-review"));
         assert!(rendered.contains("do the thing"));
         assert!(rendered.contains("--accept-plan"));
-    }
-
-    #[test]
-    fn blocked_message_names_the_cause_not_a_stack_trace() {
-        let rendered = format_node_result(1, &NodeOutcome::Blocked);
-        assert!(rendered.contains("BLOCKED"));
-        assert!(rendered.contains("Not a crash"));
     }
 }

@@ -1,38 +1,65 @@
 //! Event sourcing (design-patterns.md): state is never mutated in place; it is derived by
-//! folding the durable event log. `reconcile` is what makes crash recovery possible —
-//! a persisted `Running` state with no matching live process becomes `Blocked`, never a
-//! silent retry (ADR 0005).
+//! folding the durable event log. Tick/status/resume use the **per-task** fold. The
+//! per-attempt index is only for PID, worktree, and inspect. `reconcile` remains a view
+//! annotation, never a second source of truth.
 
 use std::collections::{HashMap, HashSet};
 
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::state::{Event, TaskState};
+use meshloop_domain::state::{TaskState, transition};
 use meshloop_domain::task_graph::TaskId;
+
+use crate::ports::{StoreError, TransitionRecord};
 
 pub type AttemptKey = (TaskId, AttemptId);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransitionRecord {
-    pub task_id: TaskId,
-    pub attempt_id: AttemptId,
-    pub from: TaskState,
-    pub to: TaskState,
-    pub event: Event,
-}
-
-/// Folds the event log into a current-state projection per attempt. This is the only
-/// legitimate source of "current state" — never an independently mutated column.
+/// Last-write-wins per `(task, attempt)` for inspect / PID liveness. Does not validate
+/// legality; the per-task fold is the source of truth for `tick`.
 pub fn replay(records: &[TransitionRecord]) -> HashMap<AttemptKey, TaskState> {
     let mut projection = HashMap::new();
     for record in records {
-        projection.insert((record.task_id, record.attempt_id), record.to);
+        if let Some(attempt) = record.attempt_id {
+            projection.insert((record.task_id, attempt), record.to);
+        }
     }
     projection
 }
 
-/// Reconciles the replayed projection against which attempts have a confirmed-live
-/// process. An attempt frozen in `Running` with no matching live process is `Blocked`,
-/// never resumed on a guess.
+/// Legal per-task fold: events in order, grouped by `task_id`, through `transition()`.
+/// `attempt_id` is metadata on the row, not the projection key. This is what `tick`,
+/// `status`, and `resume` read.
+pub fn replay_tasks(
+    records: &[TransitionRecord],
+) -> Result<HashMap<TaskId, TaskState>, StoreError> {
+    let mut projection: HashMap<TaskId, TaskState> = HashMap::new();
+    for record in records {
+        let from = projection
+            .get(&record.task_id)
+            .copied()
+            .unwrap_or(record.from);
+        match transition(from, record.event) {
+            Ok(to) if to == record.to => {
+                projection.insert(record.task_id, to);
+            }
+            Ok(other) => {
+                return Err(StoreError::Corrupt(format!(
+                    "illegal fold for task {}: {:?} + {:?} => {:?} (recorded {:?})",
+                    record.task_id.0, from, record.event, other, record.to
+                )));
+            }
+            Err(_) => {
+                return Err(StoreError::Corrupt(format!(
+                    "illegal transition for task {}: {:?} + {:?}",
+                    record.task_id.0, from, record.event
+                )));
+            }
+        }
+    }
+    Ok(projection)
+}
+
+/// View only: a persisted `Running` attempt with no matching live process is annotated
+/// `Blocked`. Never written to the event log; `resume` appends `HarnessCrashedOrTimeout`.
 pub fn reconcile(
     records: &[TransitionRecord],
     live_processes: &HashSet<AttemptKey>,
@@ -53,17 +80,21 @@ mod tests {
 
     fn record(
         task: u32,
-        attempt: u32,
+        attempt: Option<u32>,
         from: TaskState,
         to: TaskState,
         event: E,
     ) -> TransitionRecord {
         TransitionRecord {
+            graph_id: "g".into(),
             task_id: TaskId(task),
-            attempt_id: AttemptId(attempt),
+            attempt_id: attempt.map(AttemptId),
             from,
             to,
             event,
+            reason: None,
+            executor: "meshloop".into(),
+            occurred_at: "0".into(),
         }
     }
 
@@ -72,14 +103,14 @@ mod tests {
         let records = vec![
             record(
                 1,
-                1,
+                None,
                 TaskState::Pending,
                 TaskState::Ready,
                 E::DependencySatisfied,
             ),
             record(
                 1,
-                1,
+                Some(1),
                 TaskState::Ready,
                 TaskState::Running,
                 E::AttemptStarted,
@@ -92,7 +123,7 @@ mod tests {
     fn running_with_no_live_process_reconciles_to_blocked() {
         let records = vec![record(
             1,
-            1,
+            Some(1),
             TaskState::Ready,
             TaskState::Running,
             E::AttemptStarted,
@@ -106,7 +137,7 @@ mod tests {
     fn running_with_a_confirmed_live_process_stays_running() {
         let records = vec![record(
             1,
-            1,
+            Some(1),
             TaskState::Ready,
             TaskState::Running,
             E::AttemptStarted,
@@ -121,7 +152,7 @@ mod tests {
     fn non_running_terminal_states_are_never_reconciled_away() {
         let records = vec![record(
             1,
-            1,
+            Some(1),
             TaskState::Accepted,
             TaskState::Integrated,
             E::IntegrationOwnerMerge,
@@ -132,5 +163,60 @@ mod tests {
             projection[&(TaskId(1), AttemptId(1))],
             TaskState::Integrated
         );
+    }
+
+    #[test]
+    fn per_task_fold_uses_latest_attempt_not_a_failed_predecessor() {
+        let records = vec![
+            record(
+                1,
+                None,
+                TaskState::Pending,
+                TaskState::Ready,
+                E::DependencySatisfied,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Failed,
+                E::HarnessCrashedOrTimeout,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Failed,
+                TaskState::Ready,
+                E::RetryAuthorized,
+            ),
+            record(
+                1,
+                Some(2),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+        ];
+        let tasks = replay_tasks(&records).expect("legal fold");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Running);
+    }
+
+    #[test]
+    fn per_task_fold_rejects_illegal_triples() {
+        let records = vec![record(
+            1,
+            None,
+            TaskState::Pending,
+            TaskState::Running,
+            E::AttemptStarted,
+        )];
+        assert!(replay_tasks(&records).is_err());
     }
 }

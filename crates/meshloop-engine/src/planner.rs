@@ -9,6 +9,19 @@ use meshloop_domain::task_graph::{GraphError, TaskGraph, Tier};
 use crate::agent::AgentSpec;
 use crate::ports::{HarnessCapabilities, HarnessOutcome};
 
+fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, PlanError> {
+    let file_path = spec.worktree_path.join("meshloop-plan.json");
+    let raw = if file_path.is_file() {
+        std::fs::read_to_string(&file_path).map_err(|e| PlanError::Malformed(e.to_string()))?
+    } else {
+        outcome.output_redacted.clone()
+    };
+    let graph: TaskGraph =
+        serde_json::from_str(&raw).map_err(|e| PlanError::Malformed(e.to_string()))?;
+    graph.validate().map_err(PlanError::Invalid)?;
+    Ok(graph)
+}
+
 #[derive(Debug)]
 pub enum PlanError {
     Dispatch(HarnessError),
@@ -25,10 +38,7 @@ pub fn decompose(
 ) -> Result<TaskGraph, PlanError> {
     let handle = harness.invoke(spec).map_err(PlanError::Dispatch)?;
     let outcome: HarnessOutcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
-    let graph: TaskGraph = serde_json::from_str(&outcome.output_redacted)
-        .map_err(|e| PlanError::Malformed(e.to_string()))?;
-    graph.validate().map_err(PlanError::Invalid)?;
-    Ok(graph)
+    parse_graph(spec, &outcome)
 }
 
 pub trait TierAssigner {
@@ -60,7 +70,9 @@ pub fn assign_tiers(graph: &mut TaskGraph, assigner: &dyn TierAssigner) {
     let ids: Vec<_> = graph.nodes.iter().map(|n| n.id).collect();
     for id in ids {
         let tier = assigner.assign_tier(graph, id);
-        if let Some(node) = graph.nodes.iter_mut().find(|n| n.id == id) {
+        if let Some(node) = graph.nodes.iter_mut().find(|n| n.id == id)
+            && node.tier.is_none()
+        {
             node.tier = Some(tier);
         }
     }
@@ -86,6 +98,7 @@ mod tests {
         fn invoke(&self, _spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
             Ok(HarnessHandle {
                 attempt_id: AttemptId(1),
+                pid: None,
             })
         }
         fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
@@ -170,23 +183,46 @@ mod tests {
                     description: "a".into(),
                     depends_on: vec![],
                     tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(2),
                     description: "b".into(),
                     depends_on: vec![],
                     tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(3),
                     description: "c".into(),
                     depends_on: vec![TaskId(1), TaskId(2)],
                     tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
                 },
             ],
         };
         assign_tiers(&mut graph, &DefaultTierAssigner);
         assert_eq!(graph.nodes[0].tier, Some(Tier::Tier2));
         assert_eq!(graph.nodes[2].tier, Some(Tier::Tier3));
+    }
+
+    #[test]
+    fn assign_tiers_does_not_overwrite_a_human_supplied_tier() {
+        let mut graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![meshloop_domain::task_graph::TaskNode {
+                id: TaskId(1),
+                description: "a".into(),
+                depends_on: vec![],
+                tier: Some(Tier::Tier3),
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+            }],
+        };
+        assign_tiers(&mut graph, &DefaultTierAssigner);
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier3));
     }
 }

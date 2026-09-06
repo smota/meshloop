@@ -90,8 +90,11 @@ pub fn build_planning_spec(
         situation: scope_and_exclusions.to_string(),
         complication: objective.to_string(),
         question: "Decompose this objective into a versioned task graph.".into(),
-        output_contract:
-            "Respond with exactly one JSON TaskGraph object (graph_id, nodes[]); no prose.".into(),
+        output_contract: "Write exactly one JSON TaskGraph to meshloop-plan.json in this worktree \
+             (graph_id matching [A-Za-z0-9._-]+, nodes[] with id >= 1, description, \
+             depends_on, optional tier, optional allowed_paths, optional empty_diff_ok). \
+             No other files unless required to produce that graph. Do not print prose."
+            .into(),
     });
     AgentSpec {
         task_id: TaskId(0),
@@ -115,6 +118,8 @@ mod tests {
             description: desc.into(),
             depends_on: deps.iter().map(|d| TaskId(*d)).collect(),
             tier: Some(Tier::Tier1),
+            allowed_paths: vec![],
+            empty_diff_ok: false,
         }
     }
 
@@ -190,6 +195,6 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             Duration::from_secs(300),
         );
-        assert!(spec.prompt.contains("JSON TaskGraph"));
+        assert!(spec.prompt.contains("meshloop-plan.json"));
     }
 }

@@ -5,5 +5,6 @@
 pub mod capability;
 pub mod evidence;
 pub mod policy;
+pub mod role;
 pub mod state;
 pub mod task_graph;

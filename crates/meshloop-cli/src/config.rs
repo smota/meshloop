@@ -1,8 +1,8 @@
-//! Loads config/meshloop.example.toml-shaped configuration. No credentials, real model
-//! IDs, or per-harness CLI flags are hardcoded here — every value comes from the file.
+//! Loads meshloop.toml-shaped configuration. No credentials or per-harness CLI flags
+//! are hardcoded here — every value comes from the file.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -12,16 +12,22 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessConfig>,
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
-// Concurrency and retry bounds are read and validated by config parsing now; `run`'s v1
-// sequential dispatcher does not yet consume them (implementation-plan.md Phase 8).
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct Limits {
     pub max_concurrent_workers: u32,
+    /// Maximum attempts per task (the first dispatch counts). `1` means no fallback.
     pub max_retries: u32,
     pub task_timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct VerifyConfig {
+    #[serde(default)]
+    pub verify_command: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -40,14 +46,26 @@ fn default_model_tier() -> String {
     "mid".into()
 }
 
-// Only read via {:?} at call sites for diagnostics — rustc's dead-code lint does not
-// count Debug-only usage as a read, hence the explicit allow.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ConfigError {
     Io(String),
     Parse(String),
     SelectedButNotConfigured(String),
+    NotFound,
+}
+
+pub fn discover(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    for candidate in ["meshloop.toml", "config/meshloop.toml"] {
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    Err(ConfigError::NotFound)
 }
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
@@ -59,6 +77,41 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         }
     }
     Ok(config)
+}
+
+pub fn resolve_executable(configured: &str) -> PathBuf {
+    let path = PathBuf::from(configured);
+    let has_sep = configured.contains('/') || configured.contains('\\');
+    if has_sep || path.exists() {
+        if !path.exists() {
+            let mut with_ext = path.clone();
+            with_ext.set_file_name(format!(
+                "{}{}",
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(configured),
+                std::env::consts::EXE_SUFFIX
+            ));
+            // If the original had a directory, preserve it.
+            if path.components().count() > 1 {
+                let mut p = path.clone();
+                if let Some(name) = path.file_name() {
+                    p.set_file_name(format!(
+                        "{}{}",
+                        name.to_string_lossy(),
+                        std::env::consts::EXE_SUFFIX
+                    ));
+                    if p.exists() {
+                        return p;
+                    }
+                }
+            } else if with_ext.exists() {
+                return with_ext;
+            }
+        }
+        return path;
+    }
+    PathBuf::from(configured)
 }
 
 #[cfg(test)]

@@ -18,6 +18,10 @@ pub struct TaskNode {
     pub description: String,
     pub depends_on: Vec<TaskId>,
     pub tier: Option<Tier>,
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub empty_diff_ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +36,16 @@ pub enum GraphError {
     DanglingDependency { node: TaskId, missing: TaskId },
     DuplicateId(TaskId),
     Empty,
+    IllegalGraphId(String),
+    ReservedTaskId(TaskId),
+}
+
+/// `graph_id` values that are safe as Git branch segments and directory names.
+pub fn graph_id_is_legal(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 impl TaskGraph {
@@ -41,9 +55,15 @@ impl TaskGraph {
         if self.nodes.is_empty() {
             return Err(GraphError::Empty);
         }
+        if !graph_id_is_legal(&self.graph_id) {
+            return Err(GraphError::IllegalGraphId(self.graph_id.clone()));
+        }
 
         let mut seen = HashSet::new();
         for node in &self.nodes {
+            if node.id.0 == 0 {
+                return Err(GraphError::ReservedTaskId(node.id));
+            }
             if !seen.insert(node.id) {
                 return Err(GraphError::DuplicateId(node.id));
             }
@@ -147,6 +167,8 @@ mod tests {
             description: format!("task {id}"),
             depends_on: deps.iter().map(|d| TaskId(*d)).collect(),
             tier: None,
+            allowed_paths: vec![],
+            empty_diff_ok: false,
         }
     }
 
@@ -221,6 +243,24 @@ mod tests {
         let pos = |id: u32| order.iter().position(|t| t.0 == id).unwrap();
         assert!(pos(1) < pos(2));
         assert!(pos(2) < pos(3));
+    }
+
+    #[test]
+    fn rejects_reserved_task_id_zero() {
+        let g = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node(0, &[])],
+        };
+        assert_eq!(g.validate(), Err(GraphError::ReservedTaskId(TaskId(0))));
+    }
+
+    #[test]
+    fn rejects_illegal_graph_id() {
+        let g = TaskGraph {
+            graph_id: "bad/id".into(),
+            nodes: vec![node(1, &[])],
+        };
+        assert!(matches!(g.validate(), Err(GraphError::IllegalGraphId(_))));
     }
 
     #[test]

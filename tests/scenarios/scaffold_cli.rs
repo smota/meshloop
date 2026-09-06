@@ -13,8 +13,9 @@ fn cli_reports_help_version_and_rejects_bad_invocations() {
     for (args, success, marker) in [
         (vec!["--help"], true, "meshloop plan --objective"),
         (vec!["--version"], true, "meshloop 0.1.0"),
-        (vec!["plan"], false, "plan requires --objective"),
-        (vec!["run"], false, "run requires --plan"),
+        (vec!["plan"], false, "meshloop:plan requires --objective"),
+        (vec!["run"], false, "meshloop:run requires --plan"),
+        (vec!["reviewer"], false, "unprefixed"),
         (vec!["frobnicate"], false, "Unsupported command"),
     ] {
         let output = Command::new("cargo")

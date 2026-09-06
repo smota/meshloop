@@ -32,6 +32,8 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0009 | Planning and routing | Proposed |
 | 0011 | Apache-2.0 licensing | Accepted |
 | 0012 | ADR and AI engineering governance | Accepted |
+| 0016 | Release 1 subset: closed-loop single-writer orchestration | Proposed |
+| 0017 | Session control plane, Herdr live transport, meshloop: namespace | Proposed |
 
 ## Withdrawn (consolidated into an active ADR above)
 

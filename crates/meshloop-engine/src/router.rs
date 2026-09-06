@@ -58,7 +58,7 @@ impl RoutingSignal for HistoricalSuccessSignal {
             model_ref: candidate.model_ref.clone(),
             tier: TierKey::from(ctx.task_tier),
         };
-        let counters = ctx.feedback.counters(&key);
+        let counters = ctx.feedback.counters(&key).unwrap_or_default();
         let total = counters.success + counters.failure;
         if total == 0 {
             SignalScore(0.5)
@@ -71,7 +71,12 @@ impl RoutingSignal for HistoricalSuccessSignal {
 pub struct LoadBalanceSignal;
 impl RoutingSignal for LoadBalanceSignal {
     fn score(&self, candidate: &Candidate, ctx: &RoutingContext) -> SignalScore {
-        SignalScore(*ctx.headroom.get(&candidate.harness).unwrap_or(&1.0))
+        // Missing headroom is omitted (same 0.0 contribution for every candidate that
+        // lacks an observation). Never invent full capacity (the old unwrap_or(1.0)).
+        match ctx.headroom.get(&candidate.harness) {
+            Some(h) => SignalScore(*h),
+            None => SignalScore(0.0),
+        }
     }
 }
 
@@ -364,8 +369,8 @@ mod tests {
             model_ref: "m".into(),
             tier: TierKey::Tier1,
         };
-        feedback.record_outcome(&key, true);
-        feedback.record_outcome(&key, true);
+        feedback.record_outcome(&key, true).unwrap();
+        feedback.record_outcome(&key, true).unwrap();
         let router = Router::default();
         let selected = router.select(
             &configured,

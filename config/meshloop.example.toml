@@ -3,15 +3,22 @@
 # every entry below must be supplied by you. The [harnesses.fixture] section demonstrates
 # the shape using the safe fixture-harness test binary; add your own [harnesses.<name>]
 # sections (matching entries in selected_harnesses) for real harnesses.
+#
+# Non-fixture harnesses require `meshloop run --allow-live-harness`.
 selected_harnesses = ["fixture"]
 
 [limits]
 max_concurrent_workers = 1
+# Maximum attempts per task (the first dispatch counts). 2 means one fallback, not two retries after the first.
 max_retries = 2
 task_timeout_seconds = 300
 
+[verify]
+# Optional structured argv run in the attempt worktree after git-diff. Empty = git-diff only.
+verify_command = []
+
 [harnesses.fixture]
-executable = "target/debug/fixture_harness"
+executable = "target/debug/fixture_harness.exe"
 version_args = ["--version"]
 invoke_args_template = ["--prompt-file", "{prompt_file}"]
 model_ref = "fixture-model"

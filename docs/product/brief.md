@@ -5,7 +5,7 @@ objective, plans it into a task graph, and uses model selection to spread the wo
 whichever subscription-based CLI clients are configured (Codex, Claude Code, Pi, Grok,
 Agy) — choosing per task which harness and model tier to use from verified capability,
 risk, and observed subscription quota — then verifies and integrates what comes back.
-The initial repository is a development scaffold, not a working engine.
+Release 1 (ADR 0016) is a closed-loop single-writer engine on native Windows against a fixture harness; the full multi-harness Herdr vision remains proposed.
 
 The problem this solves: each harness is a flat-rate subscription with its own capability
 set and its own rate-limit window, not a metered API. Used one at a time, that capacity

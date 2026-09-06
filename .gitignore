@@ -1,5 +1,10 @@
 /target/
+/dist/
 /.agent-runs/
+/.meshloop/
+**/.meshloop/
+/.meshloop-worktrees/
+**/.meshloop-worktrees/
 .env
 .env.*
 !.env.example

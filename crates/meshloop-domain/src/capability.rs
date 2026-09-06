@@ -65,8 +65,24 @@ impl Default for QuotaState {
 }
 
 impl QuotaState {
+    pub fn from_parts(breaker: Breaker, opened_at: Option<SystemTime>, cooldown: Duration) -> Self {
+        Self {
+            state: breaker,
+            opened_at,
+            cooldown,
+        }
+    }
+
     pub fn breaker(&self) -> Breaker {
         self.state
+    }
+
+    pub fn opened_at(&self) -> Option<SystemTime> {
+        self.opened_at
+    }
+
+    pub fn cooldown(&self) -> Duration {
+        self.cooldown
     }
 
     /// A candidate with no observed exhaustion is assumed available, never assumed to
