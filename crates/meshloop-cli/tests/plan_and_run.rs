@@ -628,5 +628,7 @@ fn bundle_emits_version_locked_session_pack() {
     let skill = fs::read_to_string(plan).expect("skill");
     assert!(skill.contains("meshloop:plan"));
     assert!(!skill.contains("unprefixed plan should be used"));
+    let pack = fs::read_to_string(dest.join("README.md")).expect("pack readme");
+    assert!(pack.contains("docs/install.md"));
     fs::remove_dir_all(&dest).ok();
 }

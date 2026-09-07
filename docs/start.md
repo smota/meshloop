@@ -1,5 +1,8 @@
 # Getting started
 
+Install and first-time setup: **[Install](install.md)**
+(`cargo install meshloop-cli --locked`, then `meshloop bundle`).
+
 **This pane stays.** You are in Claude Code, Codex, Pi, Grok, or Agy inside
 Herdr 0.8. You are `meshloop:origin`. Meshloop opens **other** panes. If work
 starts in *this* pane, stop.
@@ -8,13 +11,9 @@ The origin agent asks **Accept / Decline / Adjust in English**. You may answer
 in Portuguese (`aceitar` / `recusar` / `ajustar`). You should not have to type
 flags.
 
-Build the engine in the Meshloop clone. **Run the loop in a throwaway git
-repo**, not in this product tree.
-
-WSL2 and prebuilt GitHub Release binaries: unverified. crates.io
-source-install is enabled (`cargo install meshloop-cli --locked`); no
-registry upload yet. Concurrency is 1. Fixture =
-[CI appendix](#ci-appendix-fixture-double).
+**Run the loop in the throwaway target repo**, not in the Meshloop product
+clone. WSL2 and prebuilt GitHub Release binaries: unverified. Concurrency is
+1. Fixture = [CI appendix](#ci-appendix-fixture-double).
 
 ## What you should see
 
@@ -32,28 +31,21 @@ registry upload yet. Concurrency is 1. Fixture =
 `resume` merges into the **integrate worktree**. Only
 `meshloop integrate --into --accept-integrate` lands on a branch you name.
 
-## 0. Two directories
+## 0. Already installed?
 
-1. **Engine:** `cargo install meshloop-cli --locked` (once published) or, from
-   this clone, `cargo build -p meshloop-cli`. Install skills from `skills/`
-   or `meshloop bundle` (`cargo run -p xtask -- bundle` from a clone).
-   Optional: `meshloop mcp`.
-2. **Target (throwaway git repo):** copy `config/meshloop.example.toml` there,
-   keep only kinds you have logged in, and run every `/meshloop:*` **in that
-   repo**.
+From [Install](install.md) you should have: `meshloop` on `PATH`, a throwaway
+git **target** repo with `meshloop.toml`, the session pack (`meshloop bundle`),
+Herdr 0.8 running, and this origin pane opened **in that target repo**.
 
 ```text
 herdr status
-git clone https://github.com/smota/meshloop.git
-cd meshloop
-cargo build -p meshloop-cli
-meshloop bundle
+meshloop --version
+meshloop doctor --json
 ```
 
-Then `cd` to the throwaway repo (or pass `--config` at that repo). Default
-store: `.meshloop/state.sqlite`. Worktrees:
+Default store: `.meshloop/state.sqlite`. Worktrees:
 `<repo-parent>/.meshloop-worktrees/`. No credentials in config. No Windows
-service.
+service. Every `/meshloop:*` runs in the target repo.
 
 ## 1. Doctor — name this pane
 
@@ -146,6 +138,7 @@ meshloop run --plan meshloop-plan.json --accept-plan --config config/meshloop.fi
 
 ## Next
 
+- [Install](install.md)
 - [Docs hub](README.md)
 - [Product brief](product/brief.md)
 - [Skills](../skills/README.md)

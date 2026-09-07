@@ -57,7 +57,7 @@ pub fn catalog_json(version: &str) -> String {
 }
 
 pub fn pack_readme() -> &'static str {
-    "Meshloop session bundle\n\nInstall skills from skills/.\nRun local MCP: meshloop mcp\nNever use unprefixed plan/reviewer/scout tools.\n"
+    "Meshloop session bundle\n\nCopy skills/meshloop-* into the origin harness skill folder.\nRun local MCP: meshloop mcp\nNever use unprefixed plan/reviewer/scout tools.\nFull setup: https://github.com/smota/meshloop/blob/main/docs/install.md\n"
 }
 
 pub fn write_to(dest: &Path) -> Result<Vec<PathBuf>, String> {

@@ -1,7 +1,7 @@
 # 0018 Publishing: crates.io source-install and version-locked session pack
 
 - Status: Accepted
-- Implementation: implemented — crate metadata, `meshloop bundle`, `xtask publish-dry`. First crates.io upload and GitHub Release binaries are not done.
+- Implementation: implemented — crates.io 0.1.0 uploaded 2026-09-06 (`meshloop-domain`, `meshloop-engine`, `meshloop-adapters`, `meshloop-cli`). GitHub Release binaries are not done.
 - Date: 2026-09-06
 - Accepted: 2026-09-06
 - Author/executor: Grok, under human product direction
@@ -13,7 +13,7 @@
 ## Context and constraints
 R1 ships from a git clone (`cargo build -p meshloop-cli` plus `skills/` or `xtask bundle`). Workspace crates had `publish = false`. Operators work inside a harness session; the compiled binary is the engine (ML-014, ADR 0001). A `cargo install` that yields only the binary is an incomplete product: slash skills and the MCP catalog must match that binary's version.
 
-No installer, no Windows service, no global configuration writes, no credential store. The first registry upload, GitHub Release, commit, and push remain separately authorized. This ADR does not replace 0001; it extends the packaging facet. Prebuilt `meshloop-windows-x86_64.exe` / `meshloop-linux-x86_64` artifacts (implementation-plan Phase 9) stay deferred.
+No installer, no Windows service, no global configuration writes, no credential store. Further crates.io versions, GitHub Releases, commit, and push remain separately authorized. This ADR does not replace 0001; it extends the packaging facet. Prebuilt `meshloop-windows-x86_64.exe` / `meshloop-linux-x86_64` artifacts (implementation-plan Phase 9) stay deferred.
 
 ## Alternatives
 A: Keep clone-only distribution (`publish = false`). Rejected — the user asked to enable publishing.
@@ -35,4 +35,4 @@ D: crates.io for the four product crates, `xtask` unpublished, session pack embe
 `publish = false` is removed from workspace defaults. Path dependencies carry a version so `cargo publish` can rewrite them to crates.io. `fixture_harness` stays an adapters binary (CI double); product install is `meshloop-cli` only. A tagged maintainer publish can run `xtask publish-dry` then `cargo publish` in dependency order (domain → engine → adapters → cli), waiting for the crates.io index after each crate. `cargo package` of a crate cannot resolve unpublished `meshloop-*` path+version dependencies, so `publish-dry` verifies `meshloop-domain` now and packages the others once their dependencies exist on the index. Trusted publishing / `CARGO_REGISTRY_TOKEN` is configured outside this repository. Forks must not present crates.io or GitHub artifacts as official Meshloop releases (TRADEMARKS.md).
 
 ## Verification
-`cargo run -p xtask -- check`. `cargo run -p xtask -- smoke` includes `meshloop:bundle`. `cargo run -p xtask -- publish-dry` packages each published crate in isolation. CLI test: `meshloop bundle --dest <tmp>` writes prefixed skills and a catalog whose version equals `CARGO_PKG_VERSION`. This ADR is not evidence of a crates.io upload.
+`cargo run -p xtask -- check`. `cargo run -p xtask -- smoke` includes `meshloop:bundle`. CLI test: `meshloop bundle --dest <tmp>` writes prefixed skills and a catalog whose version equals `CARGO_PKG_VERSION`. crates.io 0.1.0: https://crates.io/crates/meshloop-cli (and the three implementation crates). Operator install: `docs/install.md`.

@@ -8,7 +8,8 @@ no chat, Discord, or GitHub Discussions at this launch, and no response SLA.
 | You want | Go here |
 |---|---|
 | What this is, and what Release 1 actually does | [README](../README.md), then the [docs hub](../docs/README.md) |
-| Try the fixture loop on native Windows | [Getting started](../docs/start.md) |
+| Install on native Windows | [Install](../docs/install.md) (`cargo install meshloop-cli --locked`) |
+| Run the in-session loop | [Getting started](../docs/start.md) |
 | A bug in the fixture loop, CLI, store, or docs | [GitHub Issues](https://github.com/smota/meshloop/issues/new/choose) (use a template) |
 | “I expected live Claude / Codex / WSL2 / a package” | The **R1 limitation** issue form |
 | A vulnerability | [Security policy](SECURITY.md) — not a public issue |
@@ -16,6 +17,7 @@ no chat, Discord, or GitHub Discussions at this launch, and no response SLA.
 
 ## Release 1 is not
 
-Live multi-harness dispatch, a packaged install, verified WSL2/Linux/macOS, or
-concurrency greater than 1. Those are documented limitations, not support gaps
-to work around in a bug report.
+Live multi-harness parallelism, prebuilt GitHub Release binaries, verified
+WSL2/Linux/macOS, or concurrency greater than 1. Those are documented
+limitations, not support gaps to work around in a bug report. crates.io
+source-install (`cargo install meshloop-cli --locked`) is in R1.

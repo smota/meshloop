@@ -1,7 +1,7 @@
 # Product brief
 
-Public map: [docs/README.md](../README.md). Operator loop:
-[Getting started](../start.md).
+Public map: [docs/README.md](../README.md). Install:
+[Install](../install.md). Operator loop: [Getting started](../start.md).
 
 **Release 1** is an agent-session control plane on native Windows: you stay in
 Claude Code, Codex, Pi, Grok, or Agy; Meshloop farms live Herdr workers,
@@ -56,4 +56,5 @@ then score). R1 does **not** query vendor quota APIs. Detail:
 - Human gates: `review-plan` (or `run --accept-plan`), node `accept --as`, `integrate --accept-integrate`.
 - No credential store, no daemon, no auto-merge to `main`.
 
-Next: [Getting started](../start.md). Builders: [architecture overview](../architecture/overview.md).
+Next: [Install](../install.md), then [Getting started](../start.md).
+Builders: [architecture overview](../architecture/overview.md).

@@ -11,6 +11,7 @@ loop — locally, from inside the session you are already in, without storing
 credentials.
 
 [![License](https://img.shields.io/github/license/smota/meshloop?style=flat-square)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/meshloop-cli.svg?style=flat-square)](https://crates.io/crates/meshloop-cli)
 [![Version](https://img.shields.io/badge/version-0.1.0-informational?style=flat-square)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.98-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#status)
@@ -30,6 +31,21 @@ credentials.
 If a planner, worker, or reviewer appears **in this pane**, stop. Origin was
 not injected.
 
+## Install
+
+Native Windows. Herdr 0.8 must be running. Full setup:
+**[Install and setup](docs/install.md)**.
+
+```text
+cargo install meshloop-cli --locked
+meshloop --version
+```
+
+Then, in a **throwaway git repo** (not this product clone): write `meshloop.toml`
+from [config/meshloop.example.toml](config/meshloop.example.toml), run
+`meshloop bundle --dest .`, copy `skills/meshloop-*` into the origin harness
+skill folder, and `/meshloop:doctor`.
+
 ## The loop (one story)
 
 1. `/meshloop:doctor` — bind origin (this pane id). If Herdr is down, stop.
@@ -40,7 +56,7 @@ not injected.
 6. Optional `/meshloop:orchestrate` — two reviewer panes, never origin.
 7. Optional `meshloop integrate --into --accept-integrate` — only step that lands on a branch you name.
 
-Full steps, throwaway repo, and failure screens: **[Getting started](docs/start.md)**.
+Full steps and failure screens: **[Getting started](docs/start.md)**.
 
 ## Why
 
@@ -60,14 +76,14 @@ The five names are the **intended configured set**, not a compatibility matrix.
 | Capability | Release 1 (0.1.0) |
 |---|---|
 | Loop above, live Herdr workers | Yes, native Windows + Herdr 0.8 (`xtask live` is the launch gate) |
-| Commands | `plan`, `review-plan`, `run`, `status`, `resume`, `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor`, `orchestrate`, `mcp` |
+| Commands | `plan`, `review-plan`, `run`, `status`, `resume`, `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor`, `orchestrate`, `mcp`, `bundle` |
 | Plan gate | `review-plan` Accept / Decline / Adjust (CLI shortcut: `run --accept-plan`) |
 | Node / land gates | `accept --as` then `resume`; `integrate --accept-integrate` |
 | Origin pane | Supervisor-only; never split |
 | Fixture | CI double (`--fixture-only`) |
 | Credentials / your branch | Not stored / untouched until integrate |
 | Concurrency / prebuilt binaries / WSL2 / queried quota | 1 / no / unverified / not queried |
-| crates.io publish path | Enabled (`cargo install meshloop-cli --locked`; no registry upload yet) |
+| crates.io | 0.1.0 (`cargo install meshloop-cli --locked`) |
 | ADRs 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 · 0018 | Accepted |
 
 ## Safety
@@ -81,6 +97,7 @@ The five names are the **intended configured set**, not a compatibility matrix.
 ## Documentation
 
 **[Docs hub](docs/README.md)** ·
+**[Install](docs/install.md)** ·
 **[Getting started](docs/start.md)** ·
 **[Product brief](docs/product/brief.md)** ·
 **[Skills](skills/README.md)**
@@ -98,15 +115,9 @@ cargo run -p xtask -- publish-dry
 cargo run -p xtask -- live     # fails if Herdr is down
 ```
 
-Published install (native Windows; first crates.io upload is a separate maintainer action):
-
-```text
-cargo install meshloop-cli --locked
-meshloop bundle
-```
-
 The binary is the **engine**. Skills/MCP are the **operator surface**.
-No-args `meshloop` prints **status**, not help.
+No-args `meshloop` prints **status**, not help. Operator install is
+[docs/install.md](docs/install.md), not this section.
 
 Live tests may split **non-origin** panes. See
 [testing](docs/engineering/testing.md) and [AGENTS.md](AGENTS.md).

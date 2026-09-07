@@ -1,6 +1,8 @@
 # Meshloop skills (session control plane)
 
-Operator steps: [Getting started](../docs/start.md). Hub:
+Install: [docs/install.md](../docs/install.md)
+(`cargo install meshloop-cli --locked`, then `meshloop bundle --dest .`).
+Operator loop: [Getting started](../docs/start.md). Hub:
 [docs/README.md](../docs/README.md).
 
 You stay in this pane. Call, in order:

@@ -12,7 +12,8 @@ double. Do not reintroduce `--allow-live-harness` as a product gate.
 
 ## Before you write
 
-1. Read [Getting started](docs/start.md) if you have not run the in-session loop.
+1. Read [Install](docs/install.md) and [Getting started](docs/start.md) if you
+   have not run the in-session loop.
 2. Open an issue with a template ([bug](.github/ISSUE_TEMPLATE/bug.yml),
    [docs](.github/ISSUE_TEMPLATE/docs.yml),
    [R1 limitation](.github/ISSUE_TEMPLATE/limitation.yml),
@@ -73,9 +74,9 @@ Merge requires maintainer authorization ([@smota](https://github.com/smota)).
 AI review is supporting evidence, not proof of correctness. High-risk
 security, unsafe Rust (currently forbidden), destructive data changes, and
 release acceptance need human review of a concrete result. Local green is not
-remote success. crates.io upload and GitHub Releases are maintainer-gated
-(ADR 0018); `xtask publish-dry` is not an upload. Do not `cargo publish`
-without that authorization.
+remote success. crates.io 0.1.0 is already uploaded. Further versions and GitHub Releases are
+maintainer-gated (ADR 0018). Do not `cargo publish` without that
+authorization.
 
 ## Conduct and legal
 

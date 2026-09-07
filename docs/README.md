@@ -8,11 +8,13 @@ accept. It does not store credentials.
 **Release 1** — native Windows, Herdr 0.8 live workers, concurrency 1. Fixture
 subprocess is the CI double (`--fixture-only`). Tests may split **non-origin**
 panes; they must never split the supervisor pane. WSL2 and prebuilt binaries
-are unverified. crates.io source-install is enabled; no registry upload yet.
+are unverified. crates.io **0.1.0** is published
+([meshloop-cli](https://crates.io/crates/meshloop-cli)).
 
 ```mermaid
 flowchart TB
   subgraph operators [Operators]
+    Install[Install]
     Start[Getting started]
     Skills[Skills]
     Brief[Product brief]
@@ -22,6 +24,7 @@ flowchart TB
     Overview[Architecture overview]
     ADRs[ADR index]
   end
+  Install --> Start
   Start --> Skills
   Start --> Brief
   Status --> Overview
@@ -32,7 +35,8 @@ flowchart TB
 
 | You | Open |
 |---|---|
-| Operator in a Herdr agent session | [Getting started](start.md) (install [skills](../skills/README.md) as step 0) |
+| First-time operator | [Install](install.md), then [Getting started](start.md) |
+| Already installed, in a Herdr session | [Getting started](start.md) |
 | Wanting the problem statement | [Product brief](product/brief.md) |
 | Changing code or reviewing a diff | [Implementation status](engineering/implementation-status.md), then [AGENTS.md](../AGENTS.md) |
 
@@ -43,9 +47,10 @@ flowchart TB
 
 Live workers are the default. `run` does not merge onto your current branch.
 
-1. [Getting started](start.md)
-2. Example config: [`config/meshloop.example.toml`](../config/meshloop.example.toml)
-3. [Skills](../skills/README.md)
+1. [Install](install.md)
+2. [Getting started](start.md)
+3. Example config: [`config/meshloop.example.toml`](../config/meshloop.example.toml)
+4. [Skills](../skills/README.md)
 
 ## Product and decisions
 
@@ -60,7 +65,7 @@ Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017 / 0018** are Accep
 ## Architecture (after the hub)
 
 [Overview](architecture/overview.md) describes the v1 shape and names R1
-residuals (WSL2, concurrency > 1, prebuilt binaries, crates.io upload, queried quota).
+residuals (WSL2, concurrency > 1, prebuilt binaries, queried quota).
 
 - [Component boundaries](architecture/boundaries.md)
 - [Execution lifecycle](architecture/execution-lifecycle.md)

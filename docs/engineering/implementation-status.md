@@ -30,6 +30,8 @@ Native Windows (`rustc 1.98.0`).
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
   `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (origin pane),
   `orchestrate`, `mcp`, `bundle`. Store: `.meshloop/state.sqlite`.
+- **crates.io 0.1.0** (2026-09-06): `meshloop-domain`, `meshloop-engine`,
+  `meshloop-adapters`, `meshloop-cli`. Operator path: [install.md](../install.md).
 
 Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
 accept+resume, review-plan accept/decline/adjust. Live tests may split
@@ -46,7 +48,7 @@ accept+resume, review-plan accept/decline/adjust. Live tests may split
 ## Residuals — not product claims
 
 - WSL2 / prebuilt GitHub Release binaries
-- crates.io enablement (ADR 0018); no registry upload yet
+- Further crates.io versions still maintainer-gated (0.1.0 is uploaded)
 - Vendor quota numbers not queried
 - Tier assignment = dependency-count heuristic
 - Concurrency = 1
@@ -54,5 +56,6 @@ accept+resume, review-plan accept/decline/adjust. Live tests may split
 
 ## Commit
 
-Live-Herdr flip and `meshloop:review-plan` land on the working tree after
-`64430f2`. This file is the executor log, not a public roadmap.
+Live-Herdr flip and `meshloop:review-plan` land after `64430f2`. crates.io
+0.1.0 upload is on `main` after `28e467b`. This file is the executor log, not
+a public roadmap.

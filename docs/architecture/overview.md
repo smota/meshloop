@@ -4,8 +4,8 @@ Public map: [docs/README.md](../README.md). R1: [ADR 0016](adr/0016-r1-closed-lo
 
 This page is the **v1 shape**. R1 ships the subset in ADR 0016 on **native
 Windows**. Named residuals: WSL2 unverified, concurrency = 1, prebuilt
-binaries not started, crates.io not yet uploaded,
-quota windows not queried from vendors.
+binaries not started, quota windows not queried from vendors. crates.io 0.1.0
+is published.
 
 ## Two surfaces (ADR 0001)
 

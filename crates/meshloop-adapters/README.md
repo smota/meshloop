@@ -8,5 +8,6 @@ This crate is an implementation crate. Install the engine with:
 
 ```text
 cargo install meshloop-cli --locked
-meshloop bundle
 ```
+
+Then [Install and setup](https://github.com/smota/meshloop/blob/main/docs/install.md).

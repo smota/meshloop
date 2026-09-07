@@ -9,7 +9,7 @@ This is proposed sequencing, not an accepted ADR. For what has actually been bui
 verified as of 2026-09-05, see docs/engineering/implementation-status.md — Phases 0-7 below
 are substantially implemented on native Windows (Phase 0's WSL2 half is not: no C toolchain
 in the WSL distribution here); Phase 8 (remaining harnesses, parallelism) is not
-started. Phase 9 crates.io source-install is enabled (ADR 0018; no registry upload);
+started. Phase 9 crates.io 0.1.0 is published (ADR 0018);
 prebuilt binaries are not started. Re-derive current status from the actual repository before
 trusting either document if time has passed. See design-patterns.md for the concrete
 pattern each phase's module should be built and tested around — it maps directly onto
@@ -102,8 +102,7 @@ low-coupling nodes per ADR 0009.
 
 ## Phase 9: packaging
 crates.io source-install is in ADR 0018 (`cargo install meshloop-cli --locked` then
-`meshloop bundle`). That path is enabled in-tree; the first registry upload is a
-separate maintainer action.
+`meshloop bundle`). 0.1.0 is on crates.io. Further versions remain maintainer-gated.
 
 Prebuilt binaries remain: one static release binary per Tier A target —
 `meshloop-windows-x86_64.exe` via a locked `cargo build --release` on native Windows,
