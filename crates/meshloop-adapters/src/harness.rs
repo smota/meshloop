@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use meshloop_domain::capability::{Compatibility, HarnessError, HarnessProfile};
 use meshloop_engine::agent::AgentSpec;
-use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome};
+use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome, LiveCheck};
 
 pub struct CliHarnessConfig {
     pub name: String,
@@ -127,6 +127,14 @@ impl HarnessCapabilities for CliHarness {
             pid: Some(pid),
             pane_id: None,
         })
+    }
+
+    fn session_live(&self, handle: &HarnessHandle) -> LiveCheck {
+        match self.running.lock() {
+            Ok(reg) if reg.contains_key(&Self::attempt_key(handle)) => LiveCheck::Live,
+            Ok(_) => LiveCheck::Dead,
+            Err(_) => LiveCheck::Ambiguous,
+        }
     }
 
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {

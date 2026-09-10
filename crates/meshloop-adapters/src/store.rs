@@ -192,6 +192,8 @@ fn parse_event(s: &str) -> Result<Event, StoreError> {
         "IntegrationOwnerMerge" => Ok(Event::IntegrationOwnerMerge),
         "StaleBaseDetected" => Ok(Event::StaleBaseDetected),
         "RetryAuthorized" => Ok(Event::RetryAuthorized),
+        "LiveWorkerSettled" => Ok(Event::LiveWorkerSettled),
+        "DependencyCleared" => Ok(Event::DependencyCleared),
         other => Err(StoreError::Corrupt(format!("unknown event {other}"))),
     }
 }
@@ -613,6 +615,44 @@ impl RunStore for SqliteStore {
             .last())
     }
 
+    fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT attempt_id FROM attempts WHERE graph_id = ?1 ORDER BY attempt_id")
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let ids: Result<Vec<u32>, _> = stmt
+            .query_map(params![graph_id], |r| r.get(0))
+            .map_err(|e| StoreError::Io(e.to_string()))?
+            .collect();
+        let ids = ids.map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(row) = self.load_attempt(AttemptId(id))? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM evidence WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE graph_id = ?1)",
+                params![graph_id],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        self.conn
+            .execute("DELETE FROM events WHERE graph_id = ?1", params![graph_id])
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        self.conn
+            .execute(
+                "DELETE FROM attempts WHERE graph_id = ?1",
+                params![graph_id],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     fn update_attempt_pid(
         &mut self,
         attempt_id: AttemptId,
@@ -663,7 +703,8 @@ pub fn plan_digest(json: &str) -> String {
 mod tests {
     use super::*;
     use meshloop_domain::evidence::DeterministicEvidence;
-    use meshloop_engine::ports::{AttemptRow, RunStore, TierKey};
+    use meshloop_domain::state::{Event, TaskState};
+    use meshloop_engine::ports::{AttemptRow, EventLog, RunStore, TierKey, TransitionRecord};
 
     fn candidate() -> CandidateRef {
         CandidateRef {
@@ -696,6 +737,60 @@ mod tests {
             .unwrap();
         let loaded = store.load_attempt(AttemptId(1)).unwrap().unwrap();
         assert_eq!(loaded.pane_id.as_deref(), Some("w3:p2"));
+    }
+
+    #[test]
+    fn reset_graph_execution_keeps_run_row() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "g".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "abc".into(),
+                integrate_ref: "meshloop/g/integrate".into(),
+                plan_json: "{}".into(),
+                plan_sha256: "x".into(),
+                created_at: "0".into(),
+                review_note: None,
+            })
+            .unwrap();
+        store
+            .save_attempt(&AttemptRow {
+                attempt_id: AttemptId(1),
+                graph_id: "g".into(),
+                task_id: TaskId(1),
+                harness: Some("grok".into()),
+                model_ref: None,
+                worktree_path: None,
+                pid: None,
+                image_name: None,
+                pane_id: None,
+                started_at: None,
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+        store
+            .append(TransitionRecord {
+                graph_id: "g".into(),
+                task_id: TaskId(1),
+                attempt_id: Some(AttemptId(1)),
+                from: TaskState::Ready,
+                to: TaskState::Running,
+                event: Event::AttemptStarted,
+                reason: None,
+                executor: "test".into(),
+                occurred_at: "0".into(),
+            })
+            .unwrap();
+        store.reset_graph_execution("g").unwrap();
+        assert!(store.attempts_for_graph("g").unwrap().is_empty());
+        assert!(store.records_for_graph("g").unwrap().is_empty());
+        assert!(store.load_run("g").unwrap().is_some());
+        assert_eq!(
+            store.load_run("g").unwrap().unwrap().plan_state,
+            PlanState::PlanAccepted
+        );
     }
 
     #[test]

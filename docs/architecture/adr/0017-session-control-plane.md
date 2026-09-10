@@ -24,9 +24,10 @@ Pi-only extension — Meshloop must not become that.
 3. Wrappers are a **skill pack + local MCP**; slash commands are deterministic
    (`/meshloop:plan`, `/meshloop:review-plan`). No saga in SKILL.md (ML-014).
    Skills inject `--origin-harness` / `--origin-session` or `MESHLOOP_ORIGIN_*`.
-4. Live workers are **Herdr 0.8 panes** (`pane split --no-focus`, `pane run <id> …`,
-   `agent start --kind --pane`). Fixture subprocess is CI only. Doctor does not split
-   panes; it reports `origin_session` from `herdr pane current` or env.
+4. Live workers are **Herdr 0.8 panes** in a Meshloop-owned workspace (ADR 0019:
+   `workspace create --no-focus`, then `agent start --kind --pane`). Fixture subprocess
+   is CI only. Doctor does not split panes; it reports `origin_session` from
+   `herdr pane current` or env. Origin space topology is not mutated.
 5. Every skill, command, MCP tool, and role id is prefixed **`meshloop:`**. MCP uses
    `meshloop_<leaf>` because MCP names cannot contain `:`. Unprefixed harness words are
    rejected.

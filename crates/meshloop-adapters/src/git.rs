@@ -222,6 +222,27 @@ impl WorkspacePort for GitWorktreeAdapter {
             .or_else(|_| self.run_in(worktree, &["diff", "--no-color", base]))
             .map_err(Into::into)
     }
+
+    fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if !self.worktree_exists(path) {
+            return Ok(());
+        }
+        self.run(&["worktree", "remove", "--force", &path.to_string_lossy()])
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError> {
+        match self.run(&["branch", "-D", branch]) {
+            Ok(_) => Ok(()),
+            Err(GitError::CommandFailed { stderr })
+                if stderr.contains("not found") || stderr.contains("not exist") =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[cfg(test)]

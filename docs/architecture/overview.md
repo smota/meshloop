@@ -15,8 +15,9 @@ is published.
 | Compiled `meshloop` binary | Engine / saga (ML-014). Skills contain no orchestration. |
 
 You sit in an authenticated agent pane (`meshloop:origin`). Meshloop asks Herdr
-to open **other** panes for planner, worker, and reviewers. Isolation is git
-worktrees, not panes. The origin pane is never split.
+to open planner, worker, and reviewer panes in a **Meshloop-owned workspace**
+(`meshloop-<repo>`, `--no-focus`). Isolation is git worktrees, not panes. The
+origin pane and origin space are never split or tabbed.
 
 ```mermaid
 flowchart LR

@@ -45,6 +45,17 @@ pub trait HarnessCapabilities {
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError>;
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError>;
     fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError>;
+    /// Whether the attempt's process/pane is still live. Herdr workers have no PID;
+    /// the pane/agent is the process tree (execution-lifecycle.md).
+    fn session_live(&self, handle: &HarnessHandle) -> LiveCheck {
+        let _ = handle;
+        LiveCheck::Ambiguous
+    }
+
+    fn pane_for_worktree(&self, worktree: &Path) -> Option<String> {
+        let _ = worktree;
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +155,8 @@ pub trait WorkspacePort {
     fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError>;
     fn remove_file(&self, worktree: &Path, rel: &str) -> Result<(), WorkspaceError>;
     fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
+    fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
+    fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +280,8 @@ pub trait RunStore: EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore
         graph_id: &str,
         task_id: TaskId,
     ) -> Result<Option<AttemptRow>, StoreError>;
+    fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError>;
+    fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError>;
     fn update_attempt_pid(
         &mut self,
         attempt_id: AttemptId,

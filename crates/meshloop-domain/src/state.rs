@@ -45,6 +45,10 @@ pub enum Event {
     IntegrationOwnerMerge,
     StaleBaseDetected,
     RetryAuthorized,
+    /// Premature Failed while the Herdr pane was still live; worker has now settled.
+    LiveWorkerSettled,
+    /// Upstream is no longer Failed/Cancelled/Blocked; dependents may be pending again.
+    DependencyCleared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,8 @@ pub fn transition(from: TaskState, event: Event) -> Result<TaskState, IllegalTra
         (Accepted, IntegrationOwnerMerge) => Integrated,
         (Accepted, StaleBaseDetected) => Failed,
         (Failed, RetryAuthorized) => Ready,
+        (Failed, LiveWorkerSettled) => Verifying,
+        (Blocked, DependencyCleared) => Pending,
         (state, Cancel) if state != Integrated && state != Cancelled => Cancelled,
         _ => return Err(IllegalTransition { from, event }),
     };
@@ -125,6 +131,8 @@ mod tests {
         (Accepted, IntegrationOwnerMerge, Integrated),
         (Accepted, StaleBaseDetected, Failed),
         (Failed, RetryAuthorized, Ready),
+        (Failed, LiveWorkerSettled, Verifying),
+        (Blocked, DependencyCleared, Pending),
     ];
 
     #[test]
@@ -163,6 +171,8 @@ mod tests {
             IntegrationOwnerMerge,
             StaleBaseDetected,
             RetryAuthorized,
+            LiveWorkerSettled,
+            DependencyCleared,
         ];
         for &state in &all_states {
             for &event in &all_events {

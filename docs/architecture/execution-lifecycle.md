@@ -23,7 +23,9 @@ flowchart LR
 | pending | blocked | dependency-failed or scope-revoked event | an upstream task reached `failed`/`cancelled`, or authorization was withdrawn |
 | ready | running | attempt-started event | concurrency budget available (ADR 0009); harness capability confirmed (ADR 0003) |
 | running | verifying | harness-exited event | exit code recorded; harness exit success alone never satisfies the later `accepted` precondition |
-| running | failed | harness-crashed or timeout event | owned process tree confirmed terminated |
+| running | failed | harness-crashed or timeout event | owned process tree confirmed terminated (Herdr: pane/agent gone — not `agent_prompt_stalled`) |
+| failed | verifying | live-worker-settled event | Failed was premature; the same attempt's Herdr pane settled; harvest that worktree |
+| blocked | pending | dependency-cleared event | no upstream remains Failed/Cancelled/Blocked |
 | running | cancelled | user/operator cancel event | owned process tree confirmed terminated |
 | verifying | awaiting-review | deterministic-checks-passed event | DeterministicEvidence bound to exact candidate revision (ADR 0007) |
 | verifying | failed | deterministic-checks-failed event | failure evidence retained, redacted (ADR 0007) |

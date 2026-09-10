@@ -9,10 +9,10 @@ adapter contract tests with synthetic fixtures, and live Herdr tests against a r
 server. `tests/scenarios/scaffold_cli.rs` covers help, version, missing-argument
 rejection, and unprefixed-role rejection. End-to-end CLI tests drive the compiled
 binary against `fixture_harness` on disposable git repos (canned plan, `--accept-plan`
-gate, empty-diff failure, accept then resume to Integrated). Live tests may split
-**non-origin** panes when `herdr status` is running; they skip if the server is down.
-`cargo run -p xtask -- live` **fails** if Herdr is down (launch gate). Never split
-the origin supervisor pane. `cargo run -p xtask -- publish-dry` packages the four
+gate, empty-diff failure, accept then resume to Integrated). Live tests may create a
+Meshloop-owned Herdr workspace when `herdr status` is running; they skip if the server
+is down. `cargo run -p xtask -- live` **fails** if Herdr is down (launch gate). Never
+split the origin supervisor pane or mutate the origin space. `cargo run -p xtask -- publish-dry` packages the four
 publishable crates in isolation (ADR 0018); it is not a crates.io upload.
 
 Future critical cases: DAG cycles, dependency failure, concurrency limits, cancellation,

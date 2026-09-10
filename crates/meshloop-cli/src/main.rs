@@ -127,6 +127,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Run {
             plan,
             accept_plan,
+            reset,
             config,
             worktree_base,
             db,
@@ -134,6 +135,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         } => cmd_run(
             plan,
             accept_plan,
+            reset,
             config,
             worktree_base,
             db,
@@ -144,6 +146,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Resume {
             graph,
             retry,
+            restart,
             config,
             db,
             worktree_base,
@@ -151,6 +154,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         } => cmd_resume(
             graph,
             retry,
+            restart,
             config,
             db,
             worktree_base,
@@ -326,6 +330,11 @@ fn cmd_plan(
                 return ExitCode::from(1);
             }
             if json {
+                let loop_space =
+                    std::fs::read_to_string(root.join(".meshloop").join("loop-space.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .unwrap_or(serde_json::Value::Null);
                 println!(
                     "{}",
                     json_out::ok(
@@ -335,6 +344,7 @@ fn cmd_plan(
                             "role": "meshloop:planner",
                             "path": out_path,
                             "graph": graph,
+                            "loop_space": loop_space,
                             "next": "meshloop:review-plan --accept|--decline|--adjust",
                         }),
                     )
@@ -558,6 +568,7 @@ fn cmd_review_plan(
 fn cmd_run(
     plan: PathBuf,
     accept_plan: bool,
+    reset: bool,
     config: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
     db: Option<PathBuf>,
@@ -664,14 +675,25 @@ fn cmd_run(
                 eprintln!("plan '{id}' was declined; meshloop:review-plan --adjust, then --accept");
                 return ExitCode::from(2);
             }
+            OrchestratorError::DuplicateGraph { graph_id, .. } if reset => {
+                if let Err(err) = saga.restart(&graph_id) {
+                    eprintln!("run --reset failed: {err:?}");
+                    return ExitCode::from(1);
+                }
+            }
             OrchestratorError::DuplicateGraph { graph_id, resume } if resume => {
                 eprintln!(
-                    "graph '{graph_id}' already exists and is not terminal; use meshloop resume"
+                    "graph '{graph_id}' already exists and is not terminal; use meshloop resume \
+                     (or resume --restart to wipe attempts and re-run this accepted plan)"
                 );
                 return ExitCode::from(2);
             }
             OrchestratorError::DuplicateGraph { graph_id, .. } => {
-                eprintln!("graph '{graph_id}' already exists; choose a new graph_id");
+                eprintln!(
+                    "graph '{graph_id}' already exists (FailedTerminal). \
+                     Re-run the accepted plan without replanning: meshloop resume --restart \
+                     (or meshloop run --plan … --reset). To start a different plan, change graph_id."
+                );
                 return ExitCode::from(2);
             }
             other => {
@@ -836,6 +858,10 @@ fn cmd_status(
                                     "id": n.task_id.0,
                                     "state": format!("{:?}", n.state),
                                     "description": n.description,
+                                    "pane_id": n.pane_id,
+                                    "live": n.live,
+                                    "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                    "note": n.note,
                                 })).collect::<Vec<_>>(),
                             }),
                         )
@@ -853,9 +879,11 @@ fn cmd_status(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_resume(
     graph: Option<String>,
     retry: bool,
+    restart: bool,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
@@ -877,7 +905,7 @@ fn cmd_resume(
                     return ExitCode::from(2);
                 }
             };
-            match saga.resume(&id, retry) {
+            match saga.resume(&id, retry, restart) {
                 Ok(reason) => {
                     println!("{}", report::format_idle(reason));
                     if let Ok(s) = saga.status(&id) {

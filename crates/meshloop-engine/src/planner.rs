@@ -36,9 +36,26 @@ pub fn decompose(
     harness: &dyn HarnessCapabilities,
     spec: &AgentSpec,
 ) -> Result<TaskGraph, PlanError> {
-    let handle = harness.invoke(spec).map_err(PlanError::Dispatch)?;
-    let outcome: HarnessOutcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
-    parse_graph(spec, &outcome)
+    match harness.invoke(spec) {
+        Ok(handle) => {
+            let outcome: HarnessOutcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
+            parse_graph(spec, &outcome)
+        }
+        Err(e) => {
+            let file_path = spec.worktree_path.join("meshloop-plan.json");
+            if file_path.is_file() {
+                let outcome = HarnessOutcome {
+                    exit_code: 0,
+                    output_redacted: String::new(),
+                    worktree_changed: true,
+                };
+                if let Ok(graph) = parse_graph(spec, &outcome) {
+                    return Ok(graph);
+                }
+            }
+            Err(PlanError::Dispatch(e))
+        }
+    }
 }
 
 pub trait TierAssigner {
@@ -159,6 +176,42 @@ mod tests {
             decompose(&harness, &spec()),
             Err(PlanError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn salvage_plan_file_when_invoke_fails() {
+        let dir = std::env::temp_dir().join(format!("meshloop-salvage-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let json =
+            r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":null}]}"#;
+        std::fs::write(dir.join("meshloop-plan.json"), json).unwrap();
+        struct InvokeFail;
+        impl HarnessCapabilities for InvokeFail {
+            fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
+                unimplemented!()
+            }
+            fn invoke(&self, _spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
+                Err(HarnessError::Timeout)
+            }
+            fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
+                Ok(())
+            }
+            fn collect(&self, _handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
+                unimplemented!()
+            }
+        }
+        let spec = crate::agent::build_planning_spec(
+            "objective",
+            "scope",
+            AttemptId(1),
+            "claude-code",
+            "m",
+            dir.clone(),
+            Duration::from_secs(60),
+        );
+        let graph = decompose(&InvokeFail, &spec).expect("should salvage worktree plan");
+        assert_eq!(graph.nodes.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

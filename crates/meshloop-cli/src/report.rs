@@ -41,7 +41,13 @@ pub fn format_idle(reason: IdleReason) -> String {
                 .into()
         }
         IdleReason::FailedTerminal => {
-            "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. `resume --retry` may apply.\n"
+            "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. \
+             `resume --retry` if attempts remain; `resume --restart` re-runs this accepted plan without replanning.\n"
+                .into()
+        }
+        IdleReason::WaitingOnLiveWorker => {
+            "A Herdr worker pane is still live. Meshloop is waiting on that pane, not the 5s stall gate.\n\
+             `meshloop status` shows pane_id/live. Do not retry while it is working.\n"
                 .into()
         }
     }
@@ -59,8 +65,13 @@ pub fn format_status(status: &RunStatus) -> String {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "-".into());
         out += &format!(
-            "  [{}] {:?} {}  worktree={}\n",
-            n.task_id.0, n.state, n.description, wt
+            "  [{}] {:?} {}  worktree={} pane={} live={}\n",
+            n.task_id.0,
+            n.state,
+            n.description,
+            wt,
+            n.pane_id.as_deref().unwrap_or("-"),
+            n.live.as_deref().unwrap_or("-")
         );
         if let Some(note) = &n.note {
             out += &format!("      note: {note}\n");

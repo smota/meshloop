@@ -34,8 +34,8 @@ Native Windows (`rustc 1.98.0`).
   `meshloop-adapters`, `meshloop-cli`. Operator path: [install.md](../install.md).
 
 Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
-accept+resume, review-plan accept/decline/adjust. Live tests may split
-**non-origin** panes; they never split the supervisor pane.
+accept+resume, review-plan accept/decline/adjust. Live tests may create a **Meshloop-owned** Herdr workspace; they never split
+the supervisor pane or mutate the origin space.
 
 ## Session control plane (ADR 0017)
 

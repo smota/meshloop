@@ -12,7 +12,7 @@ flowchart TB
   subgraph stay [You stay]
     O[meshloop:origin<br/>this Codex / Claude / Grok pane]
   end
-  subgraph move [Meshloop moves]
+  subgraph move [Meshloop space — unfocused]
     P[planner pane]
     W[worker pane + git worktree]
     R[reviewer panes]
@@ -52,7 +52,8 @@ then score). R1 does **not** query vendor quota APIs. Detail:
 ## Product rules (R1)
 
 - Operator surface: `meshloop:` skills + local MCP. Binary is the engine (ML-014).
-- Origin is supervisor-only. Never split that pane.
+- Origin is supervisor-only. Never split that pane or tab the origin space.
+- Live agents run in a Meshloop-owned Herdr workspace (`meshloop-<repo>`).
 - Human gates: `review-plan` (or `run --accept-plan`), node `accept --as`, `integrate --accept-integrate`.
 - No credential store, no daemon, no auto-merge to `main`.
 

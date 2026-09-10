@@ -4,8 +4,9 @@ Install and first-time setup: **[Install](install.md)**
 (`cargo install meshloop-cli --locked`, then `meshloop bundle`).
 
 **This pane stays.** You are in Claude Code, Codex, Pi, Grok, or Agy inside
-Herdr 0.8. You are `meshloop:origin`. Meshloop opens **other** panes. If work
-starts in *this* pane, stop.
+Herdr 0.8. You are `meshloop:origin`. Meshloop creates a **separate Herdr
+space** (`meshloop-<repo>`) for planner, worker, and reviewer panes. Origin
+is not split and gets no extra tabs. If work starts in *this* pane, stop.
 
 The origin agent asks **Accept / Decline / Adjust in English**. You may answer
 in Portuguese (`aceitar` / `recusar` / `ajustar`). You should not have to type
@@ -21,12 +22,13 @@ clone. WSL2 and prebuilt GitHub Release binaries: unverified. Concurrency is
 |---|---|---|
 | Ready | `herdr_server_running: true`, `origin_session` = **this** pane, no new split | Set `MESHLOOP_ORIGIN_*`, then `/meshloop:plan` |
 | Herdr down | `herdr_server_running: false`. Zero new panes | Start Herdr 0.8. Do not plan |
-| Plan in flight | A **planner** pane **not this one**; `meshloop-plan.json` | Stay. Wait for the 3-way question |
+| Plan in flight | Planner in the **Meshloop space**, not this pane; `meshloop-plan.json` | Stay. Wait for the 3-way question |
 | Accept | No worker yet. Status `PlanAccepted` | `/meshloop:run` |
 | Decline | Status `PlanDeclined`. No worker. `run` refuses | Stop, or Adjust — never `run --accept-plan` |
 | Adjust | Planner pane **again**; still awaiting review; question repeats | Answer again |
-| Run | **Worker** pane + extra worktree; **this branch unchanged** | `/meshloop:accept` then `/meshloop:resume` |
+| Run | **Worker** in the Meshloop space + extra worktree; **this branch unchanged** | Stay. Status overlays Herdr `live`. `/meshloop:accept` then `/meshloop:resume` |
 | Origin mistake | Planner/worker/reviewer **in this pane** | Cancel. Fix origin. Do not continue |
+| FailedTerminal | Same accepted plan, nothing Ready | `meshloop resume --restart` (not a new `graph_id`) |
 
 `resume` merges into the **integrate worktree**. Only
 `meshloop integrate --into --accept-integrate` lands on a branch you name.
@@ -65,7 +67,8 @@ Later slash skills inject these. Doctor does not split panes.
 
 Stay supervisor. Intent can be conversation text or a `.md` (`--intent-file`).
 
-Slash: `/meshloop:plan`. A **planner** pane appears elsewhere. Meshloop checks
+Slash: `/meshloop:plan`. A **planner** pane appears in the Meshloop space, not
+this pane. Meshloop checks
 the graph is a DAG, not whether the breakdown is wise. Nothing is scheduled.
 
 ## 3. Review-plan — wait for their answer
@@ -102,8 +105,8 @@ Verification is the git diff against the attempt base.
 
 ## 5. Optional reviewers, then land
 
-`/meshloop:orchestrate` — two `meshloop:reviewer` panes from a pane **other
-than origin**. Synthesis is advisory. Node accept is still required.
+`/meshloop:orchestrate` — two `meshloop:reviewer` panes in the Meshloop space,
+never origin. Synthesis is advisory. Node accept is still required.
 
 ```text
 meshloop integrate --graph <id> --into <ref> --accept-integrate

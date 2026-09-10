@@ -50,7 +50,8 @@ sole **engine**: every capability must be reachable through it, with no saga in
 wrappers. R1 **operator UX** is the `meshloop:` skill pack plus local MCP
 (`meshloop mcp`, slash `/meshloop:plan`). Skills add zero engine logic (ML-014).
 Unprefixed harness words (`plan`, `reviewer`) are rejected. Live workers are
-Herdr panes; fixture is the CI double.
+Herdr panes in a Meshloop-owned workspace (`meshloop-<repo>`, ADR 0019);
+origin space topology is not mutated. Fixture is the CI double.
 
 **Scope.** A single local Git repository, already checked out, known working-tree state,
 one Meshloop instance at a time. Multi-repository orchestration, remote repositories, and

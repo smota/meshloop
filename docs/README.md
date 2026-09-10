@@ -6,8 +6,8 @@ objective, farms live workers, verifies diffs, and will not merge until you
 accept. It does not store credentials.
 
 **Release 1** — native Windows, Herdr 0.8 live workers, concurrency 1. Fixture
-subprocess is the CI double (`--fixture-only`). Tests may split **non-origin**
-panes; they must never split the supervisor pane. WSL2 and prebuilt binaries
+subprocess is the CI double (`--fixture-only`). Live agents use a Meshloop-owned
+Herdr workspace; they must never split the supervisor pane. WSL2 and prebuilt binaries
 are unverified. crates.io **0.1.0** is published
 ([meshloop-cli](https://crates.io/crates/meshloop-cli)).
 

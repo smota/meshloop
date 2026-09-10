@@ -47,6 +47,7 @@ pub enum Command {
     Run {
         plan: PathBuf,
         accept_plan: bool,
+        reset: bool,
         config: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
         db: Option<PathBuf>,
@@ -55,6 +56,7 @@ pub enum Command {
     Resume {
         graph: Option<String>,
         retry: bool,
+        restart: bool,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
@@ -215,6 +217,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
             Ok(Command::Run {
                 plan,
                 accept_plan: has_flag(rest, "--accept-plan"),
+                reset: has_flag(rest, "--reset"),
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
@@ -226,9 +229,15 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }),
         Some(v) if v == "resume" => {
             let rest = &args[1..];
+            let retry = has_flag(rest, "--retry");
+            let restart = has_flag(rest, "--restart");
+            if retry && restart {
+                return Err("meshloop:resume accepts either --retry or --restart, not both".into());
+            }
             Ok(Command::Resume {
                 graph: flag_value(rest, "--graph"),
-                retry: has_flag(rest, "--retry"),
+                retry,
+                restart,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
@@ -336,7 +345,8 @@ pub fn help_text() -> &'static str {
      Usage:\n\
      \x20 meshloop plan --objective \"<text>\" [--intent-file <path>] [--config] [--out] [--json]\n\
      \x20 meshloop review-plan --plan <path> --accept|--decline|--adjust [--reason] [--as] [--json]\n\
-     \x20 meshloop run --plan <path> --accept-plan [--fixture-only] [--json]\n\
+     \x20 meshloop run --plan <path> [--accept-plan] [--reset] [--fixture-only] [--json]\n\
+     \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
      \x20 meshloop status [--graph <id>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--json]\n\

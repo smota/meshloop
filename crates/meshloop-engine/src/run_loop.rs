@@ -18,8 +18,9 @@ use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose};
 use crate::ports::{
-    AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, LiveCheck, ProcessHint, ProcessView,
-    RunRow, RunStore, StoreError, TransitionRecord, WorkspaceError, WorkspacePort,
+    AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, LiveCheck,
+    ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord, WorkspaceError,
+    WorkspacePort,
 };
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
@@ -82,6 +83,7 @@ pub enum IdleReason {
     AwaitingHumanAcceptance,
     NoCapableCandidate,
     FailedTerminal,
+    WaitingOnLiveWorker,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -122,6 +124,8 @@ pub struct NodeStatus {
     pub note: Option<String>,
     pub worktree: Option<PathBuf>,
     pub revision: Option<String>,
+    pub pane_id: Option<String>,
+    pub live: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +463,16 @@ impl<'a> RunLoop<'a> {
         let graph = self.graph(&graph_id)?;
         let tasks = self.tasks(&graph_id)?;
 
+        if let Some(tick) = self.reattach_running(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
+        if let Some(tick) = self.harvest_live_failures(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
+        if let Some(tick) = self.clear_blocked(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
+
         if let Some(tick) = self.promote_pending(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
@@ -513,6 +527,11 @@ impl<'a> RunLoop<'a> {
                     reason: IdleReason::GraphComplete,
                 });
             }
+            if any_running {
+                return Ok(Tick::Idle {
+                    reason: IdleReason::WaitingOnLiveWorker,
+                });
+            }
             return Ok(Tick::Idle {
                 reason: IdleReason::FailedTerminal,
             });
@@ -529,6 +548,253 @@ impl<'a> RunLoop<'a> {
         Ok(Tick::Idle {
             reason: IdleReason::NoCapableCandidate,
         })
+    }
+
+    fn resolve_pane(&self, attempt: &AttemptRow) -> Option<String> {
+        if let Some(id) = &attempt.pane_id {
+            return Some(id.clone());
+        }
+        let wt = attempt.worktree_path.as_ref()?;
+        let name = attempt.harness.as_deref()?;
+        self.harnesses.get(name)?.pane_for_worktree(wt)
+    }
+
+    fn attempt_handle(attempt: &AttemptRow, pane_id: Option<String>) -> HarnessHandle {
+        HarnessHandle {
+            attempt_id: attempt.attempt_id,
+            pid: attempt.pid,
+            pane_id,
+        }
+    }
+
+    fn attempt_live(&self, attempt: &AttemptRow) -> LiveCheck {
+        let Some(name) = attempt.harness.as_deref() else {
+            return LiveCheck::Dead;
+        };
+        let Some(h) = self.harnesses.get(name) else {
+            return LiveCheck::Ambiguous;
+        };
+        h.session_live(&Self::attempt_handle(attempt, self.resolve_pane(attempt)))
+    }
+
+    fn reattach_running(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::Running) {
+                continue;
+            }
+            let Some(attempt) = self.store.latest_attempt_for_task(graph_id, node.id)? else {
+                continue;
+            };
+            match self.attempt_live(&attempt) {
+                LiveCheck::Dead => {
+                    let rec = self.append(
+                        graph_id,
+                        node.id,
+                        Some(attempt.attempt_id),
+                        TaskState::Running,
+                        Event::HarnessCrashedOrTimeout,
+                        Some("reattach: pane/process gone".into()),
+                    )?;
+                    return Ok(Some(Tick::Transition {
+                        task: node.id,
+                        attempt: Some(attempt.attempt_id),
+                        from: rec.from,
+                        to: rec.to,
+                        event: rec.event,
+                    }));
+                }
+                LiveCheck::Live | LiveCheck::Ambiguous => {
+                    let Some(name) = attempt.harness.clone() else {
+                        continue;
+                    };
+                    let Some(h) = self.harnesses.get(&name).copied() else {
+                        continue;
+                    };
+                    let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
+                    match h.collect(&handle) {
+                        Ok(_) => {
+                            let rec = self.append(
+                                graph_id,
+                                node.id,
+                                Some(attempt.attempt_id),
+                                TaskState::Running,
+                                Event::HarnessExited,
+                                Some("reattach: live pane settled".into()),
+                            )?;
+                            let _ = rec;
+                            let tier = node.tier.unwrap_or(Tier::Tier2);
+                            let candidate = Candidate {
+                                harness: name,
+                                model_ref: attempt.model_ref.clone().unwrap_or_default(),
+                                model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+                            };
+                            let wt = attempt.worktree_path.clone().unwrap_or_default();
+                            let start = attempt
+                                .outcome
+                                .as_deref()
+                                .and_then(|s| s.strip_prefix("base:"))
+                                .unwrap_or("")
+                                .to_string();
+                            let tick = self.verify_attempt(
+                                graph_id,
+                                graph,
+                                node,
+                                attempt.attempt_id,
+                                &wt,
+                                &start,
+                                tier,
+                                &candidate,
+                            )?;
+                            return Ok(Some(tick));
+                        }
+                        Err(e) => {
+                            if matches!(self.attempt_live(&attempt), LiveCheck::Live) {
+                                continue;
+                            }
+                            let rec = self.append(
+                                graph_id,
+                                node.id,
+                                Some(attempt.attempt_id),
+                                TaskState::Running,
+                                Event::HarnessCrashedOrTimeout,
+                                Some(format!("reattach: {e:?}")),
+                            )?;
+                            return Ok(Some(Tick::Transition {
+                                task: node.id,
+                                attempt: Some(attempt.attempt_id),
+                                from: rec.from,
+                                to: rec.to,
+                                event: rec.event,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn harvest_live_failures(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::Failed) {
+                continue;
+            }
+            let Some(attempt) = self.store.latest_attempt_for_task(graph_id, node.id)? else {
+                continue;
+            };
+            if self.resolve_pane(&attempt).is_none() {
+                continue;
+            }
+            if self.attempt_live(&attempt) == LiveCheck::Dead {
+                continue;
+            }
+            // Harvest is only for a premature crash/stall. A completed collect that
+            // already failed git-diff must not be re-harvested while the idle pane
+            // still looks Live (that looped thousands of times on awesome-landscape-v1).
+            let recs = self.store.records_for_graph(graph_id)?;
+            let last = recs.iter().rev().find(|r| r.task_id == node.id);
+            if matches!(
+                last.map(|r| r.event),
+                Some(Event::DeterministicChecksFailed | Event::LiveWorkerSettled)
+            ) {
+                continue;
+            }
+            if last.map(|r| r.event) != Some(Event::HarnessCrashedOrTimeout) {
+                continue;
+            }
+            let Some(name) = attempt.harness.clone() else {
+                continue;
+            };
+            let Some(h) = self.harnesses.get(&name).copied() else {
+                continue;
+            };
+            let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
+            if h.collect(&handle).is_err() {
+                continue;
+            }
+            let rec = self.append(
+                graph_id,
+                node.id,
+                Some(attempt.attempt_id),
+                TaskState::Failed,
+                Event::LiveWorkerSettled,
+                Some("harvest: live pane settled after premature fail".into()),
+            )?;
+            let _ = rec;
+            let tier = node.tier.unwrap_or(Tier::Tier2);
+            let candidate = Candidate {
+                harness: name,
+                model_ref: attempt.model_ref.clone().unwrap_or_default(),
+                model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+            };
+            let wt = attempt.worktree_path.clone().unwrap_or_default();
+            let start = attempt
+                .outcome
+                .as_deref()
+                .and_then(|s| s.strip_prefix("base:"))
+                .unwrap_or("")
+                .to_string();
+            let tick = self.verify_attempt(
+                graph_id,
+                graph,
+                node,
+                attempt.attempt_id,
+                &wt,
+                &start,
+                tier,
+                &candidate,
+            )?;
+            return Ok(Some(tick));
+        }
+        Ok(None)
+    }
+
+    fn clear_blocked(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::Blocked) {
+                continue;
+            }
+            let unsat = node.depends_on.iter().any(|d| {
+                matches!(
+                    tasks.get(d),
+                    Some(TaskState::Failed | TaskState::Cancelled | TaskState::Blocked)
+                )
+            });
+            if unsat {
+                continue;
+            }
+            let rec = self.append(
+                graph_id,
+                node.id,
+                None,
+                TaskState::Blocked,
+                Event::DependencyCleared,
+                Some("upstream no longer failed".into()),
+            )?;
+            return Ok(Some(Tick::Transition {
+                task: node.id,
+                attempt: None,
+                from: rec.from,
+                to: rec.to,
+                event: rec.event,
+            }));
+        }
+        Ok(None)
     }
 
     fn promote_pending(
@@ -956,6 +1222,19 @@ impl<'a> RunLoop<'a> {
         selected: &[Candidate],
     ) -> Result<Tick, OrchestratorError> {
         let attempts = self.store.attempts_for_task(graph_id, task_id)?;
+        let live_worker = attempts.iter().any(|a| {
+            self.resolve_pane(a).is_some()
+                && matches!(self.attempt_live(a), LiveCheck::Live | LiveCheck::Ambiguous)
+        });
+        if live_worker {
+            return Ok(Tick::Transition {
+                task: task_id,
+                attempt: fail.attempt_id,
+                from: fail.from,
+                to: fail.to,
+                event: fail.event,
+            });
+        }
         let retry_count = attempts.len() as u32;
         let used: HashSet<String> = attempts.into_iter().filter_map(|a| a.harness).collect();
         let unused = selected.iter().any(|c| !used.contains(&c.harness));
@@ -994,13 +1273,67 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    pub fn resume(&mut self, graph_id: &str, retry: bool) -> Result<IdleReason, OrchestratorError> {
+    pub fn resume(
+        &mut self,
+        graph_id: &str,
+        retry: bool,
+        restart: bool,
+    ) -> Result<IdleReason, OrchestratorError> {
+        if retry && restart {
+            return Err(OrchestratorError::Illegal(
+                "use either --retry or --restart, not both".into(),
+            ));
+        }
         self.active_graph = Some(graph_id.into());
-        self.crash_fail(graph_id)?;
-        if retry {
-            self.retry_failed(graph_id)?;
+        if restart {
+            self.restart(graph_id)?;
+        } else {
+            self.crash_fail(graph_id)?;
+            if retry {
+                self.retry_failed(graph_id)?;
+            }
         }
         self.loop_until_idle()
+    }
+
+    /// Keep the accepted plan; wipe this saga's attempts/events and leftover
+    /// worktrees so the same graph_id can execute again (no replan).
+    pub fn restart(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
+        let row = self
+            .store
+            .load_run(graph_id)?
+            .ok_or_else(|| OrchestratorError::MissingGraph(graph_id.into()))?;
+        if row.plan_state != PlanState::PlanAccepted {
+            return Err(OrchestratorError::Illegal(
+                "resume --restart requires a PlanAccepted graph".into(),
+            ));
+        }
+        let attempts = self.store.attempts_for_graph(graph_id)?;
+        for attempt in &attempts {
+            if let Some(name) = &attempt.harness
+                && let Some(h) = self.harnesses.get(name)
+            {
+                let handle = Self::attempt_handle(attempt, self.resolve_pane(attempt));
+                if matches!(
+                    h.session_live(&handle),
+                    LiveCheck::Live | LiveCheck::Ambiguous
+                ) {
+                    let _ = h.cancel(&handle);
+                }
+            }
+            if let Some(path) = &attempt.worktree_path {
+                let _ = self.workspace.remove_worktree(path);
+            }
+            let branch = self.attempt_branch(graph_id, attempt.task_id, attempt.attempt_id);
+            let _ = self.workspace.delete_branch(&branch);
+        }
+        let integrate = self.integrate_path(graph_id);
+        if self.workspace.worktree_exists(&integrate) {
+            let _ = self.workspace.reset_hard(&integrate, &row.run_base);
+        }
+        self.store.reset_graph_execution(graph_id)?;
+        self.active_graph = Some(graph_id.into());
+        Ok(())
     }
 
     fn crash_fail(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
@@ -1013,6 +1346,9 @@ impl<'a> RunLoop<'a> {
             }
             let attempt = self.store.latest_attempt_for_task(graph_id, node.id)?;
             let dead = match &attempt {
+                Some(a) if a.pane_id.is_some() => {
+                    matches!(self.attempt_live(a), LiveCheck::Dead)
+                }
                 Some(a) => match a.pid {
                     None => true,
                     Some(pid) => {
@@ -1186,8 +1522,17 @@ impl<'a> RunLoop<'a> {
         for n in &graph.nodes {
             let state = tasks.get(&n.id).copied().unwrap_or(TaskState::Pending);
             let attempt = self.store.latest_attempt_for_task(graph_id, n.id)?;
+            let live = attempt
+                .as_ref()
+                .map(|a| format!("{:?}", self.attempt_live(a)));
+            let pane_id = attempt.as_ref().and_then(|a| a.pane_id.clone());
             let note = if state == TaskState::Ready {
                 Some("Ready (may be waiting on QACR or cancel to unblock dependents)".into())
+            } else if state == TaskState::Failed && live.as_deref() == Some("Live") {
+                Some(
+                    "ledger Failed; Herdr pane still live — meshloop resume waits and harvests"
+                        .into(),
+                )
             } else {
                 None
             };
@@ -1198,6 +1543,8 @@ impl<'a> RunLoop<'a> {
                 note,
                 worktree: attempt.as_ref().and_then(|a| a.worktree_path.clone()),
                 revision: None,
+                pane_id,
+                live,
             });
         }
         Ok(RunStatus {
@@ -1277,6 +1624,7 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
                 0
             }
         }
+        IdleReason::WaitingOnLiveWorker => 0,
         IdleReason::NoCapableCandidate | IdleReason::FailedTerminal => 1,
     }
 }

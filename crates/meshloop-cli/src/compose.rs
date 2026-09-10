@@ -55,6 +55,20 @@ impl HarnessCapabilities for DispatchHarness {
             Self::Live(h) => h.collect(handle),
         }
     }
+
+    fn session_live(&self, handle: &HarnessHandle) -> meshloop_engine::ports::LiveCheck {
+        match self {
+            Self::Fixture(h) => h.session_live(handle),
+            Self::Live(h) => h.session_live(handle),
+        }
+    }
+
+    fn pane_for_worktree(&self, worktree: &Path) -> Option<String> {
+        match self {
+            Self::Fixture(h) => h.pane_for_worktree(worktree),
+            Self::Live(h) => h.pane_for_worktree(worktree),
+        }
+    }
 }
 
 pub struct Composed {
@@ -151,6 +165,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
                     name.clone(),
                     kind,
                     req.origin.session.clone(),
+                    req.repo_root.clone(),
                 )),
             );
         } else {

@@ -138,7 +138,7 @@ Then go to **[Getting started](start.md)** and run
 - Write a Windows service or global config
 - Store API keys
 - Merge onto a branch you did not name (`integrate --into --accept-integrate`)
-- Split the origin pane (if a planner/worker/reviewer appears **here**, stop)
+- Split the origin pane or add tabs to the origin space (if a planner/worker/reviewer appears **here**, stop). Live agents use a Meshloop-owned Herdr workspace.
 
 ## Builders (clone the product)
 

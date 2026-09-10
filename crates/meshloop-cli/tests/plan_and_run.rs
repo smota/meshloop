@@ -263,6 +263,94 @@ fn empty_diff_fails_verification() {
 }
 
 #[test]
+fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
+    let dir = disposable_repo("restart");
+    let fail_config = write_config(&dir, r#"["--noop"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g-restart","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let fail = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&fail_config)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("first run");
+    let fail_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fail.stdout),
+        String::from_utf8_lossy(&fail.stderr)
+    );
+    assert!(
+        fail_out.contains("Failed")
+            || fail_out.contains("FailedTerminal")
+            || !fail.status.success(),
+        "expected failed first wave, got: {fail_out}"
+    );
+
+    let again = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&fail_config)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("duplicate run");
+    let again_err = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        !again.status.success(),
+        "second run without --reset must refuse"
+    );
+    assert!(
+        again_err.contains("resume --restart") || again_err.contains("--reset"),
+        "duplicate graph should point at restart, got: {again_err}"
+    );
+
+    let ok_config = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let restart = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--restart", "--config"])
+        .arg(&ok_config)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("restart");
+    let restart_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&restart.stdout),
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    assert!(
+        restart.status.success(),
+        "restart should re-run the accepted plan, got: {restart_out}"
+    );
+    assert!(
+        restart_out.contains("AwaitingReview") || restart_out.contains("await `meshloop accept`"),
+        "expected a fresh dispatch after restart, got: {restart_out}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn roles_json_is_prefixed_and_namespaced_alias_works() {
     let output = meshloop()
         .args(["roles", "--json"])

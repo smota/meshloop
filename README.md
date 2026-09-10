@@ -19,11 +19,11 @@ credentials.
 [![unsafe](https://img.shields.io/badge/unsafe-forbidden-1A6B66?style=flat-square)](Cargo.toml)
 
 > **Release 1** (native Windows + Herdr 0.8): you stay in Claude Code, Codex,
-> Pi, Grok, or Agy. Meshloop opens **other** panes for planner, worker, and
-> reviewers, verifies the git diff, and will not merge until you accept.
-> Fixture subprocess is CI, not the product.
+> Pi, Grok, or Agy. Meshloop opens planner, worker, and reviewer panes in a
+> **Meshloop-owned Herdr space**, verifies the git diff, and will not merge
+> until you accept. Fixture subprocess is CI, not the product.
 
-| You — this pane (`meshloop:origin`) | Meshloop — other Herdr panes |
+| You — this pane (`meshloop:origin`) | Meshloop — dedicated Herdr space |
 |---|---|
 | Direct. Never implement the work here. | Planner, worker (+ git worktree), reviewers |
 | Never split. Bind `MESHLOOP_ORIGIN_SESSION` from `/meshloop:doctor`. | Isolation is the worktree, not the pane |
@@ -49,7 +49,7 @@ skill folder, and `/meshloop:doctor`.
 ## The loop (one story)
 
 1. `/meshloop:doctor` — bind origin (this pane id). If Herdr is down, stop.
-2. `/meshloop:plan` — planner pane **elsewhere**; graph file.
+2. `/meshloop:plan` — planner pane in the Meshloop space; graph file.
 3. `/meshloop:review-plan` — **Accept / Decline / Adjust** (English prompt; answer in any language).
 4. `/meshloop:run` — **after Accept only** — worker pane + worktree; **current branch unchanged**.
 5. `/meshloop:accept` then `/meshloop:resume` — node merges into the **integrate worktree**, not your branch.
