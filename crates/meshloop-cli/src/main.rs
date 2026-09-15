@@ -1,5 +1,7 @@
 //! Composition root. The binary is the engine (ADR 0001); skills/MCP are the operator surface.
 
+#![forbid(unsafe_code)]
+
 mod args;
 mod compose;
 mod config;

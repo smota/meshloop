@@ -2,6 +2,8 @@
 //! meshloop-domain and meshloop-context; never constructs concrete adapters — see
 //! docs/architecture/boundaries.md.
 
+#![forbid(unsafe_code)]
+
 pub mod agent;
 pub mod converge;
 pub mod orchestrate;

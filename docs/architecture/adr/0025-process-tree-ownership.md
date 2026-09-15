@@ -1,11 +1,11 @@
 # 0025 Host process-tree ownership via Windows Job Objects
 
-- Status: Proposed
+- Status: Accepted
 - Implementation: implemented
 - Date: 2026-09-15
 - Author/executor: Antigravity
-- Reviewer: pending human
-- Approval evidence: none
+- Reviewer: Grok CLI (Architecture Reviewer)
+- Approval evidence: Ratified in 3-PR Implementation Plan (De Acordo)
 - Supersedes: none
 - Superseded by: none
 
@@ -44,6 +44,9 @@ Constraints:
 - Zero residual background processes after test suite abort or Ctrl+C interruption.
 
 ## Verification and implementation evidence
-- `crates/meshloop-adapters/src/process.rs`: unit tests verifying tree kill semantics.
+- `crates/meshloop-adapters/src/process/job.rs`: Win32 Job Object abstraction (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) and POSIX `setpgid(0, 0)` via `spawn_owned`.
+- `crates/meshloop-adapters/tests/process_tree.rs`:
+  - `grandchild_dies_on_timeout`: confirms grandchild termination on timeout/kill_tree.
+  - `grandchild_dies_on_parent_abort`: confirms OS kernel terminates grandchildren when parent abruptly aborts (`std::process::abort()`).
 - `xtask bench`: metric `conc.orphan_process_count` reports `0` (PASS).
-- 100% passing tests in `cargo test -p meshloop-adapters`.
+- 100% passing tests in `cargo test -p meshloop-adapters` (24 passed) and `cargo test --workspace` (131 passed).

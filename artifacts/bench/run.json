@@ -15,7 +15,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 0.0107
+      "value": 0.018199999999999997
     },
     {
       "name": "ctx.cache.stale_hit_rate_pct",
@@ -39,7 +39,7 @@
       "target_op": "lte",
       "target_value": 500.0,
       "unit": "us",
-      "value": 485.0
+      "value": 490.0
     },
     {
       "name": "quant.recall_at_k",
@@ -55,7 +55,7 @@
       "target_op": "lte",
       "target_value": 10.0,
       "unit": "ms",
-      "value": 1.2394
+      "value": 1.1601000000000001
     },
     {
       "name": "conc.wal.write_contention_ms",
@@ -63,7 +63,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 1.2796560000000001
+      "value": 1.117598
     },
     {
       "name": "conc.git_admin.lock_contention_ms",
@@ -71,7 +71,7 @@
       "target_op": "lte",
       "target_value": 200.0,
       "unit": "ms",
-      "value": 71.3916
+      "value": 71.162
     },
     {
       "name": "conc.throughput_gain",
@@ -79,7 +79,7 @@
       "target_op": "gte",
       "target_value": 1.0,
       "unit": "x",
-      "value": 1.4234378576333258
+      "value": 1.6831168831168832
     },
     {
       "name": "iso.redact.pass_rate_pct",
@@ -164,13 +164,13 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "git_sha": "e7a57a0d9e4dafca83772dea7fef60bdd70c3b50",
+    "git_sha": "1d937a7804b623639abfb12b01a3901409594995",
     "hostname": "SKYNET-SAM01",
     "os": "windows",
-    "recorded_at": "2026-09-15T17:25:04+02:00",
+    "recorded_at": "2026-09-15T18:25:40+02:00",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
   },
-  "run_id": "6aa9683e-5870-40ae-a000-9853c8ea03ff",
+  "run_id": "6aa984c7-4e20-4327-a000-fc3361f2b08b",
   "schema_version": "1.0.0",
   "status": {
     "invariants": "pass",

@@ -3,6 +3,9 @@
 
 use std::process::Command;
 
+pub mod job;
+pub use job::{OwnedChild, spawn_owned};
+
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
 pub struct WindowsProcessView;

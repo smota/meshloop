@@ -1,4 +1,6 @@
 //! Repository checks, session-control-plane smoke, session pack, and publish dry-run.
+
+#![forbid(unsafe_code)]
 use std::{
     collections::BTreeMap,
     fs,

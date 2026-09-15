@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ pub struct CliHarnessConfig {
 
 pub struct CliHarness {
     config: CliHarnessConfig,
-    running: Mutex<HashMap<u32, (Child, Duration, Instant)>>,
+    running: Mutex<HashMap<u32, (crate::process::OwnedChild, Duration, Instant)>>,
 }
 
 impl CliHarness {
@@ -103,16 +103,15 @@ impl HarnessCapabilities for CliHarness {
             })
             .collect();
 
-        let child = Command::new(&self.config.executable)
-            .args(&args)
+        let mut cmd = Command::new(&self.config.executable);
+        cmd.args(&args)
             .current_dir(&spec.worktree_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| HarnessError::ProcessFault {
-                detail: e.to_string(),
-            })?;
+            .stderr(Stdio::piped());
+        let child = crate::process::spawn_owned(cmd).map_err(|e| HarnessError::ProcessFault {
+            detail: e.to_string(),
+        })?;
         let pid = child.id();
 
         self.running
@@ -146,9 +145,7 @@ impl HarnessCapabilities for CliHarness {
             })?;
         // Idempotent against an already-exited/never-tracked process, per ADR 0003.
         if let Some((mut child, _, _)) = registry.remove(&Self::attempt_key(handle)) {
-            crate::process::kill_process_tree(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill_tree();
         }
         Ok(())
     }
@@ -193,16 +190,16 @@ impl HarnessCapabilities for CliHarness {
                 let (_, timeout, start) = entry;
                 if start.elapsed() >= *timeout {
                     let (mut child, _, _) = registry.remove(&key).unwrap();
-                    crate::process::kill_process_tree(child.id());
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    child.kill_tree();
                     Err(HarnessError::Timeout)
                 } else {
                     Ok(None)
                 }
             }
             Err(e) => {
-                let _ = registry.remove(&key);
+                if let Some((mut child, _, _)) = registry.remove(&key) {
+                    child.kill_tree();
+                }
                 Err(HarnessError::ProcessFault {
                     detail: e.to_string(),
                 })

@@ -2,6 +2,8 @@
 //! capability/error-taxonomy value types, and the diagnostic lattice. No I/O, no
 //! concrete harnesses, no storage — see docs/architecture/boundaries.md.
 
+#![forbid(unsafe_code)]
+
 pub mod capability;
 pub mod diagnostic;
 pub mod digest;

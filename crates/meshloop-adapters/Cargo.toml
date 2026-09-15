@@ -23,6 +23,17 @@ meshloop-engine = { workspace = true }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+
 [[bin]]
 name = "fixture_harness"
 path = "src/bin/fixture_harness.rs"

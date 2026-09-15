@@ -21,14 +21,14 @@ impl CheckRunner for CommandCheckRunner {
         if argv.is_empty() {
             return Err(CheckError::Io("empty verify_command".into()));
         }
-        let mut child = Command::new(&argv[0])
-            .args(&argv[1..])
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
             .current_dir(worktree)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| CheckError::Io(e.to_string()))?;
+            .stderr(Stdio::piped());
+        let mut child =
+            crate::process::spawn_owned(cmd).map_err(|e| CheckError::Io(e.to_string()))?;
         let start = Instant::now();
         loop {
             match child.try_wait() {
@@ -52,9 +52,7 @@ impl CheckRunner for CommandCheckRunner {
                 }
                 Ok(None) => {
                     if start.elapsed() >= timeout {
-                        crate::process::kill_process_tree(child.id());
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        child.kill_tree();
                         return Err(CheckError::Timeout);
                     }
                     std::thread::sleep(Duration::from_millis(20));

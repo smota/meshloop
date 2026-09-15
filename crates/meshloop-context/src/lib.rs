@@ -2,6 +2,8 @@
 //! Handles AST skeleton extraction, Tier 1 bulk-reader dynamic resolution,
 //! prompt cache normalization, and data-oblivious signature retrieval.
 
+#![forbid(unsafe_code)]
+
 pub mod cache;
 pub mod quant;
 pub mod signature;

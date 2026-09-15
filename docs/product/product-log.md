@@ -133,15 +133,21 @@ Meshloop maintains strict architectural governance per [`AGENTS.md`](../../AGENT
 
 With the deterministic regression gate (World D) fully operational, the three highest-priority engineering targets are:
 
-### Priority 1: Native OS Process Tree Ownership (ADR 0025)
-- **Objective:** Envelop every spawned agent harness process within a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) on Windows, and process groups / cgroups on Linux/macOS.
+### Priority 1: Native OS Process Tree Ownership (ADR 0025) — **DELIVERED & VERIFIED**
+- **Objective:** Envelop every spawned agent harness process within a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) on Windows, and POSIX process groups (`setpgid(0, 0)`) on Linux/macOS.
 - **Value:** Prevents zombie compiler, linter, or shell subprocesses from lingering in the host upon harness crash, timeout, or user cancellation.
-- **Scope:** `meshloop-adapters` process launcher and `meshloop-engine` dispatch loop.
+- **Implementation & Evidence:**
+  - Implemented `meshloop-adapters::process::job` with Win32 Job Object kernel limit and `spawn_owned`.
+  - Integrated into `CliHarness::invoke`, `CliHarness::cancel`, `CliHarness::try_collect`, and `CommandCheckRunner::run`.
+  - Added deterministic tests in `crates/meshloop-adapters/tests/process_tree.rs`:
+    - `grandchild_dies_on_timeout`: confirms grandchild process is eliminated immediately on timeout/kill_tree.
+    - `grandchild_dies_on_parent_abort`: confirms Windows kernel terminates all children and grandchildren when the parent process aborts unexpectedly (`std::process::abort()`).
+  - Verified `conc.orphan_process_count = 0` (PASS) and 131/131 passing workspace tests.
 
 ### Priority 2: Parametric DAG Manifest Suite & QACR Stresstest (`benches/manifests/` — Tier B)
-- **Objective:** Implement Tier B of `SPEC-ML-BENCH-001`, providing declarative DAG manifests (diamond graphs, deep pipelines, wide parallel sweeps) to test the Restless Bandit QACR router under token quota exhaustion.
-- **Value:** Guarantees scheduler overhead (`orch.schedule.overhead_ms`) remains minimal and routes tasks gracefully under heavy load.
-- **Scope:** New `benches/manifests/` directory and `xtask bench-dag` subcommand.
+- **Objective:** Implement Tier B of `SPEC-ML-BENCH-001`, providing declarative DAG manifests (diamond graphs, deep pipelines, wide parallel sweeps) using `petgraph` (`default-features = false`) to test the scheduler and router.
+- **Value:** Guarantees scheduler overhead (`orch.schedule.overhead_ms`) remains minimal ($P_{95} \le 25\text{ ms}$) using `hdrhistogram` and routes tasks gracefully under heavy load.
+- **Scope:** Internalize `petgraph` in `meshloop-core`, add `benches/manifests/` and `xtask bench-dag` subcommand.
 
 ### Priority 3: World S Stochastic Validation & First-Pass Acceptance Rate (FPAR)
 - **Objective:** Implement stochastic sampling ($N \ge 10$) with live coding harnesses (Claude Code, Codex, Agy, Grok, Pi) across standard coding benchmarks, calculating FPAR with Wilson 95% confidence intervals.
