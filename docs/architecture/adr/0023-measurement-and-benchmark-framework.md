@@ -1,7 +1,7 @@
 # 0023 Measurement, Benchmark, and Architectural Validation Framework
 
-- Status: Proposed
-- Implementation: in-progress
+- Status: Accepted
+- Implementation: completed (World D regression gate, CI pipeline, and thresholds enforced; World S staged)
 - Date: 2026-09-15
 - Author/executor: Antigravity & Grok
 - Decision owner: Samuel

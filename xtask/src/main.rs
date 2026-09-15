@@ -416,9 +416,13 @@ model_tier = "top"
         "smoke: phase breakdown -> doctor: {:.1}ms, review: {:.1}ms, run: {:.1}ms, accept: {:.1}ms, resume: {:.1}ms, audit: {:.1}ms",
         t_doctor_ms, t_review_plan_ms, t_run_ms, t_accept_ms, t_resume_ms, t_audit_ms
     );
+    if worktree_leak_count > 0 {
+        return Err(format!(
+            "smoke: isolation invariant violated: {worktree_leak_count} worktree leak(s) detected"
+        ));
+    }
     println!(
-        "smoke: all isolation invariants passed (PRAGMA integrity_check ok, leaks: {}, index locks clean)",
-        worktree_leak_count
+        "smoke: all isolation invariants passed (PRAGMA integrity_check ok, leaks: 0, index locks clean)"
     );
 
     Ok(())
@@ -651,7 +655,7 @@ fn bench(root: &Path) -> ExitCode {
     use meshloop_domain::diagnostic::parse_diagnostics;
     use meshloop_domain::digest::splitmix64;
     use meshloop_domain::evidence::AttemptId;
-    use meshloop_domain::state::{Event, TaskState};
+    use meshloop_domain::state::{Event, TaskState, transition};
     use meshloop_domain::task_graph::TaskId;
     use meshloop_engine::converge::{RepairAction, RepairBudget, RepairSession, StopReason};
     use meshloop_engine::ports::{EventLog, TransitionRecord};
@@ -715,28 +719,30 @@ fn bench(root: &Path) -> ExitCode {
         }
     }
 
-    // Load Smoke Phases Telemetry
+    // Load Smoke Phases Telemetry (Fail-Closed: must exist)
     let smoke_phases_path = root
         .join("artifacts")
         .join("bench")
         .join("smoke-phases.json");
-    let mut smoke_phases = serde_json::json!({
-        "sandbox_ms": 120.0,
-        "doctor_ms": 25.0,
-        "review_plan_ms": 45.0,
-        "run_ms": 780.0,
-        "accept_ms": 80.0,
-        "resume_ms": 650.0,
-        "audit_ms": 30.0,
-        "wall_clock_s": 1.61,
-        "worktree_leak_count": 0
-    });
-    if let Some(parsed) = fs::read_to_string(&smoke_phases_path)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-    {
-        smoke_phases = parsed;
+    if !smoke_phases_path.exists() {
+        eprintln!(
+            "bench: missing artifacts/bench/smoke-phases.json. Run 'cargo run -p xtask -- smoke' first."
+        );
+        return ExitCode::FAILURE;
     }
+    let smoke_phases_content = fs::read_to_string(&smoke_phases_path).map_err(|e| {
+        eprintln!("bench: failed to read smoke-phases.json: {e}");
+    });
+    let Ok(smoke_phases_content) = smoke_phases_content else {
+        return ExitCode::FAILURE;
+    };
+    let smoke_phases: serde_json::Value = match serde_json::from_str(&smoke_phases_content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("bench: invalid smoke-phases.json: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let smoke_wall_clock_s = smoke_phases["wall_clock_s"].as_f64().unwrap_or(2.0);
     let worktree_leak_count = smoke_phases["worktree_leak_count"].as_u64().unwrap_or(0) as usize;
 
@@ -780,20 +786,21 @@ fn bench(root: &Path) -> ExitCode {
     ];
 
     let mut total_reduction = 0.0;
-    let mut total_parse_micros = 0;
     let iterations = 100;
+    let mut parse_latencies_ms = Vec::with_capacity(polyglot_samples.len() * iterations);
     for &(_name, lang, src) in polyglot_samples {
         let res = extract_skeleton(src, lang);
         total_reduction += res.savings_percentage();
-        let t0 = Instant::now();
         for _ in 0..iterations {
+            let t0 = Instant::now();
             let _ = extract_skeleton(src, lang);
+            parse_latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
-        total_parse_micros += t0.elapsed().as_micros();
     }
     let avg_reduction_pct = total_reduction / polyglot_samples.len() as f64;
-    let avg_parse_latency_ms =
-        (total_parse_micros as f64 / (polyglot_samples.len() * iterations) as f64) / 1000.0;
+    parse_latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p95_parse_idx = ((parse_latencies_ms.len() as f64) * 0.95) as usize;
+    let p95_parse_latency_ms = parse_latencies_ms[p95_parse_idx.min(parse_latencies_ms.len() - 1)];
 
     // 2. Content-Addressed SkeletonCache Benchmark (ctx.cache.*)
     let mut cache = SkeletonCache::new();
@@ -887,17 +894,20 @@ fn bench(root: &Path) -> ExitCode {
     let compressed_bytes = index.quantized_bytes().max(1);
     let compression_ratio = raw_bytes as f64 / compressed_bytes as f64;
 
-    let query_start = Instant::now();
     let query_count = 1000;
+    let mut query_latencies_us = Vec::with_capacity(query_count);
     let mut top_match_found = 0;
     for _ in 0..query_count {
+        let t0 = Instant::now();
         let files = index.rank_files("verify_jwt token Auth Claims", 5);
+        query_latencies_us.push(t0.elapsed().as_micros() as f64);
         if files.iter().any(|(path, _)| path.contains("auth")) {
             top_match_found += 1;
         }
     }
-    let query_elapsed = query_start.elapsed();
-    let search_latency_us = (query_elapsed.as_micros() as f64) / (query_count as f64);
+    query_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p95_search_idx = ((query_latencies_us.len() as f64) * 0.95) as usize;
+    let search_latency_us = query_latencies_us[p95_search_idx.min(query_latencies_us.len() - 1)];
     let recall_at_k = (top_match_found as f64 / query_count as f64) * 100.0;
 
     // 4. SQLite WAL Commit Benchmark (orch.txn.wal_commit_ms)
@@ -1237,8 +1247,49 @@ fn bench(root: &Path) -> ExitCode {
     };
 
     // 11. Observable Isolation & Host Invariants
-    let orphan_count: usize = 0;
-    let gate_bypass_count: usize = 0;
+    // Active probe for illegal state gate bypass
+    let mut gate_bypass_count: usize = 0;
+    if transition(TaskState::Running, Event::IntegrationOwnerMerge).is_ok() {
+        gate_bypass_count += 1;
+    }
+    if transition(TaskState::AwaitingReview, Event::IntegrationOwnerMerge).is_ok() {
+        gate_bypass_count += 1;
+    }
+    if transition(TaskState::Cancelled, Event::DependencySatisfied).is_ok() {
+        gate_bypass_count += 1;
+    }
+
+    // Active inspection of process tree for lingering test harness processes
+    let orphan_count: usize = {
+        #[cfg(target_os = "windows")]
+        {
+            let out = Command::new("powershell")
+                .args(["-Command", "Get-Process -Name 'fixture_harness' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count"])
+                .output();
+            out.ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let out = Command::new("pgrep")
+                .args(["-f", "fixture_harness"])
+                .output();
+            out.ok()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+    };
 
     // Assemble All Evaluated Metrics
     struct EvalMetric {
@@ -1260,9 +1311,9 @@ fn bench(root: &Path) -> ExitCode {
         ),
         (
             "ctx.parse.latency_ms.p95",
-            avg_parse_latency_ms,
+            p95_parse_latency_ms,
             "ms",
-            format!("{avg_parse_latency_ms:.3} ms"),
+            format!("{p95_parse_latency_ms:.3} ms"),
         ),
         (
             "ctx.cache.stale_hit_rate_pct",
@@ -1508,8 +1559,17 @@ fn bench(root: &Path) -> ExitCode {
         })
         .collect();
 
+    let git_time = Command::new("git")
+        .args(["log", "-1", "--format=%cI"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "2026-09-15T12:00:00Z".to_string());
+
     let run_record = serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$schema": "schemas/run-record.v1.json",
         "schema_version": "1.0.0",
         "run_id": run_id,
         "suite": {
@@ -1520,7 +1580,7 @@ fn bench(root: &Path) -> ExitCode {
         },
         "provenance": {
             "git_sha": git_sha,
-            "recorded_at": "2026-09-15T12:00:00Z",
+            "recorded_at": git_time,
             "rustc": rustc_ver,
             "os": std::env::consts::OS,
             "hostname": hostname,

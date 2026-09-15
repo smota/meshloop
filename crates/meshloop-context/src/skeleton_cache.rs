@@ -13,10 +13,17 @@ struct CacheKey {
     source_hash: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    result: SkeletonResult,
+    source_len: usize,
+    source_head: String,
+}
+
 /// Content-addressed cache for extracted code skeletons.
 #[derive(Debug, Default)]
 pub struct SkeletonCache {
-    entries: HashMap<CacheKey, SkeletonResult>,
+    entries: HashMap<CacheKey, CacheEntry>,
     hits: usize,
     misses: usize,
     stale_hits: usize,
@@ -34,13 +41,36 @@ impl SkeletonCache {
             source_hash: hash,
         };
 
-        if let Some(cached) = self.entries.get(&key) {
-            self.hits += 1;
-            cached.clone()
+        if let Some(entry) = self.entries.get(&key) {
+            if entry.source_len != source.len() || !source.starts_with(&entry.source_head) {
+                self.stale_hits += 1;
+                let result = extract_skeleton(source, lang);
+                let head: String = source.chars().take(64).collect();
+                self.entries.insert(
+                    key,
+                    CacheEntry {
+                        result: result.clone(),
+                        source_len: source.len(),
+                        source_head: head,
+                    },
+                );
+                result
+            } else {
+                self.hits += 1;
+                entry.result.clone()
+            }
         } else {
             self.misses += 1;
             let result = extract_skeleton(source, lang);
-            self.entries.insert(key, result.clone());
+            let head: String = source.chars().take(64).collect();
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    result: result.clone(),
+                    source_len: source.len(),
+                    source_head: head,
+                },
+            );
             result
         }
     }

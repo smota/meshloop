@@ -1,11 +1,11 @@
 {
-  "accept_ms": 96.70769999999999,
-  "audit_ms": 41.5419,
-  "doctor_ms": 6.1484,
-  "resume_ms": 186.5473,
-  "review_plan_ms": 60.6894,
-  "run_ms": 1175.7713999999999,
-  "sandbox_ms": 236.31640000000002,
-  "wall_clock_s": 1.5674060999999997,
+  "accept_ms": 82.179,
+  "audit_ms": 79.1918,
+  "doctor_ms": 6.9429,
+  "resume_ms": 171.043,
+  "review_plan_ms": 53.5171,
+  "run_ms": 1083.1117,
+  "sandbox_ms": 284.3491,
+  "wall_clock_s": 1.4759855000000002,
   "worktree_leak_count": 0
 }

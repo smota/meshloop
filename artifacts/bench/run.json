@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "schemas/run-record.v1.json",
   "metrics": [
     {
       "name": "ctx.tokens.reduction_pct",
@@ -15,7 +15,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 0.013267142857142858
+      "value": 0.0107
     },
     {
       "name": "ctx.cache.stale_hit_rate_pct",
@@ -39,7 +39,7 @@
       "target_op": "lte",
       "target_value": 500.0,
       "unit": "us",
-      "value": 456.648
+      "value": 485.0
     },
     {
       "name": "quant.recall_at_k",
@@ -55,7 +55,7 @@
       "target_op": "lte",
       "target_value": 10.0,
       "unit": "ms",
-      "value": 1.3192
+      "value": 1.2394
     },
     {
       "name": "conc.wal.write_contention_ms",
@@ -63,7 +63,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 1.36388
+      "value": 1.2796560000000001
     },
     {
       "name": "conc.git_admin.lock_contention_ms",
@@ -71,7 +71,7 @@
       "target_op": "lte",
       "target_value": 200.0,
       "unit": "ms",
-      "value": 66.4806
+      "value": 71.3916
     },
     {
       "name": "conc.throughput_gain",
@@ -79,7 +79,7 @@
       "target_op": "gte",
       "target_value": 1.0,
       "unit": "x",
-      "value": 1.7519008729935228
+      "value": 1.4234378576333258
     },
     {
       "name": "iso.redact.pass_rate_pct",
@@ -143,18 +143,18 @@
       "target_op": "lte",
       "target_value": 5.0,
       "unit": "s",
-      "value": 1.5674060999999997
+      "value": 1.4759855000000002
     }
   ],
   "phases": {
-    "accept_ms": 96.7077,
-    "audit_ms": 41.5419,
-    "doctor_ms": 6.1484,
-    "resume_ms": 186.5473,
-    "review_plan_ms": 60.6894,
-    "run_ms": 1175.7714,
-    "sandbox_ms": 236.3164,
-    "wall_clock_s": 1.5674060999999997
+    "accept_ms": 82.179,
+    "audit_ms": 79.1918,
+    "doctor_ms": 6.9429,
+    "resume_ms": 171.043,
+    "review_plan_ms": 53.5171,
+    "run_ms": 1083.1117,
+    "sandbox_ms": 284.3491,
+    "wall_clock_s": 1.4759855000000002
   },
   "provenance": {
     "crate_versions": {
@@ -164,13 +164,13 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "git_sha": "acd22e33d9f6a16d89d081ee4cedbc5a17a3cff0",
+    "git_sha": "e7a57a0d9e4dafca83772dea7fef60bdd70c3b50",
     "hostname": "SKYNET-SAM01",
     "os": "windows",
-    "recorded_at": "2026-09-15T12:00:00Z",
+    "recorded_at": "2026-09-15T17:25:04+02:00",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
   },
-  "run_id": "6aa96237-ac20-45ab-a000-4c47b9e67c02",
+  "run_id": "6aa9683e-5870-40ae-a000-9853c8ea03ff",
   "schema_version": "1.0.0",
   "status": {
     "invariants": "pass",
