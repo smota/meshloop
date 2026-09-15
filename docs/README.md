@@ -70,6 +70,8 @@ residuals (WSL2, concurrency > 1, prebuilt binaries, queried quota).
 - [Component boundaries](architecture/boundaries.md)
 - [Execution lifecycle](architecture/execution-lifecycle.md)
 - [Threat model](architecture/threat-model.md) — design requirements, not a guarantee
+- [Bounded concurrency & resilience architecture](architecture/modern-modular-architecture.md)
+- [Measurement & benchmark specification](architecture/measurement-and-benchmark-spec.md)
 
 ## Engineering internals
 
@@ -77,6 +79,7 @@ Do not start here unless you are changing code.
 
 - [Implementation status](engineering/implementation-status.md)
 - [Testing](engineering/testing.md) — `xtask check` and `xtask live`
+- [Benchmarking framework](engineering/benchmarking.md)
 - [Rust conventions](engineering/rust.md)
 - [Harness contract](engineering/harnesses.md) — developing Meshloop *with* the selected CLIs
 - [Design patterns](engineering/design-patterns.md)

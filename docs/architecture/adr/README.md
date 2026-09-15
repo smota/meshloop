@@ -39,6 +39,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0020 | Live Herdr pane is the wait authority | Accepted |
 | 0021 | Restart an accepted plan without replanning | Accepted |
 | 0022 | Daemonless standalone execution and multi-language context engineering | Accepted |
+| 0023 | Measurement, benchmark, and architectural validation framework | Proposed |
 
 ## Withdrawn (consolidated into an active ADR above)
 
