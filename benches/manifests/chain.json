@@ -1,0 +1,29 @@
+{
+  "graph_id": "manifest-chain",
+  "nodes": [
+    {
+      "id": 1,
+      "description": "root task 1",
+      "depends_on": [],
+      "tier": "Tier1"
+    },
+    {
+      "id": 2,
+      "description": "sequential task 2",
+      "depends_on": [1],
+      "tier": "Tier1"
+    },
+    {
+      "id": 3,
+      "description": "sequential task 3",
+      "depends_on": [2],
+      "tier": "Tier1"
+    },
+    {
+      "id": 4,
+      "description": "terminal task 4",
+      "depends_on": [3],
+      "tier": "Tier1"
+    }
+  ]
+}

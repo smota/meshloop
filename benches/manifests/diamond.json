@@ -1,0 +1,29 @@
+{
+  "graph_id": "manifest-diamond",
+  "nodes": [
+    {
+      "id": 1,
+      "description": "root task",
+      "depends_on": [],
+      "tier": "Tier1"
+    },
+    {
+      "id": 2,
+      "description": "left branch",
+      "depends_on": [1],
+      "tier": "Tier1"
+    },
+    {
+      "id": 3,
+      "description": "right branch",
+      "depends_on": [1],
+      "tier": "Tier1"
+    },
+    {
+      "id": 4,
+      "description": "aggregation join",
+      "depends_on": [2, 3],
+      "tier": "Tier2"
+    }
+  ]
+}

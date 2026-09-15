@@ -15,7 +15,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 0.018199999999999997
+      "value": 0.015099999999999999
     },
     {
       "name": "ctx.cache.stale_hit_rate_pct",
@@ -39,7 +39,7 @@
       "target_op": "lte",
       "target_value": 500.0,
       "unit": "us",
-      "value": 490.0
+      "value": 484.0
     },
     {
       "name": "quant.recall_at_k",
@@ -55,7 +55,7 @@
       "target_op": "lte",
       "target_value": 10.0,
       "unit": "ms",
-      "value": 1.1601000000000001
+      "value": 1.0899
     },
     {
       "name": "conc.wal.write_contention_ms",
@@ -63,7 +63,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 1.117598
+      "value": 1.090098
     },
     {
       "name": "conc.git_admin.lock_contention_ms",
@@ -71,7 +71,7 @@
       "target_op": "lte",
       "target_value": 200.0,
       "unit": "ms",
-      "value": 71.162
+      "value": 64.2474
     },
     {
       "name": "conc.throughput_gain",
@@ -79,7 +79,7 @@
       "target_op": "gte",
       "target_value": 1.0,
       "unit": "x",
-      "value": 1.6831168831168832
+      "value": 2.551289398280802
     },
     {
       "name": "iso.redact.pass_rate_pct",
@@ -130,6 +130,14 @@
       "value": 66.7
     },
     {
+      "name": "orch.schedule.overhead_ms.p95",
+      "status": "pass",
+      "target_op": "lte",
+      "target_value": 25.0,
+      "unit": "ms",
+      "value": 0.053
+    },
+    {
       "name": "conc.orphan_process_count",
       "status": "pass",
       "target_op": "eq",
@@ -164,13 +172,13 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "git_sha": "1d937a7804b623639abfb12b01a3901409594995",
+    "git_sha": "03a987877fa47e0235fa9d51b5789693c2fd5a76",
     "hostname": "SKYNET-SAM01",
     "os": "windows",
-    "recorded_at": "2026-09-15T18:25:40+02:00",
+    "recorded_at": "2026-09-15T20:09:56+02:00",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
   },
-  "run_id": "6aa984c7-4e20-4327-a000-fc3361f2b08b",
+  "run_id": "6aa9ac60-5d04-475e-a000-c10ec538ef14",
   "schema_version": "1.0.0",
   "status": {
     "invariants": "pass",

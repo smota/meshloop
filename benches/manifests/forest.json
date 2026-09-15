@@ -1,0 +1,13 @@
+{
+  "graph_id": "manifest-forest",
+  "nodes": [
+    { "id": 1, "description": "tree A root", "depends_on": [], "tier": "Tier1" },
+    { "id": 2, "description": "tree A leaf", "depends_on": [1], "tier": "Tier1" },
+    { "id": 3, "description": "tree B root", "depends_on": [], "tier": "Tier1" },
+    { "id": 4, "description": "tree B leaf", "depends_on": [3], "tier": "Tier1" },
+    { "id": 5, "description": "tree C root", "depends_on": [], "tier": "Tier1" },
+    { "id": 6, "description": "tree C leaf", "depends_on": [5], "tier": "Tier1" },
+    { "id": 7, "description": "tree D root", "depends_on": [], "tier": "Tier1" },
+    { "id": 8, "description": "tree D leaf", "depends_on": [7], "tier": "Tier1" }
+  ]
+}

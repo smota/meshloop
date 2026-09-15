@@ -1,0 +1,23 @@
+{
+  "graph_id": "manifest-cyclic-negative-control",
+  "nodes": [
+    {
+      "id": 1,
+      "description": "cyclic node 1",
+      "depends_on": [3],
+      "tier": "Tier1"
+    },
+    {
+      "id": 2,
+      "description": "cyclic node 2",
+      "depends_on": [1],
+      "tier": "Tier1"
+    },
+    {
+      "id": 3,
+      "description": "cyclic node 3",
+      "depends_on": [2],
+      "tier": "Tier1"
+    }
+  ]
+}

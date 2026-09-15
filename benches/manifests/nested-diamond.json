@@ -1,0 +1,15 @@
+{
+  "graph_id": "manifest-nested-diamond",
+  "nodes": [
+    { "id": 1, "description": "outer root 1", "depends_on": [], "tier": "Tier1" },
+    { "id": 2, "description": "stage 1 left", "depends_on": [1], "tier": "Tier1" },
+    { "id": 3, "description": "stage 1 right", "depends_on": [1], "tier": "Tier1" },
+    { "id": 4, "description": "stage 1 join / stage 2 root", "depends_on": [2, 3], "tier": "Tier2" },
+    { "id": 5, "description": "stage 2 left", "depends_on": [4], "tier": "Tier1" },
+    { "id": 6, "description": "stage 2 right", "depends_on": [4], "tier": "Tier1" },
+    { "id": 7, "description": "stage 2 join / stage 3 root", "depends_on": [5, 6], "tier": "Tier2" },
+    { "id": 8, "description": "stage 3 left", "depends_on": [7], "tier": "Tier1" },
+    { "id": 9, "description": "stage 3 right", "depends_on": [7], "tier": "Tier1" },
+    { "id": 10, "description": "terminal join", "depends_on": [8, 9], "tier": "Tier3" }
+  ]
+}

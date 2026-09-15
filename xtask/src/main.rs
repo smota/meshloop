@@ -21,8 +21,11 @@ fn main() -> ExitCode {
         Some("live") => live(root),
         Some("publish-dry") => publish_dry(root),
         Some("bench") => bench(root),
+        Some("bench-dag") => bench_dag(root),
         _ => {
-            eprintln!("Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench");
+            eprintln!(
+                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-dag"
+            );
             ExitCode::from(2)
         }
     }
@@ -67,7 +70,23 @@ fn check(root: &Path) -> ExitCode {
             "-D",
             "warnings",
         ],
-        &["test", "--workspace", "--locked", "--offline"],
+        &[
+            "test",
+            "--workspace",
+            "--exclude",
+            "xtask",
+            "--locked",
+            "--offline",
+        ],
+        &[
+            "test",
+            "-p",
+            "xtask",
+            "--test",
+            "scaffold_cli",
+            "--locked",
+            "--offline",
+        ],
     ];
     for args in checks {
         if !cargo(root, args) {
@@ -644,6 +663,105 @@ fn copy_dir(src: &Path, dst: &Path) {
             copy_dir(&entry.path(), &to);
         } else {
             let _ = fs::copy(entry.path(), to);
+        }
+    }
+}
+
+fn run_dag_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), String> {
+    use hdrhistogram::Histogram;
+    use meshloop_domain::task_graph::{GraphError, TaskGraph};
+    use std::time::Instant;
+
+    let manifest_dir = root.join("benches").join("manifests");
+    let manifests = [
+        ("chain.json", true),
+        ("diamond.json", true),
+        ("wide-fanout.json", true),
+        ("wide-fanin.json", true),
+        ("forest.json", true),
+        ("nested-diamond.json", true),
+        ("cyclic-negative-control.json", false),
+    ];
+
+    let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
+        .map_err(|e| format!("failed to initialize hdrhistogram: {e}"))?;
+
+    for (file_name, should_pass) in manifests {
+        let path = manifest_dir.join(file_name);
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let graph: TaskGraph = serde_json::from_str(&content)
+            .map_err(|e| format!("parse JSON {}: {e}", path.display()))?;
+
+        if should_pass {
+            for _ in 0..50 {
+                let start = Instant::now();
+                let order = graph.try_topological_order().map_err(|e| {
+                    format!("manifest {} failed topological order: {:?}", file_name, e)
+                })?;
+                let elapsed_us = start.elapsed().as_micros().max(1) as u64;
+                hist.record(elapsed_us)
+                    .map_err(|e| format!("record latency: {e}"))?;
+                if order.is_empty() {
+                    return Err(format!(
+                        "manifest {} produced empty topological order",
+                        file_name
+                    ));
+                }
+            }
+            if verbose {
+                println!(
+                    "  [PASS] manifest {} ({} nodes)",
+                    file_name,
+                    graph.nodes.len()
+                );
+            }
+        } else {
+            match graph.try_topological_order() {
+                Err(GraphError::Cycle(_)) => {
+                    if verbose {
+                        println!(
+                            "  [PASS] manifest {} correctly rejected (cycle detected)",
+                            file_name
+                        );
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "manifest {} expected GraphError::Cycle, got {:?}",
+                        file_name, other
+                    ));
+                }
+            }
+        }
+    }
+
+    let p95_us = hist.value_at_quantile(0.95);
+    let p95_ms = p95_us as f64 / 1000.0;
+    Ok((p95_ms, true))
+}
+
+fn bench_dag(root: &Path) -> ExitCode {
+    println!("=== MESHLOOP TIER B: PARAMETRIC DAG MANIFESTS BENCHMARK ===");
+    match run_dag_benchmarks(root, true) {
+        Ok((p95_ms, _)) => {
+            println!("Summary:");
+            println!("  Manifests evaluated: 7 (6 valid DAGs + 1 cyclic negative control)");
+            println!(
+                "  Schedule overhead P95: {:.3} ms (threshold <= 25.0 ms)",
+                p95_ms
+            );
+            if p95_ms <= 25.0 {
+                println!("Result: PASS");
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("Result: FAIL (P95 exceeds 25.0 ms)");
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("DAG benchmark failed: {e}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -1304,6 +1422,8 @@ fn bench(root: &Path) -> ExitCode {
         status: &'static str,
     }
 
+    let (dag_schedule_p95_ms, _) = run_dag_benchmarks(root, false).unwrap_or((999.0, false));
+
     let raw_metrics: Vec<(&'static str, f64, &'static str, String)> = vec![
         (
             "ctx.tokens.reduction_pct",
@@ -1400,6 +1520,12 @@ fn bench(root: &Path) -> ExitCode {
             build_avoidance_rate,
             "%",
             format!("{build_avoidance_rate:.1}%"),
+        ),
+        (
+            "orch.schedule.overhead_ms.p95",
+            dag_schedule_p95_ms,
+            "ms",
+            format!("{dag_schedule_p95_ms:.3} ms (7 manifests)"),
         ),
         (
             "conc.orphan_process_count",

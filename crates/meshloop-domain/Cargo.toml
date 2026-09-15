@@ -19,3 +19,4 @@ workspace = true
 # §5's decomposition output contract); no I/O added, domain stays pure data + (de)serialization.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+petgraph = { version = "0.8", default-features = false, features = ["std", "graphmap"] }

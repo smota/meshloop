@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use petgraph::algo::toposort;
+use petgraph::graphmap::DiGraphMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -52,6 +54,13 @@ impl TaskGraph {
     /// Validates structure only (cycles, dangling deps, duplicates) — never decomposition
     /// quality, which runtime-design.md §5 states cannot be mechanically checked.
     pub fn validate(&self) -> Result<(), GraphError> {
+        self.try_topological_order().map(|_| ())
+    }
+
+    /// Computes a valid topological order using petgraph's iterative cycle-safe algorithm.
+    /// Returns GraphError if the graph is empty, contains duplicate IDs, dangling dependencies,
+    /// or directed cycles.
+    pub fn try_topological_order(&self) -> Result<Vec<TaskId>, GraphError> {
         if self.nodes.is_empty() {
             return Err(GraphError::Empty);
         }
@@ -81,51 +90,38 @@ impl TaskGraph {
             }
         }
 
-        self.find_cycle(&by_id)
-    }
-
-    fn find_cycle(&self, by_id: &HashMap<TaskId, &TaskNode>) -> Result<(), GraphError> {
-        #[derive(Clone, Copy, PartialEq)]
-        enum Mark {
-            Unvisited,
-            InProgress,
-            Done,
-        }
-
-        let mut marks: HashMap<TaskId, Mark> =
-            self.nodes.iter().map(|n| (n.id, Mark::Unvisited)).collect();
-        let mut path = Vec::new();
-
-        fn visit(
-            id: TaskId,
-            by_id: &HashMap<TaskId, &TaskNode>,
-            marks: &mut HashMap<TaskId, Mark>,
-            path: &mut Vec<TaskId>,
-        ) -> Result<(), GraphError> {
-            match marks[&id] {
-                Mark::Done => return Ok(()),
-                Mark::InProgress => {
-                    let start = path.iter().position(|x| *x == id).unwrap_or(0);
-                    let mut cycle = path[start..].to_vec();
-                    cycle.push(id);
-                    return Err(GraphError::Cycle(cycle));
-                }
-                Mark::Unvisited => {}
-            }
-            marks.insert(id, Mark::InProgress);
-            path.push(id);
-            for dep in &by_id[&id].depends_on {
-                visit(*dep, by_id, marks, path)?;
-            }
-            path.pop();
-            marks.insert(id, Mark::Done);
-            Ok(())
-        }
-
+        let mut graph = DiGraphMap::<TaskId, ()>::new();
         for node in &self.nodes {
-            visit(node.id, by_id, &mut marks, &mut path)?;
+            graph.add_node(node.id);
         }
-        Ok(())
+        for node in &self.nodes {
+            for dep in &node.depends_on {
+                // Dependency `*dep` must precede `node.id`
+                graph.add_edge(*dep, node.id, ());
+            }
+        }
+
+        match toposort(&graph, None) {
+            Ok(order) => Ok(order),
+            Err(cycle) => {
+                let start_node = cycle.node_id();
+                let mut path = vec![start_node];
+                let mut visited = HashSet::new();
+                let mut curr = start_node;
+                while visited.insert(curr) {
+                    if let Some(next) = graph.neighbors(curr).next() {
+                        path.push(next);
+                        if next == start_node {
+                            break;
+                        }
+                        curr = next;
+                    } else {
+                        break;
+                    }
+                }
+                Err(GraphError::Cycle(path))
+            }
+        }
     }
 
     /// Nodes with all dependencies already in `integrated`, per execution-lifecycle.md's
@@ -138,22 +134,9 @@ impl TaskGraph {
             .collect()
     }
 
-    /// A single valid dependency order. Only meaningful on an already-`validate`d graph —
-    /// this does not re-check for cycles and will loop forever on one.
+    /// A single valid dependency order. Cycle-safe: returns empty vector on cyclic graph.
     pub fn topological_order(&self) -> Vec<TaskId> {
-        let mut done = HashSet::new();
-        let mut order = Vec::with_capacity(self.nodes.len());
-        while order.len() < self.nodes.len() {
-            for node in self.ready_nodes(&done) {
-                if !done.contains(&node.id) {
-                    order.push(node.id);
-                }
-            }
-            for id in &order {
-                done.insert(*id);
-            }
-        }
-        order
+        self.try_topological_order().unwrap_or_default()
     }
 }
 
@@ -277,5 +260,36 @@ mod tests {
         one_done.insert(TaskId(1));
         let ready_ids: Vec<u32> = g.ready_nodes(&one_done).iter().map(|n| n.id.0).collect();
         assert_eq!(ready_ids, vec![2]);
+    }
+
+    #[test]
+    fn deep_pipeline_dag_sorts_without_stack_overflow() {
+        let n = 1000;
+        let mut nodes = Vec::with_capacity(n);
+        nodes.push(node(1, &[]));
+        for i in 2..=n as u32 {
+            nodes.push(node(i, &[i - 1]));
+        }
+        let g = TaskGraph {
+            graph_id: "deep-chain".into(),
+            nodes,
+        };
+        let order = g.try_topological_order().expect("valid deep chain");
+        assert_eq!(order.len(), n);
+        assert_eq!(order.first().unwrap().0, 1);
+        assert_eq!(order.last().unwrap().0, n as u32);
+    }
+
+    #[test]
+    fn try_topological_order_detects_triangle_cycle_safely() {
+        let g = TaskGraph {
+            graph_id: "triangle-cycle".into(),
+            nodes: vec![node(1, &[3]), node(2, &[1]), node(3, &[2])],
+        };
+        assert!(matches!(
+            g.try_topological_order(),
+            Err(GraphError::Cycle(_))
+        ));
+        assert_eq!(g.topological_order(), Vec::<TaskId>::new());
     }
 }

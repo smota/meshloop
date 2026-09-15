@@ -1,0 +1,22 @@
+{
+  "graph_id": "manifest-wide-fanout",
+  "nodes": [
+    { "id": 1, "description": "root coordinator", "depends_on": [], "tier": "Tier1" },
+    { "id": 2, "description": "worker leaf 2", "depends_on": [1], "tier": "Tier1" },
+    { "id": 3, "description": "worker leaf 3", "depends_on": [1], "tier": "Tier1" },
+    { "id": 4, "description": "worker leaf 4", "depends_on": [1], "tier": "Tier1" },
+    { "id": 5, "description": "worker leaf 5", "depends_on": [1], "tier": "Tier1" },
+    { "id": 6, "description": "worker leaf 6", "depends_on": [1], "tier": "Tier1" },
+    { "id": 7, "description": "worker leaf 7", "depends_on": [1], "tier": "Tier1" },
+    { "id": 8, "description": "worker leaf 8", "depends_on": [1], "tier": "Tier1" },
+    { "id": 9, "description": "worker leaf 9", "depends_on": [1], "tier": "Tier1" },
+    { "id": 10, "description": "worker leaf 10", "depends_on": [1], "tier": "Tier1" },
+    { "id": 11, "description": "worker leaf 11", "depends_on": [1], "tier": "Tier1" },
+    { "id": 12, "description": "worker leaf 12", "depends_on": [1], "tier": "Tier1" },
+    { "id": 13, "description": "worker leaf 13", "depends_on": [1], "tier": "Tier1" },
+    { "id": 14, "description": "worker leaf 14", "depends_on": [1], "tier": "Tier1" },
+    { "id": 15, "description": "worker leaf 15", "depends_on": [1], "tier": "Tier1" },
+    { "id": 16, "description": "worker leaf 16", "depends_on": [1], "tier": "Tier1" },
+    { "id": 17, "description": "worker leaf 17", "depends_on": [1], "tier": "Tier1" }
+  ]
+}

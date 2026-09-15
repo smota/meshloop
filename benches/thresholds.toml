@@ -23,5 +23,7 @@ schema_version = "1.0.0"
 "conc.throughput_gain" = { op = "gte", value = 1.0 }
 "conv.self_repair.success_rate" = { op = "gte", value = 80.0 }
 "slice.build_avoidance_rate" = { op = "gte", value = 50.0 }
+"orch.schedule.overhead_ms.p95" = { op = "lte", value = 25.0 }
 "smoke.wall_clock_s" = { op = "lte", value = 5.0 }
+
 

@@ -8,7 +8,7 @@ This log is the authoritative, empirical, and transparent record of Meshloop's p
 
 - **Date:** 2026-09-15
 - **Commit Base:** `7f1d858`
-- **Gate Status:** **18/18 PASS** (`cargo run -p xtask -- bench`)
+- **Gate Status:** **19/19 PASS** (`cargo run -p xtask -- bench`)
 - **E2E Smoke Status:** **PASS** (1.48s wall-clock, 0 leaks, 0 index lock residue)
 - **Applicable Specifications & ADRs:** [`SPEC-ML-BENCH-001`](../architecture/measurement-and-benchmark-spec.md), [ADR 0023](../architecture/adr/0023-measurement-and-benchmark-framework.md) (Accepted).
 
@@ -144,10 +144,16 @@ With the deterministic regression gate (World D) fully operational, the three hi
     - `grandchild_dies_on_parent_abort`: confirms Windows kernel terminates all children and grandchildren when the parent process aborts unexpectedly (`std::process::abort()`).
   - Verified `conc.orphan_process_count = 0` (PASS) and 131/131 passing workspace tests.
 
-### Priority 2: Parametric DAG Manifest Suite & QACR Stresstest (`benches/manifests/` — Tier B)
+### Priority 2: Parametric DAG Manifest Suite & QACR Stresstest (`benches/manifests/` — Tier B) — **DELIVERED & VERIFIED**
 - **Objective:** Implement Tier B of `SPEC-ML-BENCH-001`, providing declarative DAG manifests (diamond graphs, deep pipelines, wide parallel sweeps) using `petgraph` (`default-features = false`) to test the scheduler and router.
 - **Value:** Guarantees scheduler overhead (`orch.schedule.overhead_ms`) remains minimal ($P_{95} \le 25\text{ ms}$) using `hdrhistogram` and routes tasks gracefully under heavy load.
-- **Scope:** Internalize `petgraph` in `meshloop-core`, add `benches/manifests/` and `xtask bench-dag` subcommand.
+- **Implementation & Evidence:**
+  - Internalized `petgraph` (`std`, `graphmap`) into `TaskGraph::try_topological_order()` and `TaskGraph::validate()`, replacing recursive DFS with iterative cycle-safe Kahn/Tarjan topological sorting.
+  - Added 7 canonical DAG manifests in `benches/manifests/`: `chain.json`, `diamond.json`, `wide-fanout.json`, `wide-fanin.json`, `forest.json`, `nested-diamond.json`, and `cyclic-negative-control.json`.
+  - Implemented `xtask bench-dag` subcommand measuring microsecond scheduling percentiles with `hdrhistogram`.
+  - Added benchmark gate in `benches/thresholds.toml`: `orch.schedule.overhead_ms.p95 <= 25.0ms`.
+  - Empirically observed: **0.053 ms** ($P_{95}$), exceeding the performance threshold by $>400\times$. 100% negative control pass on cyclic graph rejection.
+  - Workspace tests expanded to 133 tests, all passing.
 
 ### Priority 3: World S Stochastic Validation & First-Pass Acceptance Rate (FPAR)
 - **Objective:** Implement stochastic sampling ($N \ge 10$) with live coding harnesses (Claude Code, Codex, Agy, Grok, Pi) across standard coding benchmarks, calculating FPAR with Wilson 95% confidence intervals.

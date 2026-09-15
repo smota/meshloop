@@ -1,0 +1,27 @@
+{
+  "graph_id": "manifest-wide-fanin",
+  "nodes": [
+    { "id": 1, "description": "parallel root 1", "depends_on": [], "tier": "Tier1" },
+    { "id": 2, "description": "parallel root 2", "depends_on": [], "tier": "Tier1" },
+    { "id": 3, "description": "parallel root 3", "depends_on": [], "tier": "Tier1" },
+    { "id": 4, "description": "parallel root 4", "depends_on": [], "tier": "Tier1" },
+    { "id": 5, "description": "parallel root 5", "depends_on": [], "tier": "Tier1" },
+    { "id": 6, "description": "parallel root 6", "depends_on": [], "tier": "Tier1" },
+    { "id": 7, "description": "parallel root 7", "depends_on": [], "tier": "Tier1" },
+    { "id": 8, "description": "parallel root 8", "depends_on": [], "tier": "Tier1" },
+    { "id": 9, "description": "parallel root 9", "depends_on": [], "tier": "Tier1" },
+    { "id": 10, "description": "parallel root 10", "depends_on": [], "tier": "Tier1" },
+    { "id": 11, "description": "parallel root 11", "depends_on": [], "tier": "Tier1" },
+    { "id": 12, "description": "parallel root 12", "depends_on": [], "tier": "Tier1" },
+    { "id": 13, "description": "parallel root 13", "depends_on": [], "tier": "Tier1" },
+    { "id": 14, "description": "parallel root 14", "depends_on": [], "tier": "Tier1" },
+    { "id": 15, "description": "parallel root 15", "depends_on": [], "tier": "Tier1" },
+    { "id": 16, "description": "parallel root 16", "depends_on": [], "tier": "Tier1" },
+    {
+      "id": 17,
+      "description": "convergent aggregator",
+      "depends_on": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      "tier": "Tier3"
+    }
+  ]
+}
