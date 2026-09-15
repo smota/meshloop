@@ -3,10 +3,10 @@
 Install and first-time setup: **[Install](install.md)**
 (`cargo install meshloop-cli --locked`, then `meshloop bundle`).
 
-**This pane stays.** You are in Claude Code, Codex, Pi, Grok, or Agy inside
-Herdr 0.8. You are `meshloop:origin`. Meshloop creates a **separate Herdr
-space** (`meshloop-<repo>`) for planner, worker, and reviewer panes. Origin
-is not split and gets no extra tabs. If work starts in *this* pane, stop.
+**This session stays.** You are in Claude Code, Codex, Pi, Grok, or Agy. You are `meshloop:origin`.
+Meshloop executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees
+(`.meshloop-worktrees/<task-id>`), with multi-language AST context optimization (7 languages)
+and deterministic prompt caching. No background daemons or multiplexer servers are required.
 
 The origin agent asks **Accept / Decline / Adjust in English**. You may answer
 in Portuguese (`aceitar` / `recusar` / `ajustar`). You should not have to type
@@ -20,14 +20,12 @@ clone. WSL2 and prebuilt GitHub Release binaries: unverified. Concurrency is
 
 | State | What you should see | What you do |
 |---|---|---|
-| Ready | `herdr_server_running: true`, `origin_session` = **this** pane, no new split | Set `MESHLOOP_ORIGIN_*`, then `/meshloop:plan` |
-| Herdr down | `herdr_server_running: false`. Zero new panes | Start Herdr 0.8. Do not plan |
-| Plan in flight | Planner in the **Meshloop space**, not this pane; `meshloop-plan.json` | Stay. Wait for the 3-way question |
+| Ready | `daemonless: true`, `live_transport: direct-cli`, harnesses verified | `/meshloop:plan` |
+| Plan in flight | Planner running; outputs `meshloop-plan.json` | Stay. Wait for the 3-way question |
 | Accept | No worker yet. Status `PlanAccepted` | `/meshloop:run` |
 | Decline | Status `PlanDeclined`. No worker. `run` refuses | Stop, or Adjust — never `run --accept-plan` |
-| Adjust | Planner pane **again**; still awaiting review; question repeats | Answer again |
-| Run | **Worker** in the Meshloop space + extra worktree; **this branch unchanged** | Stay. Status overlays Herdr `live`. `/meshloop:accept` then `/meshloop:resume` |
-| Origin mistake | Planner/worker/reviewer **in this pane** | Cancel. Fix origin. Do not continue |
+| Adjust | Planner runs **again**; still awaiting review; question repeats | Answer again |
+| Run | **Worker** running in isolated git worktree; **this branch unchanged** | Stay. `/meshloop:accept` then `/meshloop:resume` |
 | FailedTerminal | Same accepted plan, nothing Ready | `meshloop resume --restart` (not a new `graph_id`) |
 
 `resume` merges into the **integrate worktree**. Only
@@ -37,10 +35,9 @@ clone. WSL2 and prebuilt GitHub Release binaries: unverified. Concurrency is
 
 From [Install](install.md) you should have: `meshloop` on `PATH`, a throwaway
 git **target** repo with `meshloop.toml`, the session pack (`meshloop bundle`),
-Herdr 0.8 running, and this origin pane opened **in that target repo**.
+and this session opened **in that target repo**.
 
 ```text
-herdr status
 meshloop --version
 meshloop doctor --json
 ```
@@ -49,19 +46,16 @@ Default store: `.meshloop/state.sqlite`. Worktrees:
 `<repo-parent>/.meshloop-worktrees/`. No credentials in config. No Windows
 service. Every `/meshloop:*` runs in the target repo.
 
-## 1. Doctor — name this pane
+## 1. Doctor — verify environment
 
 Slash: `/meshloop:doctor`.
 
-You want `herdr_server_running: true`, Herdr 0.8.x, `origin_session` = this
-pane. If Herdr is down, tell the user and **stop**.
+You want `daemonless: true` and `live_transport: "direct-cli"`. If doctor fails,
+fix your local CLI harness paths before proceeding.
 
 ```text
 MESHLOOP_ORIGIN_HARNESS=codex
-MESHLOOP_ORIGIN_SESSION=w3:p1
 ```
-
-Later slash skills inject these. Doctor does not split panes.
 
 ## 2. Plan
 

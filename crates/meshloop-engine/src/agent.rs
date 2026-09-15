@@ -58,12 +58,61 @@ pub fn build_agent_spec(
     worktree_path: PathBuf,
     timeout: Duration,
 ) -> AgentSpec {
-    let prompt = render_prompt(&PromptEnvelope {
-        situation: dependency_context(graph, node),
-        complication: node.description.clone(),
-        question: "Implement this change and leave evidence of what was done.".into(),
-        output_contract: DEFAULT_OUTPUT_CONTRACT.into(),
-    });
+    build_agent_spec_with_context(
+        graph,
+        node,
+        attempt_id,
+        harness,
+        model_ref,
+        worktree_path,
+        timeout,
+        &[],
+    )
+}
+
+/// Builds an AgentSpec enriched with AST skeletons and cache-optimized static prefix.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_spec_with_context(
+    graph: &TaskGraph,
+    node: &TaskNode,
+    attempt_id: AttemptId,
+    harness: &str,
+    model_ref: &str,
+    worktree_path: PathBuf,
+    timeout: Duration,
+    skeletons: &[(String, String)],
+) -> AgentSpec {
+    let prompt = if skeletons.is_empty() {
+        render_prompt(&PromptEnvelope {
+            situation: dependency_context(graph, node),
+            complication: node.description.clone(),
+            question: "Implement this change and leave evidence of what was done.".into(),
+            output_contract: DEFAULT_OUTPUT_CONTRACT.into(),
+        })
+    } else {
+        let mut builder = meshloop_context::PromptCacheBuilder::new()
+            .with_contract(DEFAULT_OUTPUT_CONTRACT)
+            .with_system_rule("Touch only allowed paths. Leave the worktree in a buildable state.");
+
+        for (path, skel) in skeletons {
+            builder = builder.with_ast_skeleton(path, skel);
+        }
+
+        let dep_ctx = dependency_context(graph, node);
+        let task_desc = if dep_ctx.is_empty() {
+            node.description.clone()
+        } else {
+            format!("DEPENDENCIES:\n{}\n\nTASK:\n{}", dep_ctx, node.description)
+        };
+
+        builder
+            .build(
+                &task_desc,
+                "Implement this change and leave evidence of what was done.",
+            )
+            .render()
+    };
+
     AgentSpec {
         task_id: node.id,
         attempt_id,
@@ -196,5 +245,32 @@ mod tests {
             Duration::from_secs(300),
         );
         assert!(spec.prompt.contains("meshloop-plan.json"));
+    }
+
+    #[test]
+    fn built_spec_with_context_includes_ast_skeletons() {
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node(1, "implement authentication", &[])],
+        };
+        let target = &graph.nodes[0];
+        let skeletons = vec![(
+            "src/auth.rs".to_string(),
+            "pub trait Auth { fn verify(&self); }".to_string(),
+        )];
+        let spec = build_agent_spec_with_context(
+            &graph,
+            target,
+            AttemptId(1),
+            "claude-code",
+            "configured-model",
+            PathBuf::from("/tmp/wt"),
+            Duration::from_secs(300),
+            &skeletons,
+        );
+        assert!(spec.prompt.contains("pub trait Auth"));
+        assert!(spec.prompt.contains("src/auth.rs"));
+        assert!(spec.prompt.contains("SYSTEM POLICIES"));
+        assert!(spec.prompt.contains("TASK ASSIGNMENT"));
     }
 }

@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Meshloop adapters: Herdr, git worktrees, SQLite, and the fixture harness."
+description = "Meshloop adapters: CLI harnesses, git worktrees, SQLite, and the fixture harness."
 readme = "README.md"
-keywords = ["orchestration", "agents", "herdr"]
+keywords = ["orchestration", "agents", "git"]
 categories = ["development-tools"]
 
 [lints]

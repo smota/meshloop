@@ -38,6 +38,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0019 | Origin cockpit and Meshloop-owned Herdr space | Accepted |
 | 0020 | Live Herdr pane is the wait authority | Accepted |
 | 0021 | Restart an accepted plan without replanning | Accepted |
+| 0022 | Daemonless standalone execution and multi-language context engineering | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

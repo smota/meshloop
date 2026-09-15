@@ -132,11 +132,21 @@ name = "meshloop-cli"
 version = "0.1.0"
 dependencies = [
  "meshloop-adapters",
+ "meshloop-context",
  "meshloop-domain",
  "meshloop-engine",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "meshloop-context"
+version = "0.1.0"
+dependencies = [
+ "meshloop-domain",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -150,6 +160,7 @@ dependencies = [
 name = "meshloop-engine"
 version = "0.1.0"
 dependencies = [
+ "meshloop-context",
  "meshloop-domain",
  "serde",
  "serde_json",

@@ -6,6 +6,17 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+#[derive(Debug, Deserialize, Default, Clone)]
+#[allow(dead_code)]
+pub struct Tier1FileConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub selected_harnesses: Vec<String>,
@@ -14,6 +25,13 @@ pub struct Config {
     pub harnesses: HashMap<String, HarnessConfig>,
     #[serde(default)]
     pub verify: VerifyConfig,
+    /// When true, Meshloop runs standalone without Herdr daemon, dispatching direct CLI harnesses into Git worktrees.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub standalone: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tier1: Option<Tier1FileConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,8 +51,8 @@ pub struct VerifyConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct HarnessConfig {
     pub executable: String,
-    /// Herdr `--kind` for live workers. Ignored for `fixture`.
     #[serde(default)]
+    #[allow(dead_code)]
     pub kind: Option<String>,
     #[serde(default)]
     pub version_args: Vec<String>,

@@ -1,6 +1,6 @@
 # meshloop-adapters
 
-Herdr, git worktree, SQLite, and fixture-harness adapters for
+Direct CLI harness, git worktree, SQLite, and fixture-harness adapters for
 [Meshloop](https://github.com/smota/meshloop). `fixture_harness` is the CI
 double, not a product worker.
 

@@ -1,8 +1,8 @@
 # Install and setup
 
-Verified path: **native Windows 10/11**, Herdr **0.8**, Meshloop **0.1.0** on
-[crates.io](https://crates.io/crates/meshloop-cli). WSL2, macOS, and prebuilt
-GitHub Release binaries are unverified.
+Verified path: **native Windows 10/11**, Meshloop **0.1.0** on
+[crates.io](https://crates.io/crates/meshloop-cli). Pure daemonless direct-CLI dispatch.
+WSL2, macOS, and prebuilt GitHub Release binaries are unverified.
 
 You operate **from inside** Claude Code, Codex, Pi, Grok, or Agy. The binary is
 the engine. Skills and local MCP are the operator surface. Do not run the loop
@@ -16,10 +16,9 @@ After this page: **[Getting started](start.md)** (the in-session loop).
 |---|---|
 | Cargo on `PATH` | `cargo --version` (Rust 1.98+ to *install*; you are not building Meshloop) |
 | `git` | `git --version` |
-| Herdr 0.8 | `herdr status` → running |
 | At least one harness CLI, already logged in | `codex`, `claude`, `grok`, `pi`, or `agy` |
 
-Meshloop does not store credentials. It uses logins you already have.
+Meshloop does not store credentials. It uses logins you already have. No background daemons needed.
 
 ## 1. Install the engine (once per machine)
 

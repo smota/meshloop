@@ -1,5 +1,5 @@
 [package]
-name = "meshloop-engine"
+name = "meshloop-context"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,18 +7,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Meshloop orchestration engine: plan, route, verify, recover. Ports only."
+description = "Context engineering for Meshloop: AST skeleton extraction, Tier 1 reader, and prompt caching."
 readme = "README.md"
-keywords = ["orchestration", "agents"]
+keywords = ["orchestration", "agents", "ast", "context"]
 categories = ["development-tools"]
 
 [lints]
 workspace = true
 
-# serde_json: the planner (ADR 0009/runtime-design.md §5) parses a decomposition agent's
-# declared JSON task-graph output contract; no other I/O added here.
 [dependencies]
 meshloop-domain = { workspace = true }
-meshloop-context = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

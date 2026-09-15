@@ -1,10 +1,9 @@
-# Implementation status — 2026-09-06
+# Implementation status — 2026-09-15
 
 > Maintainers and agents. Operators: [Getting started](../start.md).
 > Hub: [docs/README.md](../README.md).
 
-Executor: Grok, under human product direction (live Herdr is the product path;
-fixture is the CI double; `meshloop:review-plan` is the plan gate).
+Executor: Antigravity / AI Pair programmer, under human product direction (daemonless direct-CLI dispatch in Git worktrees is the product path; ADR 0022; `meshloop:review-plan` is the plan gate).
 
 ## What exists and is verified
 
@@ -12,30 +11,32 @@ Native Windows (`rustc 1.98.0`).
 
 | Gate | Meaning |
 |---|---|
-| `cargo run -p xtask -- check` | fmt, clippy `-D warnings`, workspace tests (live Herdr **skips** if down) |
-| `cargo run -p xtask -- live` | Launch gate — **fails** if Herdr is down |
+| `cargo run -p xtask -- check` | fmt, clippy `-D warnings`, workspace tests (106 tests) |
+| `cargo run -p xtask -- live` | Launch gate — verifies doctor `daemonless: true` and git worktree isolation |
 | `cargo run -p xtask -- smoke` | Prefixed CLI / doctor / review-plan in `--help` |
 | `cargo run -p xtask -- bundle` | `dist/meshloop-session-bundle/` (also `meshloop bundle`) |
-| `cargo run -p xtask -- publish-dry` | `cargo package` isolation for the four publishable crates |
+| `cargo run -p xtask -- publish-dry` | `cargo package` isolation for all five publishable crates |
 
 - **meshloop-domain:** task graph, lifecycle including `PlanDeclined`,
   `PlanDecision` (Accept / Decline / Adjust), evidence, policy, prefixed ids
   (`meshloop:review-plan` → MCP `meshloop_review_plan`).
+- **meshloop-context:** multi-language AST skeleton extraction across **7 languages**
+  (Rust, TypeScript/JS, Python, Go, C#, PHP, C++), Tier 1 dynamic 4-level provider resolution
+  (CLI flag > Env > TOML > Auto-detect / local Ollama fallback), deterministic prompt cache normalizer.
 - **meshloop-engine:** QACR, planner, **`RunLoop`** (`stage_plan` /
-  `decide_plan` / live or fixture dispatch), git-diff verify, no auto-retry on
-  resume. Default is live; `fixture_only` refuses non-fixture.
-- **meshloop-adapters:** `CliHarness` (CI), `HerdrWorkerHarness` (live panes),
-  Git worktrees, SQLite **schema v4** (`pane_id` on attempts, `review_note` on
-  runs, WAL).
+  `decide_plan` / live direct or fixture dispatch), context-enriched prompt builder
+  (`build_agent_spec_with_context`), git-diff verify, no auto-retry on resume.
+- **meshloop-adapters:** `CliHarness` (direct CLI subprocess execution & CI double),
+  Git worktree adapter, SQLite **schema v4** (`pane_id` / attempt tracking, `review_note` on
+  runs, WAL). Herdr dependency completely purged.
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
-  `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (origin pane),
+  `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (reports `daemonless: true`),
   `orchestrate`, `mcp`, `bundle`. Store: `.meshloop/state.sqlite`.
-- **crates.io 0.1.0** (2026-09-06): `meshloop-domain`, `meshloop-engine`,
-  `meshloop-adapters`, `meshloop-cli`. Operator path: [install.md](../install.md).
+- **ADRs:** 0001–0022 accepted. (ADR 0022: Daemonless Standalone Execution & Context Engineering).
 
 Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
-accept+resume, review-plan accept/decline/adjust. Live tests may create a **Meshloop-owned** Herdr workspace; they never split
-the supervisor pane or mutate the origin space.
+accept+resume, review-plan accept/decline/adjust. Live tests execute direct CLI
+processes in isolated worktrees with zero background daemon dependency.
 
 ## Session control plane (ADR 0017)
 

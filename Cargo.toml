@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/meshloop-domain", "crates/meshloop-engine", "crates/meshloop-adapters", "crates/meshloop-cli", "xtask"]
+members = [
+    "crates/meshloop-domain",
+    "crates/meshloop-context",
+    "crates/meshloop-engine",
+    "crates/meshloop-adapters",
+    "crates/meshloop-cli",
+    "xtask",
+]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +21,7 @@ authors = ["Samuel"]
 # Keep path+version in lockstep with workspace.package.version (ADR 0018).
 [workspace.dependencies]
 meshloop-domain = { path = "crates/meshloop-domain", version = "0.1.0" }
+meshloop-context = { path = "crates/meshloop-context", version = "0.1.0" }
 meshloop-engine = { path = "crates/meshloop-engine", version = "0.1.0" }
 meshloop-adapters = { path = "crates/meshloop-adapters", version = "0.1.0" }
 

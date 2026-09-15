@@ -1,8 +1,7 @@
-# Product config: live Herdr workers. No credentials. Fixture is the CI double
+# Product config: direct CLI workers. No credentials. Fixture is the CI double
 # (config/meshloop.fixture.toml) and `--fixture-only`.
 #
-# `kind` is the Herdr `--kind`. `executable` is unused for live dispatch; keep it
-# as a local probe hint. Isolation is git worktrees, not panes.
+# `kind` is the harness identifier. Isolation is git worktrees.
 selected_harnesses = ["grok", "claude", "codex"]
 
 [limits]

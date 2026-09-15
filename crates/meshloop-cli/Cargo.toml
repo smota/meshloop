@@ -26,6 +26,7 @@ workspace = true
 # serde/serde_json: task-graph (de)serialization for `plan`'s output file and `run`'s input.
 [dependencies]
 meshloop-domain = { workspace = true }
+meshloop-context = { workspace = true }
 meshloop-engine = { workspace = true }
 meshloop-adapters = { workspace = true }
 serde = { version = "1", features = ["derive"] }

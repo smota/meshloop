@@ -8,13 +8,11 @@ use std::time::Duration;
 use meshloop_adapters::check::CommandCheckRunner;
 use meshloop_adapters::git::GitWorktreeAdapter;
 use meshloop_adapters::harness::{CliHarness, CliHarnessConfig};
-use meshloop_adapters::herdr::{HerdrCliAdapter, HerdrWorkerHarness};
 use meshloop_adapters::process::WindowsProcessView;
 use meshloop_adapters::store::SqliteStore;
 use meshloop_domain::capability::{HarnessError, HarnessProfile};
 use meshloop_domain::policy::ModelCapabilityTier;
 use meshloop_engine::agent::AgentSpec;
-use meshloop_engine::orchestrate::herdr_kind;
 use meshloop_engine::origin::Origin;
 use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome, StoreError};
 use meshloop_engine::router::Candidate;
@@ -24,49 +22,43 @@ use crate::config::{Config, resolve_executable};
 
 pub enum DispatchHarness {
     Fixture(CliHarness),
-    Live(HerdrWorkerHarness),
+    Direct(CliHarness),
 }
 
 impl HarnessCapabilities for DispatchHarness {
     fn probe(&self) -> Result<HarnessProfile, HarnessError> {
         match self {
-            Self::Fixture(h) => h.probe(),
-            Self::Live(h) => h.probe(),
+            Self::Fixture(h) | Self::Direct(h) => h.probe(),
         }
     }
 
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
         match self {
-            Self::Fixture(h) => h.invoke(spec),
-            Self::Live(h) => h.invoke(spec),
+            Self::Fixture(h) | Self::Direct(h) => h.invoke(spec),
         }
     }
 
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {
         match self {
-            Self::Fixture(h) => h.cancel(handle),
-            Self::Live(h) => h.cancel(handle),
+            Self::Fixture(h) | Self::Direct(h) => h.cancel(handle),
         }
     }
 
     fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
         match self {
-            Self::Fixture(h) => h.collect(handle),
-            Self::Live(h) => h.collect(handle),
+            Self::Fixture(h) | Self::Direct(h) => h.collect(handle),
         }
     }
 
     fn session_live(&self, handle: &HarnessHandle) -> meshloop_engine::ports::LiveCheck {
         match self {
-            Self::Fixture(h) => h.session_live(handle),
-            Self::Live(h) => h.session_live(handle),
+            Self::Fixture(h) | Self::Direct(h) => h.session_live(handle),
         }
     }
 
     fn pane_for_worktree(&self, worktree: &Path) -> Option<String> {
         match self {
-            Self::Fixture(h) => h.pane_for_worktree(worktree),
-            Self::Live(h) => h.pane_for_worktree(worktree),
+            Self::Fixture(h) | Self::Direct(h) => h.pane_for_worktree(worktree),
         }
     }
 }
@@ -107,37 +99,17 @@ pub fn default_worktree_base(repo_root: &Path) -> PathBuf {
         .join(name)
 }
 
-pub fn herdr_bin() -> PathBuf {
-    PathBuf::from("herdr")
-}
-
 pub struct ComposeRequest<'a> {
     pub config: &'a Config,
     pub repo_root: PathBuf,
     pub db_path: Option<&'a Path>,
     pub worktree_base: Option<PathBuf>,
+    #[allow(dead_code)]
     pub origin: Origin,
     pub fixture_only: bool,
-    /// Fail closed when a live harness is selected and Herdr is down (plan/run/resume).
-    pub require_herdr: bool,
 }
 
 pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
-    let needs_live =
-        req.config.selected_harnesses.iter().any(|n| n != "fixture") && !req.fixture_only;
-    if needs_live && req.require_herdr {
-        let herdr = HerdrCliAdapter::new(herdr_bin());
-        match herdr.probe_status() {
-            Ok(d) if d.server_running => {}
-            other => {
-                return Err(format!(
-                    "live workers require Herdr 0.8 with a running server; got {other:?}. \
-                     Start Herdr, or pass --fixture-only for the CI double."
-                ));
-            }
-        }
-    }
-
     let mut harnesses = HashMap::new();
     let mut candidates = Vec::new();
     for name in &req.config.selected_harnesses {
@@ -146,39 +118,19 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
             .harnesses
             .get(name)
             .ok_or_else(|| format!("harness '{name}' selected but not configured"))?;
-        let live = name != "fixture" && !req.fixture_only;
-        if live {
-            let kind = hc
-                .kind
-                .clone()
-                .or_else(|| herdr_kind(name).map(str::to_string))
-                .or_else(|| herdr_kind(&hc.model_ref).map(str::to_string))
-                .ok_or_else(|| {
-                    format!(
-                        "harness '{name}' is not fixture and has no Herdr --kind (set kind = \"claude\"|\"codex\"|\"pi\"|\"grok\"|\"agy\")"
-                    )
-                })?;
-            harnesses.insert(
-                name.clone(),
-                DispatchHarness::Live(HerdrWorkerHarness::new(
-                    herdr_bin(),
-                    name.clone(),
-                    kind,
-                    req.origin.session.clone(),
-                    req.repo_root.clone(),
-                )),
-            );
+        let is_fixture = name == "fixture" || req.fixture_only;
+        let cli = CliHarness::new(CliHarnessConfig {
+            name: name.clone(),
+            executable: resolve_executable(&hc.executable),
+            version_args: hc.version_args.clone(),
+            invoke_args_template: hc.invoke_args_template.clone(),
+        });
+        let dispatch = if is_fixture {
+            DispatchHarness::Fixture(cli)
         } else {
-            harnesses.insert(
-                name.clone(),
-                DispatchHarness::Fixture(CliHarness::new(CliHarnessConfig {
-                    name: name.clone(),
-                    executable: resolve_executable(&hc.executable),
-                    version_args: hc.version_args.clone(),
-                    invoke_args_template: hc.invoke_args_template.clone(),
-                })),
-            );
-        }
+            DispatchHarness::Direct(cli)
+        };
+        harnesses.insert(name.clone(), dispatch);
         candidates.push(Candidate {
             harness: name.clone(),
             model_ref: hc.model_ref.clone(),
@@ -238,7 +190,6 @@ mod tests {
             worktree_base: None,
             origin: Origin::default(),
             fixture_only: true,
-            require_herdr: false,
         })
         .unwrap();
         assert_eq!(composed.harnesses.len(), 1);
@@ -247,6 +198,36 @@ mod tests {
             composed.harnesses.get("fixture"),
             Some(DispatchHarness::Fixture(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn composes_standalone_live_harness_without_herdr() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("config/meshloop.example.toml");
+        let config = load(&config_path).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "meshloop-compose-standalone-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let composed = compose(ComposeRequest {
+            config: &config,
+            repo_root: dir.clone(),
+            db_path: Some(&dir.join("t.sqlite")),
+            worktree_base: None,
+            origin: Origin::default(),
+            fixture_only: false,
+        })
+        .unwrap();
+        // Live harnesses are composed as Direct(CliHarness) with zero Herdr requirement
+        for harness in composed.harnesses.values() {
+            assert!(matches!(harness, DispatchHarness::Direct(_)));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

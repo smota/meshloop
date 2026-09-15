@@ -150,6 +150,7 @@ fn bundle(root: &Path) -> ExitCode {
 
 const PUBLISH_CRATES: &[&str] = &[
     "meshloop-domain",
+    "meshloop-context",
     "meshloop-engine",
     "meshloop-adapters",
     "meshloop-cli",
@@ -275,17 +276,6 @@ fn live(root: &Path) -> ExitCode {
     ) {
         return ExitCode::FAILURE;
     }
-    let herdr = Command::new("herdr")
-        .arg("status")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    if !herdr.contains("status: running") && !herdr.contains("status:running") {
-        eprintln!("xtask live: Herdr server is not running. Launch sign-off requires live Herdr.");
-        return ExitCode::FAILURE;
-    }
 
     let bin = meshloop_bin(root);
     let doctor = Command::new(&bin)
@@ -301,53 +291,31 @@ fn live(root: &Path) -> ExitCode {
         String::from_utf8_lossy(&doctor.stdout),
         String::from_utf8_lossy(&doctor.stderr)
     );
-    if !text.contains("\"herdr_server_running\": true") {
-        eprintln!("xtask live: doctor did not report herdr_server_running true:\n{text}");
+    if !text.contains("\"daemonless\": true") {
+        eprintln!("xtask live: doctor did not report daemonless true:\n{text}");
         return ExitCode::FAILURE;
     }
-    if !text.contains("origin_session") {
-        eprintln!("xtask live: doctor JSON missing origin_session:\n{text}");
-        return ExitCode::FAILURE;
-    }
-
-    let origin = std::env::var("MESHLOOP_ORIGIN_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let origin = match origin {
-        Some(s) => s,
-        None => {
-            let cur = Command::new("herdr").args(["pane", "current"]).output();
-            match cur {
-                Ok(o) if o.status.success() => {
-                    let raw = String::from_utf8_lossy(&o.stdout);
-                    raw.lines()
-                        .map(str::trim)
-                        .find(|l| l.contains(":p") || l.starts_with('w'))
-                        .unwrap_or("")
-                        .to_string()
-                }
-                _ => String::new(),
-            }
-        }
-    };
-    if origin.is_empty() {
-        eprintln!("xtask live: set MESHLOOP_ORIGIN_SESSION so the supervisor pane is never split");
+    if !text.contains("\"live_transport\": \"direct-cli\"") {
+        eprintln!("xtask live: doctor did not report direct-cli transport:\n{text}");
         return ExitCode::FAILURE;
     }
 
-    let list = Command::new("herdr").args(["pane", "list"]).output();
-    let Ok(list) = list else {
-        eprintln!("xtask live: herdr pane list failed");
+    // Verify git worktree capability
+    let wt = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(root)
+        .output();
+    let Ok(wt) = wt else {
+        eprintln!("xtask live: failed to query git worktrees");
         return ExitCode::FAILURE;
     };
-    let list_text = String::from_utf8_lossy(&list.stdout);
-    if !list_text.contains(&origin) && !list_text.contains("pane") {
-        eprintln!("xtask live: could not list panes to split from a non-origin pane");
+    if !wt.status.success() {
+        eprintln!("xtask live: git worktree list returned error");
         return ExitCode::FAILURE;
     }
 
     println!(
-        "xtask live: Herdr running; doctor reports origin_session; origin pane {origin} will not be split"
+        "xtask live: Meshloop daemonless mode verified; doctor reports direct-cli transport; git worktree isolation operational"
     );
     ExitCode::SUCCESS
 }

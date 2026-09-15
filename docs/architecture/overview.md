@@ -7,26 +7,28 @@ Windows**. Named residuals: WSL2 unverified, concurrency = 1, prebuilt
 binaries not started, quota windows not queried from vendors. crates.io 0.1.0
 is published.
 
-## Two surfaces (ADR 0001)
+## Two surfaces (ADR 0001, ADR 0022)
 
 | Surface | Role |
 |---|---|
 | `meshloop:` skills + local MCP | Operator UX (slash `/meshloop:plan`) |
 | Compiled `meshloop` binary | Engine / saga (ML-014). Skills contain no orchestration. |
 
-You sit in an authenticated agent pane (`meshloop:origin`). Meshloop asks Herdr
-to open planner, worker, and reviewer panes in a **Meshloop-owned workspace**
-(`meshloop-<repo>`, `--no-focus`). Isolation is git worktrees, not panes. The
-origin pane and origin space are never split or tabbed.
+Meshloop operates as a standalone daemonless engine. Tasks are scheduled across
+configured CLI harnesses (`agy`, `claude`, `codex`, `grok`, `pi`) and executed
+inside isolated, ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`).
+Context is dynamically optimized through `meshloop-context` via multi-language AST
+skeletons (Rust, TS, Python, Go, C#, PHP, C++) and prompt cache normalization.
 
 ```mermaid
 flowchart LR
   Skills["Skills / MCP / slash"] --> CLI["meshloop-cli"]
   CLI --> Engine["meshloop-engine"]
   Engine --> Domain["meshloop-domain"]
+  Engine --> Context["meshloop-context\n(7 langs AST + cache)"]
   CLI --> Adapters["meshloop-adapters"]
   Adapters --> Engine
-  Adapters --> Herdr["Herdr 0.8"]
+  Adapters --> Harness["Direct CLI harnesses\n(agy, claude, codex)"]
   Adapters --> Git["git worktrees"]
   Adapters --> SQLite["SQLite WAL"]
 ```
@@ -34,8 +36,9 @@ flowchart LR
 | Layer | Owns |
 |---|---|
 | meshloop-domain | Task graph, lifecycle, evidence, policy — no I/O |
+| meshloop-context | AST skeleton extraction (7 languages), Tier 1 dynamic resolution, prompt cache normalizer |
 | meshloop-engine | Planner, QACR router, RunLoop saga, recovery — ports only |
-| meshloop-adapters | Herdr CLI, CliHarness (fixture), Git, SQLite |
+| meshloop-adapters | Direct CliHarness, Git worktrees, SQLite WAL |
 | meshloop-cli | Argv, compose, JSON envelope, MCP stdio |
 
 ## Engine states (R1)

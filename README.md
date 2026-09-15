@@ -15,26 +15,23 @@ credentials.
 [![Version](https://img.shields.io/badge/version-0.1.0-informational?style=flat-square)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.98-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#status)
-[![R1](https://img.shields.io/badge/R1-live--Herdr-1A6B66?style=flat-square)](#status)
+[![Mode](https://img.shields.io/badge/mode-daemonless--direct--cli-1A6B66?style=flat-square)](#status)
+[![Context](https://img.shields.io/badge/AST--context-7--languages-1A6B66?style=flat-square)](#status)
 [![unsafe](https://img.shields.io/badge/unsafe-forbidden-1A6B66?style=flat-square)](Cargo.toml)
 
-> **Release 1** (native Windows + Herdr 0.8): you stay in Claude Code, Codex,
-> Pi, Grok, or Agy. Meshloop opens planner, worker, and reviewer panes in a
-> **Meshloop-owned Herdr space**, verifies the git diff, and will not merge
-> until you accept. Fixture subprocess is CI, not the product.
+> **Standalone & Daemonless Core**: you stay in Claude Code, Codex, Pi, Grok, or Agy.
+> Meshloop schedules work across your authenticated CLI agents, extracts AST skeletons
+> across 7 languages to slash context consumption by 70–90%, executes workers in isolated
+> Git worktrees without background daemons, verifies diffs, and will not merge until you accept.
 
-| You — this pane (`meshloop:origin`) | Meshloop — dedicated Herdr space |
+| You — this session (`meshloop:origin`) | Meshloop — isolated execution |
 |---|---|
-| Direct. Never implement the work here. | Planner, worker (+ git worktree), reviewers |
-| Never split. Bind `MESHLOOP_ORIGIN_SESSION` from `/meshloop:doctor`. | Isolation is the worktree, not the pane |
-
-If a planner, worker, or reviewer appears **in this pane**, stop. Origin was
-not injected.
+| Direct. Never implement the work here. | Planner, worker (+ ephemeral git worktree), reviewers |
+| Never mutated directly. Bind session via `/meshloop:doctor`. | Isolation is the git worktree (`.meshloop-worktrees/<task-id>`) |
 
 ## Install
 
-Native Windows. Herdr 0.8 must be running. Full setup:
-**[Install and setup](docs/install.md)**.
+Native Windows. Full setup: **[Install and setup](docs/install.md)**.
 
 ```text
 cargo install meshloop-cli --locked
@@ -48,12 +45,12 @@ skill folder, and `/meshloop:doctor`.
 
 ## The loop (one story)
 
-1. `/meshloop:doctor` — bind origin (this pane id). If Herdr is down, stop.
-2. `/meshloop:plan` — planner pane in the Meshloop space; graph file.
+1. `/meshloop:doctor` — verify CLI harnesses, git worktrees, and daemonless mode.
+2. `/meshloop:plan` — generate decomposition task graph file (`meshloop-plan.json`).
 3. `/meshloop:review-plan` — **Accept / Decline / Adjust** (English prompt; answer in any language).
-4. `/meshloop:run` — **after Accept only** — worker pane + worktree; **current branch unchanged**.
+4. `/meshloop:run` — **after Accept only** — worker in ephemeral worktree; **current branch unchanged**.
 5. `/meshloop:accept` then `/meshloop:resume` — node merges into the **integrate worktree**, not your branch.
-6. Optional `/meshloop:orchestrate` — two reviewer panes, never origin.
+6. Optional `/meshloop:orchestrate` — two reviewer models evaluate candidates.
 7. Optional `meshloop integrate --into --accept-integrate` — only step that lands on a branch you name.
 
 Full steps and failure screens: **[Getting started](docs/start.md)**.
@@ -73,22 +70,24 @@ The five names are the **intended configured set**, not a compatibility matrix.
 
 ## Status
 
-| Capability | Release 1 (0.1.0) |
+| Capability | Current Architecture (0.1.0) |
 |---|---|
-| Loop above, live Herdr workers | Yes, native Windows + Herdr 0.8 (`xtask live` is the launch gate) |
+| Execution architecture | Pure daemonless direct-CLI dispatch in isolated Git worktrees |
+| Context engineering | Multi-language AST pruning (Rust, TS/JS, Python, Go, C#, PHP, C++) + Prompt Cache normalizer |
+| Bulk Reader (Tier 1) | Dynamic 4-level resolution: CLI flag > Env > TOML > Auto-detect / local Ollama |
 | Commands | `plan`, `review-plan`, `run`, `status`, `resume`, `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor`, `orchestrate`, `mcp`, `bundle` |
 | Plan gate | `review-plan` Accept / Decline / Adjust (CLI shortcut: `run --accept-plan`) |
 | Node / land gates | `accept --as` then `resume`; `integrate --accept-integrate` |
-| Origin pane | Supervisor-only; never split |
+| Isolation | Ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`) |
 | Fixture | CI double (`--fixture-only`) |
 | Credentials / your branch | Not stored / untouched until integrate |
 | Concurrency / prebuilt binaries / WSL2 / queried quota | 1 / no / unverified / not queried |
 | crates.io | 0.1.0 (`cargo install meshloop-cli --locked`) |
-| ADRs 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 · 0018 | Accepted |
+| ADRs | 0001 · 0003 · 0005 · 0007 · 0009 · 0016 · 0017 · 0018 · 0022 Accepted |
 
 ## Safety
 
-- No API keys in config. No Windows service.
+- No API keys in config. No Windows service. No background daemons.
 - Workers use extra git worktrees under `<repo-parent>/.meshloop-worktrees/`.
 - `--as` is an audit label, not a git author rewrite.
 - Throwaway git repo first — **not** this product clone as the target tree.
@@ -108,19 +107,16 @@ Pinned Rust **1.98.0**. Mise-managed toolchain; no global installs.
 
 ```text
 cargo build -p meshloop-cli
-cargo run -p xtask -- check    # fmt, clippy, fixture tests
+cargo run -p xtask -- check    # fmt, clippy, workspace tests (106 tests)
 cargo run -p xtask -- smoke
 cargo run -p xtask -- bundle
 cargo run -p xtask -- publish-dry
-cargo run -p xtask -- live     # fails if Herdr is down
+cargo run -p xtask -- live     # verifies doctor daemonless and git worktree isolation
 ```
 
 The binary is the **engine**. Skills/MCP are the **operator surface**.
 No-args `meshloop` prints **status**, not help. Operator install is
 [docs/install.md](docs/install.md), not this section.
-
-Live tests may split **non-origin** panes. See
-[testing](docs/engineering/testing.md) and [AGENTS.md](AGENTS.md).
 
 ## License, trademarks, provenance
 

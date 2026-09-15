@@ -282,7 +282,6 @@ fn cmd_plan(
         worktree_base: None,
         origin: origin.clone(),
         fixture_only: false,
-        require_herdr: true,
     }) {
         Ok(c) => c,
         Err(e) => {
@@ -422,7 +421,6 @@ fn cmd_review_plan(
         worktree_base: None,
         origin: origin.clone(),
         fixture_only,
-        require_herdr: decision == PlanDecision::Adjust && !fixture_only,
     }) {
         Ok(c) => c,
         Err(e) => {
@@ -612,7 +610,6 @@ fn cmd_run(
         worktree_base,
         origin: origin.clone(),
         fixture_only,
-        require_herdr: !fixture_only,
     }) {
         Ok(c) => c,
         Err(e) => {
@@ -758,7 +755,6 @@ fn with_saga(
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
     fixture_only: bool,
-    require_herdr: bool,
     origin: meshloop_engine::origin::Origin,
     f: impl FnOnce(&mut RunLoop<'_>) -> ExitCode,
 ) -> ExitCode {
@@ -773,7 +769,6 @@ fn with_saga(
         worktree_base,
         origin,
         fixture_only,
-        require_herdr,
     }) {
         Ok(c) => c,
         Err(e) => {
@@ -824,7 +819,7 @@ fn cmd_status(
         return ExitCode::SUCCESS;
     }
     let db = None;
-    with_saga(None, db, None, false, false, origin.clone(), |saga| {
+    with_saga(None, db, None, false, origin.clone(), |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(_) => {
@@ -890,38 +885,30 @@ fn cmd_resume(
     fixture_only: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(
-        config,
-        db,
-        worktree_base,
-        fixture_only,
-        !fixture_only,
-        origin,
-        |saga| {
-            let id = match saga.resolve_graph_id(graph.as_deref()) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("{e:?}");
-                    return ExitCode::from(2);
-                }
-            };
-            match saga.resume(&id, retry, restart) {
-                Ok(reason) => {
-                    println!("{}", report::format_idle(reason));
-                    if let Ok(s) = saga.status(&id) {
-                        print!("{}", report::format_status(&s));
-                        ExitCode::from(idle_exit_code(reason, &s) as u8)
-                    } else {
-                        ExitCode::SUCCESS
-                    }
-                }
-                Err(e) => {
-                    eprintln!("resume failed: {e:?}");
-                    ExitCode::from(1)
+    with_saga(config, db, worktree_base, fixture_only, origin, |saga| {
+        let id = match saga.resolve_graph_id(graph.as_deref()) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("{e:?}");
+                return ExitCode::from(2);
+            }
+        };
+        match saga.resume(&id, retry, restart) {
+            Ok(reason) => {
+                println!("{}", report::format_idle(reason));
+                if let Ok(s) = saga.status(&id) {
+                    print!("{}", report::format_status(&s));
+                    ExitCode::from(idle_exit_code(reason, &s) as u8)
+                } else {
+                    ExitCode::SUCCESS
                 }
             }
-        },
-    )
+            Err(e) => {
+                eprintln!("resume failed: {e:?}");
+                ExitCode::from(1)
+            }
+        }
+    })
 }
 
 fn cmd_cancel(
@@ -932,7 +919,7 @@ fn cmd_cancel(
     worktree_base: Option<PathBuf>,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(config, db, worktree_base, false, false, origin, |saga| {
+    with_saga(config, db, worktree_base, false, origin, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -961,7 +948,7 @@ fn cmd_inspect(
     db: Option<PathBuf>,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(config, db, None, false, false, origin, |saga| {
+    with_saga(config, db, None, false, origin, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -999,7 +986,7 @@ fn cmd_accept(
     worktree_base: Option<PathBuf>,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(config, db, worktree_base, false, false, origin, |saga| {
+    with_saga(config, db, worktree_base, false, origin, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1034,24 +1021,18 @@ fn cmd_integrate(
         eprintln!("integrate requires --accept-integrate after reviewing the integrate worktree");
         return ExitCode::from(2);
     }
-    with_saga(
-        config,
-        db,
-        worktree_base,
-        false,
-        false,
-        origin,
-        |saga| match saga.integrate_into(&graph, &into) {
-            Ok(()) => {
-                println!("integrated graph {graph} into {into}");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("{e:?}");
-                ExitCode::from(1)
-            }
-        },
-    )
+    with_saga(config, db, worktree_base, false, origin, |saga| match saga
+        .integrate_into(&graph, &into)
+    {
+        Ok(()) => {
+            println!("integrated graph {graph} into {into}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e:?}");
+            ExitCode::from(1)
+        }
+    })
 }
 
 fn cmd_bundle(dest: PathBuf, json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
@@ -1120,42 +1101,29 @@ fn cmd_roles(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
 }
 
 fn cmd_doctor(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
-    let herdr = meshloop_adapters::herdr::HerdrCliAdapter::new(compose::herdr_bin());
-    let doctor = herdr.probe_status();
-    let (running, version, err) = match &doctor {
-        Ok(d) => (d.server_running, d.version.clone(), None),
-        Err(e) => (false, None, Some(format!("{e:?}"))),
-    };
-    let pane = herdr.current_pane_id().ok().flatten();
-    let origin_session = origin.session.clone().or(pane);
+    let origin_session = origin.session.clone();
     let origin_harness = origin.harness.clone();
     let data = serde_json::json!({
-        "herdr_server_running": running,
-        "herdr_version": version,
-        "herdr_error": err,
+        "daemonless": true,
         "origin_session": origin_session,
         "origin_harness": origin_harness,
-        "live_transport": "herdr",
+        "live_transport": "direct-cli",
         "live_default": true,
         "fixture_transport": "subprocess",
         "fixture_is": "ci-double",
         "namespace": "meshloop:",
         "supervisor_only": true,
         "kinds": ["claude", "codex", "pi", "grok", "agy"],
-        "note": "Doctor does not split panes. Live workers use Herdr; never split origin_session. --fixture-only is the CI double.",
+        "note": "Doctor reports standalone environment. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
     if json {
         println!("{}", json_out::ok("meshloop:doctor", origin, data));
     } else {
         println!("meshloop:doctor");
-        println!("  herdr running: {running}");
-        println!("  herdr version: {version:?}");
+        println!("  daemonless: true");
         println!("  origin session: {origin_session:?}");
         println!("  origin harness: {origin_harness:?}");
-        if let Some(e) = err {
-            println!("  herdr error: {e}");
-        }
-        println!("  live transport: herdr (default) | fixture: CI subprocess");
+        println!("  live transport: direct-cli (default) | fixture: CI subprocess");
         println!("  namespace: meshloop: | origin: supervisor-only");
     }
     ExitCode::SUCCESS
@@ -1174,10 +1142,9 @@ fn cmd_orchestrate(
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    use meshloop_adapters::herdr::HerdrCliAdapter;
     use meshloop_engine::orchestrate::{
-        PinnedEvidence, WaveResult, execute_wave, matrix_only, persist_reviews, pin_attempt,
-        plan_review, write_pack,
+        PinnedEvidence, WaveResult, matrix_only, persist_reviews, pin_attempt, plan_review,
+        write_pack,
     };
 
     let live = !fixture_only && origin.session.is_some();
@@ -1195,7 +1162,6 @@ fn cmd_orchestrate(
             worktree_base,
             origin: origin.clone(),
             fixture_only,
-            require_herdr: live,
         })
         .ok(),
         Err(_) => None,
@@ -1243,35 +1209,7 @@ fn cmd_orchestrate(
         pack_dir.clone(),
     ) {
         Ok(plan) => {
-            let wave: WaveResult = if live {
-                let herdr = HerdrCliAdapter::new(std::path::PathBuf::from("herdr"));
-                match herdr.probe_status() {
-                    Ok(d) if d.server_running => {}
-                    other => {
-                        let msg = format!("herdr not ready for live orchestrate: {other:?}");
-                        if json {
-                            println!("{}", json_out::err("meshloop:orchestrate", origin, msg));
-                        } else {
-                            eprintln!("{msg}");
-                        }
-                        return ExitCode::from(2);
-                    }
-                }
-                let pack = pack_dir.clone().unwrap_or_else(repo_root);
-                match execute_wave(&herdr, plan, &pack, &repo_root(), 120_000) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        if json {
-                            println!("{}", json_out::err("meshloop:orchestrate", origin, e));
-                        } else {
-                            eprintln!("{e}");
-                        }
-                        return ExitCode::from(1);
-                    }
-                }
-            } else {
-                matrix_only(plan)
-            };
+            let wave: WaveResult = matrix_only(plan);
             if let Some(c) = composed.as_mut()
                 && wave.live_executed
             {

@@ -4,16 +4,16 @@ Run `cargo run -p xtask -- check` from the root. It checks formatting, compilati
 Clippy with warnings denied, and workspace tests, offline and locked where applicable.
 After adding dependencies, fetch approved locked dependencies separately before offline checks.
 
-Classify tests by behavior: pure domain unit tests, engine tests using controlled ports,
-adapter contract tests with synthetic fixtures, and live Herdr tests against a running
-server. `tests/scenarios/scaffold_cli.rs` covers help, version, missing-argument
+Classify tests by behavior: pure domain unit tests, context engineering AST skeleton
+and cache normalization unit tests (7 languages), engine tests using controlled ports,
+adapter contract tests with synthetic fixtures, and live direct-CLI subprocess tests in
+isolated Git worktrees. `tests/scenarios/scaffold_cli.rs` covers help, version, missing-argument
 rejection, and unprefixed-role rejection. End-to-end CLI tests drive the compiled
 binary against `fixture_harness` on disposable git repos (canned plan, `--accept-plan`
-gate, empty-diff failure, accept then resume to Integrated). Live tests may create a
-Meshloop-owned Herdr workspace when `herdr status` is running; they skip if the server
-is down. `cargo run -p xtask -- live` **fails** if Herdr is down (launch gate). Never
-split the origin supervisor pane or mutate the origin space. `cargo run -p xtask -- publish-dry` packages the four
-publishable crates in isolation (ADR 0018); it is not a crates.io upload.
+gate, empty-diff failure, accept then resume to Integrated). `cargo run -p xtask -- live`
+verifies daemonless operation (`doctor` reporting `daemonless: true` and `live_transport: direct-cli`)
+and git worktree isolation operational state (launch gate). `cargo run -p xtask -- publish-dry`
+packages all five publishable crates in isolation (ADR 0018); it is not a crates.io upload.
 
 Future critical cases: DAG cycles, dependency failure, concurrency limits, cancellation,
 timeout, fallback exhaustion, recovery, stale evidence, path escape, test tampering,
