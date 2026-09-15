@@ -187,6 +187,7 @@ flowchart TB
 - **[Documentation Hub](docs/README.md)** — Complete index and reading paths
 - **[Installation and Setup](docs/install.md)** — Complete setup and MCP configuration
 - **[Getting Started Guide](docs/start.md)** — In-session engineering loop walkthrough
+- **[Product & Engineering Log](docs/product/product-log.md)** — Empirical release log, verified benchmarks, and roadmap
 - **[Product Brief & Scenarios](docs/product/brief.md)** — Design goals and use cases
 - **[Architecture Overview](docs/architecture/overview.md)** — Hexagonal boundaries, state machine, and glossary
 - **[Modular Architecture & Concurrency](docs/architecture/modern-modular-architecture.md)** — RunLoop concurrency and self-repair

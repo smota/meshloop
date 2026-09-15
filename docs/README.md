@@ -134,3 +134,8 @@ flowchart TB
 - **[Contributing Guide](../CONTRIBUTING.md)** — Workspace layout, adding language support, and extending harnesses.
 - **[Testing Strategy](engineering/testing.md)** — Running `xtask check`, `xtask bench`, and isolation tests.
 - **[Measurement & Benchmarking](engineering/benchmarking.md)** — SPEC-ML-BENCH-001 metrics, thresholds, and scorecard validation.
+
+### Product & Release Governance
+- **[Product & Engineering Log](product/product-log.md)** — Empirical progression of features, architectural milestones, verified benchmarks, and roadmap.
+- **[Product Strategy Brief](product/brief.md)** — Strategy, market positioning, target workflows, and user value proposition.
+- **[Functional Requirements](product/requirements.md)** — Core functional capabilities and non-functional constraints.
