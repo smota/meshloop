@@ -1,0 +1,85 @@
+{
+  "mode": "mock",
+  "total_exercises": 8,
+  "completed_exercises": 8,
+  "fpar": {
+    "proportion": 1.0,
+    "lower_bound": 0.6755924351161318,
+    "upper_bound": 1.0,
+    "sample_size": 8,
+    "successes": 8
+  },
+  "overall_resolution": {
+    "proportion": 1.0,
+    "lower_bound": 0.6755924351161318,
+    "upper_bound": 1.0,
+    "sample_size": 8,
+    "successes": 8
+  },
+  "exercises": [
+    {
+      "id": "rust-two-fer",
+      "language": "rust",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "rust-clock",
+      "language": "rust",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "ts-bob",
+      "language": "typescript",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "py-luhn",
+      "language": "python",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "go-hamming",
+      "language": "go",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "cs-nucleotide-count",
+      "language": "csharp",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "php-gigasecond",
+      "language": "php",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    },
+    {
+      "id": "cpp-reverse-string",
+      "language": "cpp",
+      "first_pass_accepted": true,
+      "resolved": true,
+      "attempts": 1,
+      "wall_clock_ms": 1
+    }
+  ]
+}

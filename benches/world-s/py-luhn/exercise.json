@@ -1,0 +1,8 @@
+{
+  "id": "py-luhn",
+  "language": "python",
+  "name": "Luhn",
+  "difficulty": "medium",
+  "verify_command": ["pytest"],
+  "prompt": "Given a number determine whether or not it is valid per the Luhn formula. Strings of length 1 or less are not valid. Spaces are allowed in the input, but should be stripped before checking. All other non-digit characters are disallowed."
+}

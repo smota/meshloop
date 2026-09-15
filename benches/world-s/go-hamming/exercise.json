@@ -1,0 +1,8 @@
+{
+  "id": "go-hamming",
+  "language": "go",
+  "name": "Hamming",
+  "difficulty": "easy",
+  "verify_command": ["go", "test"],
+  "prompt": "Calculate the Hamming Difference between two DNA strands. If the strands are not of equal length, return an error."
+}

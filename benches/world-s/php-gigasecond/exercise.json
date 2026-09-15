@@ -1,0 +1,8 @@
+{
+  "id": "php-gigasecond",
+  "language": "php",
+  "name": "Gigasecond",
+  "difficulty": "easy",
+  "verify_command": ["phpunit"],
+  "prompt": "Given a DateTimeImmutable object, return a new DateTimeImmutable that is exactly 1,000,000,000 seconds (1 gigasecond) later."
+}

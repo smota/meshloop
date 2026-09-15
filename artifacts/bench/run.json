@@ -15,7 +15,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 0.015099999999999999
+      "value": 0.016
     },
     {
       "name": "ctx.cache.stale_hit_rate_pct",
@@ -39,7 +39,7 @@
       "target_op": "lte",
       "target_value": 500.0,
       "unit": "us",
-      "value": 484.0
+      "value": 491.0
     },
     {
       "name": "quant.recall_at_k",
@@ -55,7 +55,7 @@
       "target_op": "lte",
       "target_value": 10.0,
       "unit": "ms",
-      "value": 1.0899
+      "value": 1.7386000000000001
     },
     {
       "name": "conc.wal.write_contention_ms",
@@ -63,7 +63,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 1.090098
+      "value": 1.127218
     },
     {
       "name": "conc.git_admin.lock_contention_ms",
@@ -71,7 +71,7 @@
       "target_op": "lte",
       "target_value": 200.0,
       "unit": "ms",
-      "value": 64.2474
+      "value": 84.8711
     },
     {
       "name": "conc.throughput_gain",
@@ -79,7 +79,7 @@
       "target_op": "gte",
       "target_value": 1.0,
       "unit": "x",
-      "value": 2.551289398280802
+      "value": 1.747008547008547
     },
     {
       "name": "iso.redact.pass_rate_pct",
@@ -135,7 +135,7 @@
       "target_op": "lte",
       "target_value": 25.0,
       "unit": "ms",
-      "value": 0.053
+      "value": 0.105
     },
     {
       "name": "conc.orphan_process_count",
@@ -172,13 +172,13 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "git_sha": "03a987877fa47e0235fa9d51b5789693c2fd5a76",
+    "git_sha": "1c6513b8495d2502614a78519c02d4b22d6896d5",
     "hostname": "SKYNET-SAM01",
     "os": "windows",
-    "recorded_at": "2026-09-15T20:09:56+02:00",
+    "recorded_at": "2026-09-15T23:01:26+02:00",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
   },
-  "run_id": "6aa9ac60-5d04-475e-a000-c10ec538ef14",
+  "run_id": "6aa9b335-1374-406c-a001-cde830a4bbd5",
   "schema_version": "1.0.0",
   "status": {
     "invariants": "pass",

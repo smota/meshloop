@@ -1,0 +1,8 @@
+{
+  "id": "ts-bob",
+  "language": "typescript",
+  "name": "Bob",
+  "difficulty": "easy",
+  "verify_command": ["npm", "test"],
+  "prompt": "Bob is a lackadaisical teenager. In conversation, his responses are very limited: 'Sure.' to a question, 'Whoa, chill out!' to yelling, 'Calm down, I know what I'm doing!' to yelled questions, 'Fine. Be that way!' to silence, and 'Whatever.' to anything else."
+}

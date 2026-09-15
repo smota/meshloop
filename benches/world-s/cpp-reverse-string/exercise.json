@@ -1,0 +1,8 @@
+{
+  "id": "cpp-reverse-string",
+  "language": "cpp",
+  "name": "Reverse String",
+  "difficulty": "easy",
+  "verify_command": ["ctest"],
+  "prompt": "Reverse a given std::string in place or return the reversed std::string."
+}

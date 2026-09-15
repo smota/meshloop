@@ -1,0 +1,8 @@
+{
+  "id": "rust-two-fer",
+  "language": "rust",
+  "name": "Two Fer",
+  "difficulty": "easy",
+  "verify_command": ["cargo", "test"],
+  "prompt": "Implement the function two_fer(name: Option<&str>) -> String in src/lib.rs. If name is Some(x), return 'One for x, one for me.'. If name is None, return 'One for you, one for me.'."
+}

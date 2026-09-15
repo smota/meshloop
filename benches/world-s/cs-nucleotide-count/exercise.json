@@ -1,0 +1,8 @@
+{
+  "id": "cs-nucleotide-count",
+  "language": "csharp",
+  "name": "Nucleotide Count",
+  "difficulty": "easy",
+  "verify_command": ["dotnet", "test"],
+  "prompt": "Given a string representing a DNA sequence, count how many of each nucleotide (A, C, G, T) it contains. Throw an ArgumentException if invalid characters are present."
+}

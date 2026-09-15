@@ -1,0 +1,8 @@
+{
+  "id": "rust-clock",
+  "language": "rust",
+  "name": "Clock",
+  "difficulty": "medium",
+  "verify_command": ["cargo", "test"],
+  "prompt": "Implement a Clock that handles hours and minutes, rollover past 24 hours, and negative hour/minute adjustments properly."
+}
