@@ -9,6 +9,14 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+meshloop-domain.workspace = true
+meshloop-context.workspace = true
+meshloop-engine.workspace = true
+meshloop-adapters.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 [[test]]
 name = "scaffold_cli"
 path = "../tests/scenarios/scaffold_cli.rs"

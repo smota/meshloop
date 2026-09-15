@@ -33,21 +33,49 @@ fn handle_line(line: &str) -> String {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     match method {
-        "initialize" => json!({
-            "jsonrpc":"2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "meshloop", "version": env!("CARGO_PKG_VERSION") }
-            }
-        })
-        .to_string(),
+        "initialize" => {
+            let client_version = req
+                .pointer("/params/protocolVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("2024-11-05");
+            let negotiated_version = match client_version {
+                v if v.starts_with("2024-") || v.starts_with("2025-") || v.starts_with("2026-") => {
+                    client_version
+                }
+                _ => "2024-11-05",
+            };
+            json!({
+                "jsonrpc":"2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": negotiated_version,
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                        "resources": { "listChanged": false },
+                        "prompts": { "listChanged": false }
+                    },
+                    "serverInfo": { "name": "meshloop", "version": env!("CARGO_PKG_VERSION") }
+                }
+            })
+            .to_string()
+        }
         "notifications/initialized" => String::new(),
         "tools/list" => json!({
             "jsonrpc":"2.0",
             "id": id,
             "result": { "tools": tool_list() }
+        })
+        .to_string(),
+        "resources/list" => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": { "resources": [] }
+        })
+        .to_string(),
+        "prompts/list" => json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "result": { "prompts": [] }
         })
         .to_string(),
         "tools/call" => {
@@ -163,5 +191,21 @@ mod tests {
         let reply = handle_line(line);
         assert!(reply.contains("meshloop"));
         assert!(reply.contains("2024-11-05"));
+
+        // Negotiation with modern 2026 version
+        let line_2026 = r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2026-01-01"}}"#;
+        let reply_2026 = handle_line(line_2026);
+        assert!(reply_2026.contains("2026-01-01"));
+    }
+
+    #[test]
+    fn resources_and_prompts_list_return_empty() {
+        let res_line = r#"{"jsonrpc":"2.0","id":3,"method":"resources/list"}"#;
+        let reply = handle_line(res_line);
+        assert!(reply.contains(r#""resources":[]"#));
+
+        let prompt_line = r#"{"jsonrpc":"2.0","id":4,"method":"prompts/list"}"#;
+        let reply = handle_line(prompt_line);
+        assert!(reply.contains(r#""prompts":[]"#));
     }
 }

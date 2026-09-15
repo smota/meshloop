@@ -24,7 +24,9 @@ use crate::ports::{
 };
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
-use crate::verify::{all_paths_allowed, git_diff_exit_code, verification_passed};
+use crate::verify::{
+    all_paths_allowed, annotate_with_lattice, git_diff_exit_code, verification_passed,
+};
 
 #[derive(Debug)]
 pub enum OrchestratorError {
@@ -67,9 +69,7 @@ pub struct RunLimits {
 
 impl RunLimits {
     pub fn clamped(mut self) -> Self {
-        if self.max_concurrent_workers != 1 {
-            self.max_concurrent_workers = 1;
-        }
+        self.max_concurrent_workers = self.max_concurrent_workers.clamp(1, 16);
         if self.max_retries == 0 {
             self.max_retries = 1;
         }
@@ -537,6 +537,17 @@ impl<'a> RunLoop<'a> {
             });
         }
 
+        let running_count = graph
+            .nodes
+            .iter()
+            .filter(|n| tasks.get(&n.id) == Some(&TaskState::Running))
+            .count();
+        if running_count >= self.limits.max_concurrent_workers as usize {
+            return Ok(Tick::Idle {
+                reason: IdleReason::WaitingOnLiveWorker,
+            });
+        }
+
         for id in ready {
             match self.dispatch_ready(&graph_id, &graph, id)? {
                 Tick::Idle {
@@ -616,8 +627,8 @@ impl<'a> RunLoop<'a> {
                         continue;
                     };
                     let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
-                    match h.collect(&handle) {
-                        Ok(_) => {
+                    match h.try_collect(&handle) {
+                        Ok(Some(_)) => {
                             let rec = self.append(
                                 graph_id,
                                 node.id,
@@ -651,6 +662,9 @@ impl<'a> RunLoop<'a> {
                                 &candidate,
                             )?;
                             return Ok(Some(tick));
+                        }
+                        Ok(None) => {
+                            continue;
                         }
                         Err(e) => {
                             if matches!(self.attempt_live(&attempt), LiveCheck::Live) {
@@ -719,7 +733,7 @@ impl<'a> RunLoop<'a> {
                 continue;
             };
             let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
-            if h.collect(&handle).is_err() {
+            if !matches!(h.try_collect(&handle), Ok(Some(_))) {
                 continue;
             }
             let rec = self.append(
@@ -1043,7 +1057,7 @@ impl<'a> RunLoop<'a> {
 
         let invoke = harness.invoke(&spec);
         match invoke {
-            Err(HarnessError::Unsupported) => return Err(OrchestratorError::Unsupported),
+            Err(HarnessError::Unsupported) => Err(OrchestratorError::Unsupported),
             Err(e) => {
                 self.record_quota(&candidate.harness, &e)?;
                 let _ = self.store.record_outcome(
@@ -1062,7 +1076,7 @@ impl<'a> RunLoop<'a> {
                     Event::HarnessCrashedOrTimeout,
                     Some(format!("{e:?}")),
                 )?;
-                return self.maybe_fallback(graph_id, task_id, fail, &selected);
+                self.maybe_fallback(graph_id, task_id, fail, &selected)
             }
             Ok(handle) => {
                 let image = Path::new(
@@ -1079,7 +1093,7 @@ impl<'a> RunLoop<'a> {
                     .update_attempt_pid(attempt_id, handle.pid, image.as_deref())?;
                 self.store
                     .update_attempt_pane(attempt_id, handle.pane_id.as_deref())?;
-                match harness.collect(&handle) {
+                match harness.try_collect(&handle) {
                     Err(e) => {
                         self.record_quota(&candidate.harness, &e)?;
                         let fail = self.append(
@@ -1090,9 +1104,9 @@ impl<'a> RunLoop<'a> {
                             Event::HarnessCrashedOrTimeout,
                             Some(format!("{e:?}")),
                         )?;
-                        return self.maybe_fallback(graph_id, task_id, fail, &selected);
+                        self.maybe_fallback(graph_id, task_id, fail, &selected)
                     }
-                    Ok(_) => {
+                    Ok(Some(_)) => {
                         let rec = self.append(
                             graph_id,
                             task_id,
@@ -1102,41 +1116,43 @@ impl<'a> RunLoop<'a> {
                             None,
                         )?;
                         let _ = rec;
+                        self.verify_attempt(
+                            graph_id, graph, node, attempt_id, &wt, &start, tier, &candidate,
+                        )
                     }
+                    Ok(None) => Ok(Tick::Transition {
+                        task: task_id,
+                        attempt: Some(attempt_id),
+                        from: TaskState::Ready,
+                        to: TaskState::Running,
+                        event: Event::AttemptStarted,
+                    }),
                 }
             }
         }
-
-        let verify = self.verify_attempt(
-            graph_id, graph, node, attempt_id, &wt, &start, tier, &candidate,
-        )?;
-        Ok(verify)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn verify_attempt(
-        &mut self,
-        graph_id: &str,
-        _graph: &TaskGraph,
+    fn run_deterministic_checks(
+        &self,
         node: &meshloop_domain::task_graph::TaskNode,
         attempt_id: AttemptId,
         wt: &Path,
         base: &str,
-        tier: Tier,
-        candidate: &Candidate,
-    ) -> Result<Tick, OrchestratorError> {
-        let prompt = format!(".meshloop-prompt-{}", attempt_id.0);
-        let _ = self.workspace.remove_file(wt, &prompt);
-        let revision = self.workspace.commit_all(
-            wt,
-            &format!("meshloop: attempt {} for task {}", attempt_id.0, node.id.0),
-        )?;
+        revision: &str,
+    ) -> Result<
+        (
+            Vec<Evidence>,
+            Option<meshloop_domain::diagnostic::DiagnosticLattice>,
+            String,
+        ),
+        OrchestratorError,
+    > {
         let diff = self.workspace.diff_against(wt, base)?;
         let git_code = git_diff_exit_code(&diff, node.empty_diff_ok);
         let candidate_ref = CandidateRef {
             task_id: node.id,
             attempt_id,
-            revision: revision.clone(),
+            revision: revision.to_string(),
         };
         let mut rows = Vec::new();
         rows.push(Evidence::Deterministic(DeterministicEvidence {
@@ -1155,6 +1171,8 @@ impl<'a> RunLoop<'a> {
                 output_redacted: format!("changed {:?}", diff.files),
             }));
         }
+        let mut lattice_out = None;
+        let mut diag_out = String::new();
         if !self.verify_command.is_empty() {
             match self
                 .checks
@@ -1162,28 +1180,191 @@ impl<'a> RunLoop<'a> {
             {
                 Ok(mut ev) => {
                     ev.candidate = candidate_ref.clone();
+                    let (lat, annotated) = annotate_with_lattice(&ev.output_redacted);
+                    diag_out = ev.output_redacted.clone();
+                    lattice_out = Some(lat);
+                    ev.output_redacted = annotated;
                     rows.push(Evidence::Deterministic(ev));
                 }
                 Err(e) => {
+                    diag_out = format!("{e:?}");
                     rows.push(Evidence::Deterministic(DeterministicEvidence {
                         candidate: candidate_ref.clone(),
                         tool: self.verify_command[0].clone(),
                         tool_version: "n/a".into(),
                         exit_code: 1,
-                        output_redacted: format!("{e:?}"),
+                        output_redacted: diag_out.clone(),
                     }));
                 }
             }
         }
+        Ok((rows, lattice_out, diag_out))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_attempt(
+        &mut self,
+        graph_id: &str,
+        _graph: &TaskGraph,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        wt: &Path,
+        base: &str,
+        tier: Tier,
+        candidate: &Candidate,
+    ) -> Result<Tick, OrchestratorError> {
+        let prompt = format!(".meshloop-prompt-{}", attempt_id.0);
+        let _ = self.workspace.remove_file(wt, &prompt);
+        let mut current_revision = self.workspace.commit_all(
+            wt,
+            &format!("meshloop: attempt {} for task {}", attempt_id.0, node.id.0),
+        )?;
+
+        let (mut rows, current_lattice, mut current_diag) =
+            self.run_deterministic_checks(node, attempt_id, wt, base, &current_revision)?;
+
         for row in &rows {
             self.store.record(row.clone())?;
         }
+
+        let mut passed = verification_passed(&rows);
+
+        // ADR 0026: Inner-loop self-repair via RepairSession when checks fail and lattice is present.
+        if !passed && let Some(initial_lat) = current_lattice {
+            let mut session =
+                crate::converge::RepairSession::new(crate::converge::RepairBudget::default());
+            let mut lat = initial_lat;
+
+            while !passed {
+                let action = session.observe(lat.clone(), current_revision.clone());
+                match action {
+                    crate::converge::RepairAction::Accept => {
+                        passed = true;
+                        break;
+                    }
+                    crate::converge::RepairAction::Continue {
+                        round,
+                        negative_constraint,
+                    } => {
+                        let repair_spec = crate::agent::build_repair_spec(
+                            node,
+                            attempt_id,
+                            &candidate.harness,
+                            &candidate.model_ref,
+                            wt.to_path_buf(),
+                            self.limits.task_timeout,
+                            &current_diag,
+                            &negative_constraint,
+                        );
+                        let harness = match self.harnesses.get(&candidate.harness) {
+                            Some(h) => *h,
+                            None => break,
+                        };
+                        let handle = match harness.invoke(&repair_spec) {
+                            Ok(h) => h,
+                            Err(_) => break,
+                        };
+                        if harness.collect(&handle).is_err() {
+                            break;
+                        }
+                        let _ = self.workspace.remove_file(wt, &prompt);
+                        current_revision = match self.workspace.commit_all(
+                            wt,
+                            &format!("meshloop: repair round {} for task {}", round, node.id.0),
+                        ) {
+                            Ok(rev) => rev,
+                            Err(_) => break,
+                        };
+                        let (new_rows, new_lattice, new_diag) = match self.run_deterministic_checks(
+                            node,
+                            attempt_id,
+                            wt,
+                            base,
+                            &current_revision,
+                        ) {
+                            Ok(res) => res,
+                            Err(_) => break,
+                        };
+                        rows = new_rows;
+                        for row in &rows {
+                            let _ = self.store.record(row.clone());
+                        }
+                        current_diag = new_diag;
+                        if let Some(l) = new_lattice {
+                            lat = l;
+                        }
+                        passed = verification_passed(&rows);
+                    }
+                    crate::converge::RepairAction::Rollback {
+                        to_rev,
+                        negative_constraint,
+                        ..
+                    } => {
+                        if self.workspace.reset_hard(wt, &to_rev).is_err() {
+                            break;
+                        }
+                        let repair_spec = crate::agent::build_repair_spec(
+                            node,
+                            attempt_id,
+                            &candidate.harness,
+                            &candidate.model_ref,
+                            wt.to_path_buf(),
+                            self.limits.task_timeout,
+                            &current_diag,
+                            &negative_constraint,
+                        );
+                        let harness = match self.harnesses.get(&candidate.harness) {
+                            Some(h) => *h,
+                            None => break,
+                        };
+                        let handle = match harness.invoke(&repair_spec) {
+                            Ok(h) => h,
+                            Err(_) => break,
+                        };
+                        if harness.collect(&handle).is_err() {
+                            break;
+                        }
+                        let _ = self.workspace.remove_file(wt, &prompt);
+                        current_revision = match self.workspace.commit_all(
+                            wt,
+                            &format!("meshloop: repair rollback retry for task {}", node.id.0),
+                        ) {
+                            Ok(rev) => rev,
+                            Err(_) => break,
+                        };
+                        let (new_rows, new_lattice, new_diag) = match self.run_deterministic_checks(
+                            node,
+                            attempt_id,
+                            wt,
+                            base,
+                            &current_revision,
+                        ) {
+                            Ok(res) => res,
+                            Err(_) => break,
+                        };
+                        rows = new_rows;
+                        for row in &rows {
+                            let _ = self.store.record(row.clone());
+                        }
+                        current_diag = new_diag;
+                        if let Some(l) = new_lattice {
+                            lat = l;
+                        }
+                        passed = verification_passed(&rows);
+                    }
+                    crate::converge::RepairAction::Stop { .. } => {
+                        break;
+                    }
+                }
+            }
+        }
+
         let key = FeedbackKey {
             harness: candidate.harness.clone(),
             model_ref: candidate.model_ref.clone(),
             tier: crate::ports::TierKey::from(tier),
         };
-        if verification_passed(&rows) {
+        if passed {
             let _ = self.store.record_outcome(&key, true);
             let rec = self.append(
                 graph_id,
@@ -1267,6 +1448,12 @@ impl<'a> RunLoop<'a> {
     pub fn loop_until_idle(&mut self) -> Result<IdleReason, OrchestratorError> {
         loop {
             match self.tick()? {
+                Tick::Idle {
+                    reason: IdleReason::WaitingOnLiveWorker,
+                } => {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 Tick::Idle { reason } => return Ok(reason),
                 Tick::Transition { .. } => continue,
             }

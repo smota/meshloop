@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "metrics": [
+    {
+      "name": "conv.lattice.reduction_rate",
+      "status": "pass",
+      "value": 1.5
+    },
+    {
+      "name": "conv.self_repair.success_rate",
+      "status": "pass",
+      "value": 100.0
+    },
+    {
+      "name": "quant.index.compression_ratio",
+      "status": "pass",
+      "value": 8.85
+    },
+    {
+      "name": "quant.search.latency_us",
+      "status": "pass",
+      "value": 137.005
+    },
+    {
+      "name": "quant.recall_at_k",
+      "status": "pass",
+      "value": 98.5
+    },
+    {
+      "name": "slice.build_avoidance_rate",
+      "status": "pass",
+      "value": 66.7
+    },
+    {
+      "name": "conc.orphan_process_count",
+      "status": "pass",
+      "value": 0
+    },
+    {
+      "name": "conc.throughput_gain",
+      "status": "pass",
+      "value": 1.85
+    }
+  ],
+  "schema_version": "1.0.0",
+  "status": {
+    "invariants": "pass",
+    "overall": "pass",
+    "thresholds": "pass"
+  },
+  "subject": {
+    "crate_versions": {
+      "meshloop-adapters": "0.1.0",
+      "meshloop-cli": "0.1.0",
+      "meshloop-context": "0.1.0",
+      "meshloop-domain": "0.1.0",
+      "meshloop-engine": "0.1.0"
+    },
+    "os": "windows"
+  },
+  "suite": {
+    "kind": "synthetic",
+    "name": "full-algorithmic-suite",
+    "suite_version": "1.0.0",
+    "world": "deterministic"
+  }
+}

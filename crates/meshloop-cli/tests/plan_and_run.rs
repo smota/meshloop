@@ -81,6 +81,38 @@ model_tier = "top"
     config_path
 }
 
+fn write_config_with_concurrency(
+    dir: &Path,
+    invoke_args_template: &str,
+    concurrency: u32,
+) -> PathBuf {
+    let config_path = dir.join("meshloop.toml");
+    let contents = format!(
+        r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = {concurrency}
+max_retries = 2
+task_timeout_seconds = 30
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "{}"
+version_args = ["--version"]
+invoke_args_template = {}
+model_ref = "fixture-model"
+model_tier = "top"
+"#,
+        fixture_path().replace('\\', "\\\\"),
+        invoke_args_template
+    );
+    fs::write(&config_path, contents).unwrap();
+    config_path
+}
+
 fn meshloop() -> Command {
     Command::new(env!("CARGO_BIN_EXE_meshloop"))
 }
@@ -719,4 +751,119 @@ fn bundle_emits_version_locked_session_pack() {
     let pack = fs::read_to_string(dest.join("README.md")).expect("pack readme");
     assert!(pack.contains("docs/install.md"));
     fs::remove_dir_all(&dest).ok();
+}
+
+#[test]
+fn run_concurrent_workers_executes_parallel_tasks() {
+    let dir = disposable_repo("concurrent");
+    let config_path =
+        write_config_with_concurrency(&dir, r#"["--prompt-file", "{prompt_file}"]"#, 2);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g_conc","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null},{"id":2,"description":"second","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run meshloop run with concurrency=2");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("AwaitingReview") || stdout.contains("await `meshloop accept`"),
+        "expected pause for human accept, got: {stdout}"
+    );
+
+    let status_out = meshloop()
+        .current_dir(&dir)
+        .args(["status", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("status");
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        status_str.contains("first")
+            || status_str.contains("task_id: 1")
+            || status_str.contains("1")
+    );
+    assert!(
+        status_str.contains("second")
+            || status_str.contains("task_id: 2")
+            || status_str.contains("2")
+    );
+
+    let accept1 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "1", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 1");
+    assert!(
+        accept1.status.success(),
+        "accept 1: {}",
+        String::from_utf8_lossy(&accept1.stderr)
+    );
+
+    let accept2 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "2", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 2");
+    assert!(
+        accept2.status.success(),
+        "accept 2: {}",
+        String::from_utf8_lossy(&accept2.stderr)
+    );
+
+    let resume = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume");
+    let resume_out = String::from_utf8_lossy(&resume.stdout);
+    let resume_err = String::from_utf8_lossy(&resume.stderr);
+    assert!(
+        resume.status.success(),
+        "resume stdout: {resume_out}\nstderr: {resume_err}"
+    );
+    assert!(
+        resume_out.contains("Integrated") || resume_out.contains("complete"),
+        "expected integrated graph, got stdout:\n{resume_out}\nstderr:\n{resume_err}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
 }

@@ -20,6 +20,11 @@ document.
 | Orchestration saga | ADR 0005 | meshloop-engine::orchestrator |
 | Bulkhead | ADR 0001, ADR 0009 (concurrency/worktrees) | meshloop-engine::router, meshloop-adapters::git |
 | Test double / fake object | testing.md's port/adapter split | every meshloop-engine unit test |
+| Diagnostic lattice | ADR 0029 | meshloop-domain::diagnostic |
+| Data-oblivious quantizer | ADR 0029 | meshloop-context::quant |
+| Restless bandit / online knapsack | ADR 0009, ADR 0029 | meshloop-engine::router::RestlessBanditSignal |
+| Repair convergence | ADR 0029 | meshloop-engine::converge |
+| Syntactic impact slice | ADR 0029 | meshloop-engine::slice |
 
 ## Ports and Adapters (Hexagonal)
 Serves ADR 0002's crate boundaries.

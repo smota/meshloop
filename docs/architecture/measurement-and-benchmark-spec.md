@@ -141,6 +141,28 @@ $$\text{Intervalo de Wilson para FPAR (95\% de confiança): } w = \frac{\hat{p} 
   $$t_{\text{total}} = t_{\text{parse}} + t_{\text{assemble}} + t_{\text{schedule}} + t_{\text{worktree}} + t_{\text{harness}} + t_{\text{apply}} + t_{\text{test}} + t_{\text{wal}}$$
 - `dev.cost_tokens_per_accepted_task`: Soma de tokens consumidos por tarefa aprovada, incorporando custos de eventuais retries.
 
+### 4.5 Métricas de Convergência do Inner-Loop e Auto-Cura (`conv.*`)
+- `conv.lattice.reduction_rate`: Variação média do potencial de Lyapunov entre rodadas consecutivas ($\Delta \phi / \text{round}$). Direção: estritamente negativa.
+- `conv.self_repair.success_rate`: Percentual de nós que falharam no primeiro check mas convergiram para `Accepted` dentro de $k \le \text{max\_rounds}$.
+- `conv.oscillation.detected_count`: Ocorrências de ciclos de erro idênticos ($A \to B \to A$) identificados e interrompidos pelo fingerprint FNV-1a.
+- `conv.rollback.count`: Frequência de acionamento de `git reset --hard` para podar caminhos com regressão sintática ou aumento de $\phi$.
+- `conv.negative_constraint.effectiveness`: Percentual de restrições negativas que impediram com sucesso a reincidência do código de erro podado na rodada seguinte.
+
+### 4.6 Métricas de Recuperação Quantizada e TurboQuant (`quant.*`)
+- `quant.index.compression_ratio`: Razão de compressão de armazenamento e memória das assinaturas AST indexadas (meta: $\ge 6\times$ via 1-bit / 2-bit QJL).
+- `quant.search.latency_us`: Latência de busca e ranking no `SignatureIndex` (p50, p95, p99) em microssegundos. Meta: $< 500\mu\text{s}$ para repositórios médios.
+- `quant.recall_at_k`: Taxa de revocação dos top-$k$ arquivos relevantes em comparação com a busca linear de produto escalar em float32 puro.
+
+### 4.7 Métricas de Fatiamento Sintático (`slice.*`)
+- `slice.build_avoidance_rate`: Proporção de verificações completas e testes de dependentes evitados quando `BodyOnly == true`.
+- `slice.check_time_saved_s`: Tempo cumulativo de CPU e wall-clock economizado por restringir a compilação aos arquivos da fatia de impacto.
+
+### 4.8 Métricas de Concorrência e Isolamento de Host (`conc.*`)
+- `conc.throughput_gain`: Fator de aceleração ($S_N = T_1 / T_N$) na conclusão de tarefas do grafo com $N = 2, 3, 4$ workers paralelos.
+- `conc.git_admin.lock_contention_ms`: Tempo total de espera e retentativas no `GitAdminMutex` durante operações concorrentes de worktree.
+- `conc.wal.write_contention_ms`: Tempo de bloqueio em transações `BEGIN IMMEDIATE` no SQLite WAL com múltiplos nós finalizando simultaneamente.
+- `conc.orphan_process_count`: Contagem de processos filhos residuais (`rustc.exe`, `node.exe`, compiladores) após cancelamento ou finalização do harness. **Gate CI: 0**.
+
 ---
 
 ## 5. Metodologia Experimental e Suítes de Carga

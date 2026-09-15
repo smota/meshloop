@@ -90,11 +90,17 @@ pub fn build_agent_spec_with_context(
             output_contract: DEFAULT_OUTPUT_CONTRACT.into(),
         })
     } else {
+        let ranked = meshloop_context::select_context(
+            &node.description,
+            skeletons,
+            &node.allowed_paths,
+            meshloop_context::DEFAULT_SKELETON_BUDGET,
+        );
         let mut builder = meshloop_context::PromptCacheBuilder::new()
             .with_contract(DEFAULT_OUTPUT_CONTRACT)
             .with_system_rule("Touch only allowed paths. Leave the worktree in a buildable state.");
 
-        for (path, skel) in skeletons {
+        for (path, skel) in &ranked {
             builder = builder.with_ast_skeleton(path, skel);
         }
 
@@ -113,6 +119,51 @@ pub fn build_agent_spec_with_context(
             .render()
     };
 
+    AgentSpec {
+        task_id: node.id,
+        attempt_id,
+        harness: harness.into(),
+        model_ref: model_ref.into(),
+        worktree_path,
+        prompt,
+        timeout,
+    }
+}
+
+/// Builds an AgentSpec for an inner-loop repair round, including normalized failure diagnostics
+/// and negative constraints derived from the diagnostic lattice (ADR 0026).
+#[allow(clippy::too_many_arguments)]
+pub fn build_repair_spec(
+    node: &TaskNode,
+    attempt_id: AttemptId,
+    harness: &str,
+    model_ref: &str,
+    worktree_path: PathBuf,
+    timeout: Duration,
+    diagnostics: &str,
+    negative_constraint: &str,
+) -> AgentSpec {
+    let complication = if negative_constraint.is_empty() {
+        format!(
+            "{}\n\n[PREVIOUS ATTEMPT FAILED CHECKS. DIAGNOSTICS:]\n{}",
+            node.description, diagnostics
+        )
+    } else {
+        format!(
+            "{}\n\n[PREVIOUS ATTEMPT FAILED CHECKS. DIAGNOSTICS:]\n{}\n\n[NEGATIVE CONSTRAINTS - DO NOT INTRODUCE THESE CODES:]\n{}",
+            node.description, diagnostics, negative_constraint
+        )
+    };
+    let prompt = render_prompt(&PromptEnvelope {
+        situation:
+            "A previous attempt introduced errors or failed deterministic checks. Fix the errors."
+                .into(),
+        complication,
+        question:
+            "Fix the diagnostics while preserving existing behavior. Touch only allowed paths."
+                .into(),
+        output_contract: DEFAULT_OUTPUT_CONTRACT.into(),
+    });
     AgentSpec {
         task_id: node.id,
         attempt_id,
@@ -272,5 +323,63 @@ mod tests {
         assert!(spec.prompt.contains("src/auth.rs"));
         assert!(spec.prompt.contains("SYSTEM POLICIES"));
         assert!(spec.prompt.contains("TASK ASSIGNMENT"));
+    }
+
+    #[test]
+    fn repair_spec_contains_diagnostics_and_negative_constraints() {
+        let n = node(1, "implement authentication", &[]);
+        let spec = build_repair_spec(
+            &n,
+            AttemptId(1),
+            "claude-code",
+            "configured-model",
+            PathBuf::from("/tmp/wt"),
+            Duration::from_secs(300),
+            "error[E0308]: mismatched types",
+            "E0308, E0425",
+        );
+        assert!(spec.prompt.contains("DIAGNOSTICS:"));
+        assert!(spec.prompt.contains("error[E0308]: mismatched types"));
+        assert!(spec.prompt.contains("NEGATIVE CONSTRAINTS"));
+        assert!(spec.prompt.contains("E0308, E0425"));
+    }
+
+    #[test]
+    fn context_budget_keeps_the_query_relevant_file() {
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node(1, "implement Auth trait verify", &[])],
+        };
+        let target = &graph.nodes[0];
+        let mut skeletons = Vec::new();
+        for i in 0..40 {
+            skeletons.push((
+                format!("src/n{i}.rs"),
+                format!("pub fn n{i}() {{ /* ... */ }}"),
+            ));
+        }
+        skeletons.push((
+            "src/auth.rs".into(),
+            "pub trait Auth { fn verify(&self); }".into(),
+        ));
+        let spec = build_agent_spec_with_context(
+            &graph,
+            target,
+            AttemptId(1),
+            "claude-code",
+            "configured-model",
+            PathBuf::from("/tmp/wt"),
+            Duration::from_secs(300),
+            &skeletons,
+        );
+        assert!(spec.prompt.contains("src/auth.rs"));
+        assert!(spec.prompt.contains("pub trait Auth"));
+        let mentioned = (0..40)
+            .filter(|i| spec.prompt.contains(&format!("src/n{i}.rs")))
+            .count();
+        assert!(
+            mentioned < 40,
+            "budget should drop noise files, kept {mentioned}"
+        );
     }
 }

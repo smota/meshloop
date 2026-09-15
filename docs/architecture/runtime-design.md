@@ -273,3 +273,45 @@ fallback exhaustion (all candidates cooled down at once resolves to `blocked`, n
 crash), high coupling, policy-preserving feedback; no test can make the router select a
 harness/model the user never configured; load actually spreads across two configured
 harnesses with equal headroom rather than always picking the first.
+
+## 6. Deterministic loop algorithms (ADR 0029)
+
+Mechanism only. The decision is ADR 0029. This section is the v1 *algorithm*; auto-reinvoke
+of a harness after `Rollback`/`Continue` is ADR 0026 and is not in the R1 saga.
+
+**Diagnostic lattice.** `parse_diagnostics` walks rustc/cargo/tsc/python/go/generic stderr
+into a `BTreeSet` of atoms `(severity, code, basename, template_hash)`. Templates replace
+backtick-quoted idents with `` `_` `` and digits with `#`, so `cannot find value \`foo\``
+and `cannot find value \`bar\`` are the same atom. Worktree prefixes and `line:col` are
+dropped. `fingerprint` is portable FNV-1a over the ordered set. Progress φ is lexicographic
+`(syntax, type, test, error, blocking)`. Warnings do not block Accept.
+
+**Convergence.** `RepairSession::observe(lattice, snapshot_rev) -> RepairAction`:
+
+1. Repeated fingerprint → `Stop { Oscillation { cycle_at } }` (no-oscillation guarantee).
+2. `blocking == 0` → `Accept`.
+3. Observation count ≥ `max_rounds` → `Stop { BudgetExhausted }`.
+4. First failing observation → `Continue` with a negative constraint listing current codes.
+5. `syntax(next) > syntax(prev)` → `Rollback { to_rev: prev.snapshot_rev }` plus a syntax ban.
+6. φ strictly decreases → `Continue` with remaining codes; otherwise `Rollback`.
+
+The caller applies `WorkspacePort::reset_hard(worktree, to_rev)` on Rollback. The engine
+does not emit a new `TaskState`; repair stays inside the attempt.
+
+**Signature index.** Texts are CountSketch-embedded into R^64, rotated by a normalized
+Walsh–Hadamard transform (the data-oblivious stand-in for TurboQuant's random rotation),
+then 1-bit (sign) or 2-bit (Lloyd-Max N(0,1/d)) packed. `scale = 1/⟨u, x̂⟩` unbiases the
+inner product. `add` never rewrites an existing code. Search is a linear scan — correct
+at repository scale. `select_context` pins `allowed_paths`, then fills a 24-file budget
+from `rank_files`. `turbovec` is not a dependency; see ADR 0029 alternatives.
+
+**Syntactic slice.** `SignatureSnapshot` hashes each file's sorted public signatures.
+`impact(before, after)` is `BodyOnly`, `SignatureChanged { files }`, or `MembershipChanged`.
+`skip_full_compile` is true only for `BodyOnly` with no syntax/type diagnostics — git-diff
+and tests still run. `check_slice` unions changed files, diagnostic basenames, and index
+neighbors.
+
+**QACR restless bandit.** `RestlessBanditSignal` scores `c / sqrt(n+1) + 0.5 * headroom`
+(`c = 0.7`). Cooldown remains a hard filter (the arm is not pullable). Missing headroom
+is 0, never 1. Historical success remains a separate signal so adding this one does not
+retune exploitation.

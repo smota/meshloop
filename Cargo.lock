@@ -367,6 +367,14 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "meshloop-adapters",
+ "meshloop-context",
+ "meshloop-domain",
+ "meshloop-engine",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "zerocopy"

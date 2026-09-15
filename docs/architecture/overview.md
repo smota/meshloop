@@ -35,9 +35,9 @@ flowchart LR
 
 | Layer | Owns |
 |---|---|
-| meshloop-domain | Task graph, lifecycle, evidence, policy — no I/O |
-| meshloop-context | AST skeleton extraction (7 languages), Tier 1 dynamic resolution, prompt cache normalizer |
-| meshloop-engine | Planner, QACR router, RunLoop saga, recovery — ports only |
+| meshloop-domain | Task graph, lifecycle, evidence, policy, diagnostic lattice — no I/O |
+| meshloop-context | AST skeleton extraction (7 languages), quantized signature index, Tier 1 dynamic resolution, prompt cache normalizer |
+| meshloop-engine | Planner, QACR router (incl. restless bandit), RunLoop saga, recovery, converge, slice — ports only |
 | meshloop-adapters | Direct CliHarness, Git worktrees, SQLite WAL |
 | meshloop-cli | Argv, compose, JSON envelope, MCP stdio |
 

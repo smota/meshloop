@@ -64,19 +64,41 @@ validation, and AI executor/reviewer. Do not include credentials, private
 prompts, or third-party code of unknown provenance. Do not weaken tests or
 acceptance criteria merely to obtain a passing result.
 
-## Pull requests
+## Pull requests and component-bounded scope
 
-Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). State scope,
-exclusions, linked requirements/ADRs, tests run and skipped (with reasons),
-review identity, and any compatibility or security consequences.
+Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). To preserve hexagonal boundaries and maintain extreme code quality, follow these non-negotiable rules:
+
+### 1. Bounded Scope per Architectural Layer
+- Every PR must touch **exactly one architectural layer**:
+  - `domain`: Pure data types, state machine, evidence contracts (zero I/O).
+  - `context`: AST extraction, quantized indexing, prompt assembly (zero agent process execution).
+  - `engine`: Sagas, RunLoop, convergence logic, QACR router (ports/traits only).
+  - `adapters`: Concrete I/O (Git worktrees, SQLite WAL, OS process trees, Docker).
+  - `cli`: Command composition, operator skills, protocol servers.
+- PRs mixing domain entities with adapter I/O or CLI commands will be rejected at triage.
+- Naming convention: `feat(domain)/...`, `fix(engine)/...`, `perf(context)/...`.
+
+### 2. Minimum Testing Requirements
+- `cargo test --workspace` must pass with 100% success.
+- Zero linter or formatter warnings: `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`.
+- Deterministic test coverage: every state transition, pruning rule, or metric formula must have matching deterministic unit tests covering positive and negative edge cases. No tests may depend on network calls, API keys, or arbitrary timing delays (`sleep`).
+
+### 3. Measurement Framework Results
+PRs touching engine, context, or adapters must include the benchmark scorecard from `cargo run -p xtask -- bench` in the PR description:
+- Verification of fail-closed isolation invariants (`iso.worktree.leak_count = 0`, `conc.orphan_process_count = 0`).
+- Token reduction ratio (`ctx.tokens.reduction_pct`).
+- Convergence potential delta ($\Delta \phi$) or retrieval latency (`quant.search.latency_us`).
+
+### 4. Non-Negotiable Design Principles
+- **Unsafe Rust**: `#![forbid(unsafe_code)]` across all crates. The only exception is the Win32 Job Object wrapper in `meshloop-adapters::process::job`, isolated with `#![allow(unsafe_code)]` and covered by an accepted ADR.
+- **Zero Tokio in the Core Engine**: The coordinator saga is single-threaded and synchronous. Tokio is restricted to optional adapter crates (`rmcp`, `bollard`) behind feature flags.
+- **CLI Subscription Workers**: Workers are local CLI processes evaluated via git-diff against worktrees. Direct APIs are reserved for Tier 1 bulk readers.
+- **Deterministic Evidence Honesty**: LLMs never judge their own correctness. Only real tool execution exit codes (`DeterministicEvidence`) satisfy acceptance gates.
+- **Windows/WSL2 Boundary**: Native Windows binaries operate on Windows paths; WSL2 runs operate on Linux paths. Never cross filesystem boundaries (`/mnt/c` or `\\wsl$`).
 
 Merge requires maintainer authorization ([@smota](https://github.com/smota)).
 AI review is supporting evidence, not proof of correctness. High-risk
-security, unsafe Rust (currently forbidden), destructive data changes, and
-release acceptance need human review of a concrete result. Local green is not
-remote success. crates.io 0.1.0 is already uploaded. Further versions and GitHub Releases are
-maintainer-gated (ADR 0018). Do not `cargo publish` without that
-authorization.
+security, unsafe Rust, destructive data changes, and release acceptance need human review of a concrete result. Local green is not remote success. crates.io 0.1.0 is already uploaded. Further versions and GitHub Releases are maintainer-gated (ADR 0018). Do not `cargo publish` without that authorization.
 
 ## Conduct and legal
 

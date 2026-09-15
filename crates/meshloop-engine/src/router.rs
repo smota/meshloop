@@ -92,6 +92,42 @@ impl RoutingSignal for CouplingSignal {
     }
 }
 
+/// Restless-bandit exploration plus online-knapsack density.
+///
+/// Each harness is an arm whose state evolves whether or not it is pulled
+/// (cooldown timers, sliding quota windows). Historical success stays in
+/// [`HistoricalSuccessSignal`]; this signal is the information-value bonus and
+/// the remaining-window density. Missing headroom contributes 0 (never invents
+/// scarcity or abundance — ADR 0009).
+pub struct RestlessBanditSignal {
+    /// UCB-style exploration constant. Default 0.7.
+    pub c: f64,
+}
+
+impl Default for RestlessBanditSignal {
+    fn default() -> Self {
+        Self { c: 0.7 }
+    }
+}
+
+impl RoutingSignal for RestlessBanditSignal {
+    fn score(&self, candidate: &Candidate, ctx: &RoutingContext) -> SignalScore {
+        let key = FeedbackKey {
+            harness: candidate.harness.clone(),
+            model_ref: candidate.model_ref.clone(),
+            tier: TierKey::from(ctx.task_tier),
+        };
+        let counters = ctx.feedback.counters(&key).unwrap_or_default();
+        let n = f64::from(counters.success + counters.failure);
+        let explore = self.c * (1.0 / (n + 1.0)).sqrt();
+        let density = match ctx.headroom.get(&candidate.harness) {
+            Some(h) => 0.5 * h.clamp(0.0, 1.0),
+            None => 0.0,
+        };
+        SignalScore(explore + density)
+    }
+}
+
 pub struct Router {
     signals: Vec<Box<dyn RoutingSignal>>,
 }
@@ -104,6 +140,7 @@ impl Default for Router {
                 Box::new(HistoricalSuccessSignal),
                 Box::new(LoadBalanceSignal),
                 Box::new(CouplingSignal),
+                Box::new(RestlessBanditSignal::default()),
             ],
         }
     }
@@ -381,5 +418,77 @@ mod tests {
         );
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].harness, "codex");
+    }
+
+    #[test]
+    fn restless_bandit_prefers_an_unused_arm_over_a_failing_one() {
+        let configured = vec![
+            Candidate {
+                harness: "failed".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "fresh".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("failed".into(), profile(true, true));
+        profiles.insert("fresh".into(), profile(true, true));
+        let quotas = HashMap::new();
+        let headroom = HashMap::new();
+        let mut feedback = crate::ports::InMemoryFeedbackStore::default();
+        let key = FeedbackKey {
+            harness: "failed".into(),
+            model_ref: "m".into(),
+            tier: TierKey::Tier1,
+        };
+        for _ in 0..5 {
+            feedback.record_outcome(&key, false).unwrap();
+        }
+        let router = Router::default();
+        let selected = router.select(
+            &configured,
+            &profiles,
+            &quotas,
+            SystemTime::now(),
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        assert_eq!(selected[0].harness, "fresh");
+    }
+
+    #[test]
+    fn restless_bandit_density_prefers_the_arm_with_more_window() {
+        let configured = vec![
+            Candidate {
+                harness: "scarce".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "plenty".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("scarce".into(), profile(true, true));
+        profiles.insert("plenty".into(), profile(true, true));
+        let quotas = HashMap::new();
+        let mut headroom = HashMap::new();
+        headroom.insert("scarce".into(), 0.1);
+        headroom.insert("plenty".into(), 0.9);
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let router = Router::with_signals(vec![Box::new(RestlessBanditSignal::default())]);
+        let selected = router.select(
+            &configured,
+            &profiles,
+            &quotas,
+            SystemTime::now(),
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        assert_eq!(selected[0].harness, "plenty");
     }
 }

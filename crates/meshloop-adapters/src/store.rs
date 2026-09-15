@@ -41,6 +41,63 @@ impl SqliteStore {
         Ok(Self { conn })
     }
 
+    /// Atomically records a state transition event and upserts attempt metadata under an
+    /// immediate SQLite transaction (`BEGIN IMMEDIATE`), ensuring zero orphaned transition states.
+    pub fn record_transition_and_attempt(
+        &mut self,
+        record: TransitionRecord,
+        attempt: Option<&AttemptRow>,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+
+        tx.execute(
+            "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.graph_id,
+                record.task_id.0,
+                record.attempt_id.map(|a| a.0),
+                format!("{:?}", record.from),
+                format!("{:?}", record.to),
+                format!("{:?}", record.event),
+                record.reason,
+                record.executor,
+                record.occurred_at,
+            ],
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+
+        if let Some(row) = attempt {
+            tx.execute(
+                "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(attempt_id) DO UPDATE SET
+                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, pane_id=?9, started_at=?10, ended_at=?11, outcome=?12",
+                params![
+                    row.attempt_id.0,
+                    row.graph_id,
+                    row.task_id.0,
+                    row.harness,
+                    row.model_ref,
+                    row.worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    row.pid.map(|p| p as i64),
+                    row.image_name,
+                    row.pane_id,
+                    row.started_at,
+                    row.ended_at,
+                    row.outcome,
+                ],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        }
+
+        tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
@@ -861,5 +918,46 @@ mod tests {
         store.append(rec.clone()).unwrap();
         let got = store.records_for_graph("g").unwrap();
         assert_eq!(got, vec![rec]);
+    }
+
+    #[test]
+    fn atomic_transition_and_attempt_round_trips() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let rec = TransitionRecord {
+            graph_id: "g-atomic".into(),
+            task_id: TaskId(1),
+            attempt_id: Some(AttemptId(10)),
+            from: TaskState::Ready,
+            to: TaskState::Running,
+            event: Event::AttemptStarted,
+            reason: Some("dispatched".into()),
+            executor: "engine".into(),
+            occurred_at: "100".into(),
+        };
+        let attempt = AttemptRow {
+            attempt_id: AttemptId(10),
+            graph_id: "g-atomic".into(),
+            task_id: TaskId(1),
+            harness: Some("claude".into()),
+            model_ref: Some("claude-sonnet-5".into()),
+            worktree_path: Some(PathBuf::from("/tmp/wt")),
+            pid: Some(12345),
+            image_name: Some("claude.exe".into()),
+            pane_id: None,
+            started_at: Some("100".into()),
+            ended_at: None,
+            outcome: None,
+        };
+
+        store
+            .record_transition_and_attempt(rec.clone(), Some(&attempt))
+            .unwrap();
+
+        let records = store.records_for_graph("g-atomic").unwrap();
+        assert_eq!(records, vec![rec]);
+
+        let loaded_attempt = store.load_attempt(AttemptId(10)).unwrap().unwrap();
+        assert_eq!(loaded_attempt.pid, Some(12345));
+        assert_eq!(loaded_attempt.harness.as_deref(), Some("claude"));
     }
 }

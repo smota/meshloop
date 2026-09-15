@@ -26,7 +26,7 @@ pub struct CliHarnessConfig {
 
 pub struct CliHarness {
     config: CliHarnessConfig,
-    running: Mutex<HashMap<u32, (Child, Duration)>>,
+    running: Mutex<HashMap<u32, (Child, Duration, Instant)>>,
 }
 
 impl CliHarness {
@@ -120,7 +120,7 @@ impl HarnessCapabilities for CliHarness {
             .map_err(|_| HarnessError::ProcessFault {
                 detail: "harness registry mutex poisoned".into(),
             })?
-            .insert(spec.attempt_id.0, (child, spec.timeout));
+            .insert(spec.attempt_id.0, (child, spec.timeout, Instant::now()));
 
         Ok(HarnessHandle {
             attempt_id: spec.attempt_id,
@@ -145,64 +145,76 @@ impl HarnessCapabilities for CliHarness {
                 detail: "harness registry mutex poisoned".into(),
             })?;
         // Idempotent against an already-exited/never-tracked process, per ADR 0003.
-        if let Some((mut child, _)) = registry.remove(&Self::attempt_key(handle)) {
+        if let Some((mut child, _, _)) = registry.remove(&Self::attempt_key(handle)) {
+            crate::process::kill_process_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
         }
         Ok(())
     }
 
-    fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
-        let (mut child, timeout) = self
+    fn try_collect(&self, handle: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {
+        let key = Self::attempt_key(handle);
+        let mut registry = self
             .running
             .lock()
             .map_err(|_| HarnessError::ProcessFault {
                 detail: "harness registry mutex poisoned".into(),
-            })?
-            .remove(&Self::attempt_key(handle))
-            .ok_or(HarnessError::ProcessFault {
-                detail: "unknown harness handle".into(),
             })?;
 
-        // std::process has no built-in wait-with-timeout; poll bounded by the spec's own
-        // timeout (captured at invoke time) rather than blocking indefinitely on a hung process.
-        let start = Instant::now();
+        let entry = registry.get_mut(&key).ok_or(HarnessError::ProcessFault {
+            detail: "unknown harness handle".into(),
+        })?;
+
+        match entry.0.try_wait() {
+            Ok(Some(status)) => {
+                let (mut child, _, _) = registry.remove(&key).unwrap();
+                use std::io::Read;
+                let mut stdout = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                if stderr.to_ascii_lowercase().contains("capacity exhausted") {
+                    return Err(HarnessError::CapacityExhausted {
+                        retry_after: Duration::from_secs(60),
+                    });
+                }
+                Ok(Some(HarnessOutcome {
+                    exit_code: status.code().unwrap_or(-1),
+                    output_redacted: crate::redact::redact(&stdout),
+                    worktree_changed: false,
+                }))
+            }
+            Ok(None) => {
+                let (_, timeout, start) = entry;
+                if start.elapsed() >= *timeout {
+                    let (mut child, _, _) = registry.remove(&key).unwrap();
+                    crate::process::kill_process_tree(child.id());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(HarnessError::Timeout)
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => {
+                let _ = registry.remove(&key);
+                Err(HarnessError::ProcessFault {
+                    detail: e.to_string(),
+                })
+            }
+        }
+    }
+
+    fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
         loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    use std::io::Read;
-                    let mut stdout = String::new();
-                    if let Some(mut out) = child.stdout.take() {
-                        let _ = out.read_to_string(&mut stdout);
-                    }
-                    let mut stderr = String::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        let _ = err.read_to_string(&mut stderr);
-                    }
-                    if stderr.to_ascii_lowercase().contains("capacity exhausted") {
-                        return Err(HarnessError::CapacityExhausted {
-                            retry_after: Duration::from_secs(60),
-                        });
-                    }
-                    return Ok(HarnessOutcome {
-                        exit_code: status.code().unwrap_or(-1),
-                        output_redacted: crate::redact::redact(&stdout),
-                        worktree_changed: false,
-                    });
-                }
-                Ok(None) => {
-                    if start.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(HarnessError::Timeout);
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => {
-                    return Err(HarnessError::ProcessFault {
-                        detail: e.to_string(),
-                    });
-                }
+            match self.try_collect(handle)? {
+                Some(outcome) => return Ok(outcome),
+                None => std::thread::sleep(Duration::from_millis(20)),
             }
         }
     }

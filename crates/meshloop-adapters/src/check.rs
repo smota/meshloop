@@ -52,6 +52,7 @@ impl CheckRunner for CommandCheckRunner {
                 }
                 Ok(None) => {
                     if start.elapsed() >= timeout {
+                        crate::process::kill_process_tree(child.id());
                         let _ = child.kill();
                         let _ = child.wait();
                         return Err(CheckError::Timeout);

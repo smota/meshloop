@@ -1,7 +1,7 @@
 # meshloop-domain
 
 Pure domain types for [Meshloop](https://github.com/smota/meshloop): task graphs,
-evidence, policy, and `meshloop:` role ids. No I/O.
+evidence, policy, diagnostic lattice, and `meshloop:` role ids. No I/O.
 
 This crate is an implementation crate. The supported product interface is the
 `meshloop` binary from `meshloop-cli`, not a stable Rust API.

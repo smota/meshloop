@@ -25,6 +25,11 @@ impl From<GitError> for WorkspaceError {
     }
 }
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+static GIT_ADMIN_LOCK: Mutex<()> = Mutex::new(());
+
 pub struct GitWorktreeAdapter {
     repo_root: PathBuf,
 }
@@ -55,13 +60,37 @@ impl GitWorktreeAdapter {
         self.run_in(&self.repo_root, args)
     }
 
+    /// Serializes administrative Git operations (worktree add/remove/prune) across threads
+    /// and retries with exponential backoff if `.git/index.lock` is held by Windows indexers/antivirus.
+    fn run_admin_with_retry(&self, args: &[&str]) -> Result<String, GitError> {
+        let _guard = GIT_ADMIN_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut backoff = Duration::from_millis(50);
+        let max_wait = Duration::from_secs(10);
+        let start = Instant::now();
+        loop {
+            match self.run_in(&self.repo_root, args) {
+                Ok(out) => return Ok(out),
+                Err(GitError::CommandFailed { ref stderr })
+                    if (stderr.contains("index.lock")
+                        || stderr.contains("Unable to create")
+                        || stderr.contains("locked"))
+                        && start.elapsed() < max_wait =>
+                {
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_millis(500));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     pub fn add_worktree(&self, path: &Path, branch: &str) -> Result<(), GitError> {
-        self.run(&["worktree", "add", "-b", branch, &path.to_string_lossy()])
+        self.run_admin_with_retry(&["worktree", "add", "-b", branch, &path.to_string_lossy()])
             .map(|_| ())
     }
 
     pub fn remove_worktree(&self, path: &Path) -> Result<(), GitError> {
-        self.run(&["worktree", "remove", "--force", &path.to_string_lossy()])
+        self.run_admin_with_retry(&["worktree", "remove", "--force", &path.to_string_lossy()])
             .map(|_| ())
     }
 }
@@ -77,7 +106,7 @@ impl WorkspacePort for GitWorktreeAdapter {
         branch: &str,
         start_point: &str,
     ) -> Result<(), WorkspaceError> {
-        self.run(&[
+        self.run_admin_with_retry(&[
             "worktree",
             "add",
             "-b",
@@ -160,7 +189,7 @@ impl WorkspacePort for GitWorktreeAdapter {
     }
 
     fn prune(&self) -> Result<(), WorkspaceError> {
-        self.run(&["worktree", "prune"])
+        self.run_admin_with_retry(&["worktree", "prune"])
             .map(|_| ())
             .map_err(Into::into)
     }
@@ -227,7 +256,7 @@ impl WorkspacePort for GitWorktreeAdapter {
         if !self.worktree_exists(path) {
             return Ok(());
         }
-        self.run(&["worktree", "remove", "--force", &path.to_string_lossy()])
+        self.run_admin_with_retry(&["worktree", "remove", "--force", &path.to_string_lossy()])
             .map(|_| ())
             .map_err(Into::into)
     }

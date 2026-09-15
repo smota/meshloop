@@ -1,8 +1,10 @@
-//! Pure domain types: task graphs, execution state, evidence, policy, and harness
-//! capability/error-taxonomy value types. No I/O, no concrete harnesses, no storage —
-//! see docs/architecture/boundaries.md.
+//! Pure domain types: task graphs, execution state, evidence, policy, harness
+//! capability/error-taxonomy value types, and the diagnostic lattice. No I/O, no
+//! concrete harnesses, no storage — see docs/architecture/boundaries.md.
 
 pub mod capability;
+pub mod diagnostic;
+pub mod digest;
 pub mod evidence;
 pub mod policy;
 pub mod role;

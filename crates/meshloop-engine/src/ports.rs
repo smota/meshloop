@@ -45,6 +45,11 @@ pub trait HarnessCapabilities {
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError>;
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError>;
     fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError>;
+    /// Non-blocking poll for attempt outcome (ADR 0024).
+    /// Returns Ok(Some(outcome)) when finished, Ok(None) when still executing, or Err on fault/timeout.
+    fn try_collect(&self, handle: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {
+        self.collect(handle).map(Some)
+    }
     /// Whether the attempt's process/pane is still live. Herdr workers have no PID;
     /// the pane/agent is the process tree (execution-lifecycle.md).
     fn session_live(&self, handle: &HarnessHandle) -> LiveCheck {
