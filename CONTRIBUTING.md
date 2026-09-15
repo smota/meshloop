@@ -1,12 +1,12 @@
 # Contributing to Meshloop
 
 **Before you start:** read the [docs hub](docs/README.md), then this file.
-If an agent will author the diff, it must also read [AGENTS.md](AGENTS.md).
+Contributors and agents must also read [AGENTS.md](AGENTS.md).
 Run `cargo run -p xtask -- check` from the repository root.
 `xtask live` is the launch gate (verifying daemonless execution and Git worktree isolation).
 Intentional contributions are Apache-2.0 (see below).
 
-Meshloop is a standalone, daemonless closed-loop engineering environment on native Windows & Linux.
+Meshloop is a multi-agent development optimization and loop engineering runtime on native Windows & Linux.
 Subprocess workers execute in ephemeral Git worktrees via direct CLI dispatch (`CliHarness`).
 Fixture is the CI double.
 
@@ -52,17 +52,21 @@ To plug in new linters, type checkers, or test runners:
 
 ---
 
-## How Work is Authored
+## Engineering Governance and Standards
 
-AI authors implementation and tests; humans direct product intent and accept consequential decisions ([ADR 0012](docs/architecture/adr/0012-engineering-governance.md)). Record the actual executor and reviewer honestly. Tool usage is not proof of copyright ownership.
+All contributions, regardless of author or tools used, must strictly satisfy the project's architectural invariants, quality standards, and review requirements ([ADR 0012](docs/architecture/adr/0012-engineering-governance.md)).
 
-Changes must identify the problem, acceptance criteria, relevant ADRs, validation, and AI executor/reviewer.
+Every change must clearly document:
+- The problem being addressed and scope of change.
+- Acceptance criteria and relevant ADRs.
+- Validation and verification evidence (`cargo run -p xtask -- check` and `bench`).
+- Execution and review attribution.
 
 ---
 
 ## Pull Requests and Component-Bounded Scope
 
-Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). To preserve hexagonal boundaries and maintain extreme code quality, follow these non-negotiable rules:
+Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). To preserve hexagonal boundaries and maintain code quality, follow these non-negotiable rules:
 
 ### 1. Bounded Scope per Architectural Layer
 Every PR must touch **exactly one architectural layer**:

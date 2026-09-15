@@ -4,71 +4,159 @@
     {
       "name": "ctx.tokens.reduction_pct",
       "status": "pass",
+      "target_op": "gte",
+      "target_value": 65.0,
+      "unit": "%",
       "value": 67.67397666848525
     },
     {
-      "name": "ctx.parse.latency_ms",
+      "name": "ctx.parse.latency_ms.p95",
       "status": "pass",
-      "value": 0.009685714285714285
+      "target_op": "lte",
+      "target_value": 15.0,
+      "unit": "ms",
+      "value": 0.013267142857142858
+    },
+    {
+      "name": "ctx.cache.stale_hit_rate_pct",
+      "status": "pass",
+      "target_op": "eq",
+      "target_value": 0.0,
+      "unit": "%",
+      "value": 0.0
     },
     {
       "name": "quant.index.compression_ratio",
       "status": "pass",
-      "value": 4.6125
+      "target_op": "gte",
+      "target_value": 4.0,
+      "unit": "x",
+      "value": 5.542613636363637
     },
     {
-      "name": "quant.search.latency_us",
+      "name": "quant.search.latency_us.p95",
       "status": "pass",
-      "value": 217.967
+      "target_op": "lte",
+      "target_value": 500.0,
+      "unit": "us",
+      "value": 456.648
     },
     {
       "name": "quant.recall_at_k",
       "status": "pass",
+      "target_op": "gte",
+      "target_value": 95.0,
+      "unit": "%",
       "value": 100.0
     },
     {
-      "name": "orch.txn.wal_commit_ms",
+      "name": "orch.txn.wal_commit_ms.p95",
       "status": "pass",
-      "value": 1.066206
+      "target_op": "lte",
+      "target_value": 10.0,
+      "unit": "ms",
+      "value": 1.3192
+    },
+    {
+      "name": "conc.wal.write_contention_ms",
+      "status": "pass",
+      "target_op": "lte",
+      "target_value": 15.0,
+      "unit": "ms",
+      "value": 1.36388
+    },
+    {
+      "name": "conc.git_admin.lock_contention_ms",
+      "status": "pass",
+      "target_op": "lte",
+      "target_value": 200.0,
+      "unit": "ms",
+      "value": 66.4806
+    },
+    {
+      "name": "conc.throughput_gain",
+      "status": "pass",
+      "target_op": "gte",
+      "target_value": 1.0,
+      "unit": "x",
+      "value": 1.7519008729935228
     },
     {
       "name": "iso.redact.pass_rate_pct",
       "status": "pass",
+      "target_op": "eq",
+      "target_value": 100.0,
+      "unit": "%",
       "value": 100.0
     },
     {
       "name": "iso.worktree.leak_count",
       "status": "pass",
-      "value": 0
+      "target_op": "eq",
+      "target_value": 0.0,
+      "unit": "count",
+      "value": 0.0
     },
     {
-      "name": "conv.lattice.reduction_rate",
+      "name": "iso.gate.bypass_count",
       "status": "pass",
+      "target_op": "eq",
+      "target_value": 0.0,
+      "unit": "count",
+      "value": 0.0
+    },
+    {
+      "name": "iso.crash.recovery_fidelity",
+      "status": "pass",
+      "target_op": "eq",
+      "target_value": 1.0,
+      "unit": "ratio",
       "value": 1.0
     },
     {
       "name": "conv.self_repair.success_rate",
       "status": "pass",
+      "target_op": "gte",
+      "target_value": 80.0,
+      "unit": "%",
       "value": 100.0
     },
     {
       "name": "slice.build_avoidance_rate",
       "status": "pass",
+      "target_op": "gte",
+      "target_value": 50.0,
+      "unit": "%",
       "value": 66.7
     },
     {
       "name": "conc.orphan_process_count",
       "status": "pass",
-      "value": 0
+      "target_op": "eq",
+      "target_value": 0.0,
+      "unit": "count",
+      "value": 0.0
+    },
+    {
+      "name": "smoke.wall_clock_s",
+      "status": "pass",
+      "target_op": "lte",
+      "target_value": 5.0,
+      "unit": "s",
+      "value": 1.5674060999999997
     }
   ],
-  "schema_version": "1.0.0",
-  "status": {
-    "invariants": "pass",
-    "overall": "pass",
-    "thresholds": "pass"
+  "phases": {
+    "accept_ms": 96.7077,
+    "audit_ms": 41.5419,
+    "doctor_ms": 6.1484,
+    "resume_ms": 186.5473,
+    "review_plan_ms": 60.6894,
+    "run_ms": 1175.7714,
+    "sandbox_ms": 236.3164,
+    "wall_clock_s": 1.5674060999999997
   },
-  "subject": {
+  "provenance": {
     "crate_versions": {
       "meshloop-adapters": "0.1.0",
       "meshloop-cli": "0.1.0",
@@ -76,7 +164,18 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "os": "windows"
+    "git_sha": "acd22e33d9f6a16d89d081ee4cedbc5a17a3cff0",
+    "hostname": "SKYNET-SAM01",
+    "os": "windows",
+    "recorded_at": "2026-09-15T12:00:00Z",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "run_id": "6aa96237-ac20-45ab-a000-4c47b9e67c02",
+  "schema_version": "1.0.0",
+  "status": {
+    "invariants": "pass",
+    "overall": "pass",
+    "thresholds": "pass"
   },
   "suite": {
     "kind": "synthetic",

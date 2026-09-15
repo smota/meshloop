@@ -136,6 +136,23 @@ impl SignatureIndex {
         });
     }
 
+    /// Total heap and inline bytes allocated for the index.
+    pub fn memory_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>();
+        for entry in &self.entries {
+            bytes += std::mem::size_of::<IndexedSignature>();
+            bytes += entry.path.len();
+            bytes += entry.name.len();
+            bytes += entry.code.bits.len();
+        }
+        bytes
+    }
+
+    /// Total bytes occupied strictly by the quantized feature vectors.
+    pub fn quantized_bytes(&self) -> usize {
+        self.entries.iter().map(|e| e.code.bits.len()).sum()
+    }
+
     pub fn search(&self, query: &str, k: usize) -> Vec<ScoredHit> {
         if k == 0 || self.entries.is_empty() {
             return Vec::new();

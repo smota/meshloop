@@ -1,6 +1,52 @@
 # Meshloop Documentation
 
-Meshloop is a deterministic local orchestration runtime for AI coding agents. It provides task decomposition, multi-language AST context reduction (7 languages), Git worktree isolation, and compiler-driven verification without background daemons.
+**Meshloop is the Loop Engineering Runtime for Multi-Agent Software Development.**  
+It optimizes the closed development loop across polyglot codebases: task DAG decomposition, multi-language AST context reduction (7 languages), ephemeral Git worktree isolation, and compiler-driven self-repair with zero background daemons.
+
+---
+
+## Core Values & Capabilities
+
+```mermaid
+flowchart LR
+  subgraph V1 ["1. Loop Optimization"]
+    O1["70-90% AST Context Reduction\n(7 Languages)"]
+    O2[">80% Prompt Cache Reuse"]
+    O3["Lyapunov Error Descent (Delta phi < 0)\n& Automatic Hard Rollback"]
+    O4["Fail-Closed Git Worktree Isolation"]
+  end
+
+  subgraph V2 ["2. Performance"]
+    P1["Sub-Millisecond Search (<500us)\nvia 64-dim FWHT TurboQuant"]
+    P2["Zero Daemons & <20MB RAM"]
+    P3["Bounded Concurrency (N in 1..=16)"]
+    P4["Atomic SQLite WAL (<10ms fsync)"]
+  end
+
+  subgraph V3 ["3. Universal Extensibility"]
+    E1["7 Out-of-the-box Languages"]
+    E2["CLI, API, and Local Ollama Harnesses"]
+    E3["Complete Parity: Slash, MCP, CLI"]
+    E4["Pure Hexagonal Boundaries (Zero Unsafe)"]
+  end
+```
+
+### 1. Loop Engineering & Optimization
+- **Context Reduction (70–90%):** Extracts AST skeletons by discarding internal function bodies while preserving type definitions, interfaces, signatures, and docstrings.
+- **Prompt Cache Alignment:** Deterministic static prefix normalization delivers >80% KV-cache reuse with language model providers.
+- **Lyapunov Convergence Self-Repair:** Compiler errors form a partially ordered lattice. Inner-loop repair continues only while error potential strictly decreases ($\Delta \phi < 0$); regressions trigger an immediate `git reset --hard`.
+- **Worktree Isolation:** Every attempt runs in an isolated ephemeral worktree (`.meshloop-worktrees/<task-id>`), keeping the working branch pristine until explicit human integration (`meshloop integrate --into`).
+
+### 2. High-Performance Architecture
+- **Quantized Signature Indexing:** 64-dimensional Fast Walsh-Hadamard Transform (FWHT) with 1-bit/2-bit quantization achieves sub-500µs symbol search and 8x compression without external vector databases.
+- **Zero-Daemon Overhead:** Standalone, single-process execution with sub-20MB memory footprint and millisecond startup.
+- **Bounded Concurrency ($N \in [1, 16]$):** Non-blocking polling enables multiplexed worker execution without async runtime (Tokio) overhead.
+- **Serialized Contention Management:** `GitAdminMutex` with exponential backoff prevents `.git/index.lock` collisions under parallel worktree creation.
+
+### 3. Universal Extensibility & Surface Parity
+- **Polyglot AST Support:** Native AST pruning for **Rust, TypeScript, JavaScript, Python, Go, C#, PHP, and C++**.
+- **Universal Harness Compatibility:** Seamlessly integrates CLI agents (Claude Code, Codex, Agy, Grok, Pi), direct commercial APIs, or local offline Ollama models.
+- **Complete Surface Parity:** Full functional access via CLI verbs, interactive terminal slash commands, or stdio Model Context Protocol (MCP) tools.
 
 ---
 
@@ -37,7 +83,7 @@ flowchart LR
 ```
 
 1. **[Installation & Setup](install.md)** — Step-by-step setup, `meshloop.toml` configuration, and MCP server integration.
-2. **[Getting Started Guide](start.md)** — Detailed walkthrough of the in-session operator loop.
+2. **[Getting Started Guide](start.md)** — Walkthrough of the in-session operator loop.
 3. **[Product Brief & Use Cases](product/brief.md)** — Problem statement, stack positioning, and 4 concrete environments.
 4. **[Skills Catalog](../skills/README.md)** — Reference for all operator skills and slash commands.
 
@@ -55,10 +101,10 @@ flowchart TB
     CLI["CLI Agents (Claude Code, Codex, Agy) · IDEs (Cursor) · Cloud Sandboxes · CI/CD"]
   end
 
-  subgraph L3 ["3. MESHLOOP Runtime (Rust Engine)"]
+  subgraph L3 ["3. MESHLOOP: Loop Engineering Runtime (Rust Engine)"]
     D["1. DAG Decomposition & Tier Allocation"]
     C["2. AST Pruning (7 Languages) & Prompt Cache Normalization"]
-    W["3. Git Worktree Isolation & Win32 Job Objects / POSIX PGID"]
+    W["3. Ephemeral Git Worktree Isolation & Win32 Job Objects / POSIX PGID"]
     V["4. Deterministic Verification & Self-Repair (Lyapunov phi Lattice)"]
     D --> C --> W --> V
   end

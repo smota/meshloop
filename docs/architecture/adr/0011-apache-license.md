@@ -10,7 +10,7 @@
 - Superseded by: none
 
 ## Context
-Initialize a Rust project for fully AI-coded development across five selected harnesses.
+Initialize a Rust project for development across five selected harnesses.
 
 ## Alternatives
 AGPL was considered for reciprocal source availability. The user explicitly selected Apache-2.0 for permissive reuse.

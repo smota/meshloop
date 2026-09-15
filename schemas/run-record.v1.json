@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/smota/meshloop/main/schemas/run-record.v1.json",
+  "title": "Meshloop Benchmark & Performance Run Record Schema (v1)",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "suite",
+    "provenance",
+    "phases",
+    "metrics",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "suite": {
+      "type": "object",
+      "required": ["name", "kind", "world", "suite_version"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string", "enum": ["synthetic", "replay", "production"] },
+        "world": { "type": "string", "enum": ["deterministic", "semi-deterministic", "live"] },
+        "suite_version": { "type": "string" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["git_sha", "recorded_at", "rustc", "os", "hostname", "crate_versions"],
+      "properties": {
+        "git_sha": { "type": "string" },
+        "recorded_at": { "type": "string" },
+        "rustc": { "type": "string" },
+        "os": { "type": "string" },
+        "hostname": { "type": "string" },
+        "crate_versions": { "type": "object" }
+      }
+    },
+    "phases": {
+      "type": "object",
+      "required": [
+        "sandbox_ms",
+        "doctor_ms",
+        "review_plan_ms",
+        "run_ms",
+        "accept_ms",
+        "resume_ms",
+        "audit_ms",
+        "wall_clock_s"
+      ],
+      "properties": {
+        "sandbox_ms": { "type": "number" },
+        "doctor_ms": { "type": "number" },
+        "review_plan_ms": { "type": "number" },
+        "run_ms": { "type": "number" },
+        "accept_ms": { "type": "number" },
+        "resume_ms": { "type": "number" },
+        "audit_ms": { "type": "number" },
+        "wall_clock_s": { "type": "number" }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "value", "unit", "status"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "number" },
+          "target_op": { "type": "string" },
+          "target_value": { "type": "number" },
+          "unit": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail"] },
+          "is_invariant": { "type": "boolean" }
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["overall", "invariants", "thresholds"],
+      "properties": {
+        "overall": { "type": "string", "enum": ["pass", "fail"] },
+        "invariants": { "type": "string", "enum": ["pass", "fail"] },
+        "thresholds": { "type": "string", "enum": ["pass", "fail"] }
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@
 > Maintainers and agents. Operators: [Getting started](../start.md).
 > Hub: [docs/README.md](../README.md).
 
-Executor: Antigravity / AI Pair programmer, under human product direction (daemonless direct-CLI dispatch in Git worktrees is the product path; ADR 0022; `meshloop:review-plan` is the plan gate).
+Executor: Antigravity, under human product direction (daemonless direct-CLI dispatch in Git worktrees is the product path; ADR 0022; `meshloop:review-plan` is the plan gate).
 
 ## What exists and is verified
 

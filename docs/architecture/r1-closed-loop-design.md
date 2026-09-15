@@ -11,7 +11,7 @@
 | Field | Value |
 |---|---|
 | **Document title** | Meshloop Release 1: closed-loop single-writer orchestration |
-| **Author** | Meshloop design (AI-authored under human product direction) |
+| **Author** | Meshloop design (under human product direction) |
 | **Date** | 2026-09-06 |
 | **Status** | Draft (revised after design review) |
 | **Base revision** | `c610ef3480f8b9a378a53af066ab6ca40919b9c9` (`main`) |
@@ -32,7 +32,7 @@ Release 1 is the smallest architecture a human operator on native Windows (Tier 
 
 ### Product intent (unchanged)
 
-From `docs/product/brief.md` and `AGENTS.md`: Meshloop takes one engineering objective, plans it into a task graph, routes work across configured subscription CLI clients via Quota-Aware Capability Routing, verifies what comes back, and recovers cleanly. Humans direct product intent and accept consequential architecture; AI authors code. Domain stays free of process/storage/harness dependencies; engine consumes ports; adapters implement; CLI composes. Selected harnesses: Codex, Claude Code, Pi, Grok, Agy. The engine uses existing authenticated CLI sessions; it does not store credentials. Never substitute Agy with Antigravity by name.
+From `docs/product/brief.md` and `AGENTS.md`: Meshloop takes one engineering objective, plans it into a task graph, routes work across configured subscription CLI clients via Quota-Aware Capability Routing, verifies what comes back, and recovers cleanly. Humans direct product intent and accept consequential architecture. All code must satisfy these rules and boundaries. Domain stays free of process/storage/harness dependencies; engine consumes ports; adapters implement; CLI composes. Selected harnesses: Codex, Claude Code, Pi, Grok, Agy. The engine uses existing authenticated CLI sessions; it does not store credentials. Never substitute Agy with Antigravity by name.
 
 Requirements ML-001 through ML-014 in `docs/product/requirements.md` remain the acceptance targets. R1 does not satisfy all of them. It must satisfy a named subset honestly, and name the rest as deferred.
 

@@ -98,6 +98,42 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn integrity_check(&self) -> Result<bool, StoreError> {
+        let res: String = self
+            .conn
+            .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(res == "ok")
+    }
+
+    pub fn event_count(&self) -> Result<usize, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events;", [], |r| r.get(0))
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(count as usize)
+    }
+
+    pub fn simulate_uncommitted_abort(
+        &mut self,
+        graph_id: &str,
+        task_id: TaskId,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO events (graph_id, task_id, from_state, to_state, event_type, executor, occurred_at)
+             VALUES (?1, ?2, 'Running', 'Failed', 'AttemptFailed', 'crash_sim', '0')",
+            params![graph_id, task_id.0],
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+        // Dropping tx without calling tx.commit() triggers an automatic rollback
+        drop(tx);
+        Ok(())
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);

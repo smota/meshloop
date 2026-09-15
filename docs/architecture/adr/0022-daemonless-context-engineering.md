@@ -3,7 +3,7 @@
 - Status: Accepted
 - Implementation: implemented
 - Date: 2026-09-14
-- Author/executor: Antigravity / AI Pair programmer
+- Author/executor: Antigravity
 - Decision owner: Samuel
 - Approval evidence: user approval in chat ("Perfeito. Implemente todo o plano, teste, valide, ajuste")
 - Supersedes: none (extends 0005 and 0009)

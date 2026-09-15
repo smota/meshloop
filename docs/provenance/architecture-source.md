@@ -9,7 +9,7 @@ Retained concepts: local Rust engine, authenticated CLI agents, Herdr sessions, 
 graphs, progressive rigor, verification, bounded fallback, integration, local feedback.
 
 Adaptations approved during planning: four architectural boundaries; ADR lifecycle;
-fully AI-coded implementation with human decisions; five harnesses; no required skills;
+implementation governed by human decisions; five harnesses; no required skills;
 Apache-2.0; explicit isolation and evidence. Model names, CLI flags, dependency versions,
 fixed three-way decomposition, platform claims, and correctness guarantees were not adopted.
 

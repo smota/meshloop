@@ -1,6 +1,6 @@
 # Installation and Setup
 
-Meshloop operates as a standalone Rust binary on **native Windows 10/11 and Linux**. It requires zero background daemons, zero external multiplexers, and stores no credentials.
+Meshloop is the multi-agent development optimization and loop engineering runtime on **native Windows 10/11 and Linux**. It operates as a single standalone Rust binary with zero background daemons, zero external multiplexers, and stores no credentials.
 
 ---
 

@@ -9,7 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 description = "Domain types for Meshloop: task graphs, evidence, policy, and role ids."
 readme = "README.md"
-keywords = ["orchestration", "agents"]
+keywords = ["agents", "multi-agent", "loop-engineering"]
 categories = ["development-tools"]
 
 [lints]

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Meshloop is a synchronous, daemonless orchestration runtime in Rust for executing AI coding agents in isolated Git worktrees with deterministic compiler verification.
+Meshloop is the multi-agent development optimization and loop engineering runtime in Rust, providing synchronous daemonless execution in isolated Git worktrees with deterministic compiler verification.
 
 Documentation Hub: [docs/README.md](../README.md) · Product Brief: [product/brief.md](../product/brief.md) · ADR Index: [adr/README.md](adr/README.md)
 
@@ -8,7 +8,7 @@ Documentation Hub: [docs/README.md](../README.md) · Product Brief: [product/bri
 
 ## 1. Stack Topology: Where Meshloop Fits
 
-Meshloop operates as an execution runtime between developer-facing surfaces and host operating system environments:
+Meshloop operates as the loop engineering runtime between developer-facing surfaces and host operating system environments:
 
 ```mermaid
 flowchart TB

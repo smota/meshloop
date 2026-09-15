@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Meshloop CLI engine. Install the binary, then run meshloop bundle for the session pack."
+description = "Multi-agent development optimization and loop engineering runtime for AI coding agents."
 readme = "README.md"
-keywords = ["orchestration", "agents", "cli", "herdr"]
+keywords = ["agents", "multi-agent", "loop-engineering", "development-tools"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
     "src/**",

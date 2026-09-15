@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Meshloop orchestration engine: plan, route, verify, recover. Ports only."
+description = "Meshloop loop engineering engine: plan, route, verify, recover. Ports only."
 readme = "README.md"
-keywords = ["orchestration", "agents"]
+keywords = ["agents", "multi-agent", "loop-engineering"]
 categories = ["development-tools"]
 
 [lints]

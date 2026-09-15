@@ -3,7 +3,7 @@
 - Status: Proposed
 - Implementation: in-progress
 - Date: 2026-09-15
-- Author/executor: Antigravity / AI Pair programmer & Grok
+- Author/executor: Antigravity & Grok
 - Decision owner: Samuel
 - Approval evidence: user authorization in chat ("Chame o grok e defina em conjunto o desenho de um framework de medição e benchmark para o meshloop...")
 - Supersedes: none (extends 0007, 0009, 0022)

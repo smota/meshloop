@@ -1,0 +1,41 @@
+name: CI Gate
+
+on:
+  push:
+    branches: [ main, "work/**", "codex/**" ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-gate:
+    name: ${{ matrix.os }} - check, smoke, bench
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, ubuntu-latest ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: clippy, rustfmt
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Static Analysis & Workspace Unit Tests
+        run: cargo run -p xtask -- check
+      - name: End-to-End Sandbox Smoke Test
+        run: cargo run -p xtask -- smoke
+      - name: Algorithmic & Invariant Benchmark Suite
+        run: cargo run -p xtask -- bench
+      - name: Upload Benchmark & Scorecard Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-artifacts-${{ matrix.os }}
+          path: |
+            artifacts/bench/run.json
+            artifacts/bench/scorecard.md

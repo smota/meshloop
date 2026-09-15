@@ -16,5 +16,12 @@ schema_version = "1.0.0"
 "ctx.parse.latency_ms.p95" = { op = "lte", value = 15.0 }
 "quant.search.latency_us.p95" = { op = "lte", value = 500.0 }
 "quant.index.compression_ratio" = { op = "gte", value = 4.0 }
+"quant.recall_at_k" = { op = "gte", value = 95.0 }
 "orch.txn.wal_commit_ms.p95" = { op = "lte", value = 10.0 }
+"conc.wal.write_contention_ms" = { op = "lte", value = 15.0 }
+"conc.git_admin.lock_contention_ms" = { op = "lte", value = 200.0 }
+"conc.throughput_gain" = { op = "gte", value = 1.0 }
+"conv.self_repair.success_rate" = { op = "gte", value = 80.0 }
+"slice.build_avoidance_rate" = { op = "gte", value = 50.0 }
 "smoke.wall_clock_s" = { op = "lte", value = 5.0 }
+

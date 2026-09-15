@@ -10,7 +10,7 @@
 - Superseded by: none
 
 ## Context
-Initialize a Rust project for fully AI-coded development across five selected harnesses.
+Initialize a Rust project for development across five selected harnesses.
 
 ## Alternatives
 Single crate with modules was considered; separate crates make dependency direction and concurrent ownership explicit.

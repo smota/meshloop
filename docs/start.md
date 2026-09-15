@@ -2,7 +2,7 @@
 
 Install and first-time setup: **[Install and Setup](install.md)** (`cargo install meshloop-cli --locked`, then `meshloop bundle`).
 
-You operate Meshloop directly from your existing terminal agent (Claude Code, Codex, Pi, Grok, Agy) as `meshloop:origin`. Meshloop executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`), with multi-language AST context reduction and deterministic prompt caching. No background daemons or multiplexer servers are required.
+You operate Meshloop directly from your existing terminal agent (Claude Code, Codex, Pi, Grok, Agy) as `meshloop:origin`. Meshloop is the multi-agent development optimization and loop engineering runtime that executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`), with multi-language AST context reduction and deterministic prompt caching. No background daemons or multiplexer servers are required.
 
 ---
 

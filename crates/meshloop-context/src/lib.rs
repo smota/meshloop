@@ -6,12 +6,14 @@ pub mod cache;
 pub mod quant;
 pub mod signature;
 pub mod skeleton;
+pub mod skeleton_cache;
 pub mod tier1;
 
 pub use cache::{CacheOptimizedPrompt, PromptCacheBuilder};
 pub use quant::{BitWidth, DEFAULT_SKELETON_BUDGET, PackedCode, SignatureIndex, select_context};
 pub use signature::{Signature, SignatureKind, extract_signatures};
 pub use skeleton::{Language, SkeletonResult, estimate_tokens, extract_skeleton};
+pub use skeleton_cache::SkeletonCache;
 pub use tier1::{
     CliTier1Overrides, SelectionSource, Tier1Config, Tier1ProviderKind,
     build_delegated_reader_prompt, resolve_tier1_provider,

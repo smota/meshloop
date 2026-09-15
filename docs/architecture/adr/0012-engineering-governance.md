@@ -10,13 +10,13 @@
 - Superseded by: none
 
 ## Context
-Initialize a Rust project for fully AI-coded development across five selected harnesses.
+Initialize a Rust project for development across five selected harnesses.
 
 ## Alternatives
 Implicit decisions and vendor-fixed roles were considered insufficient for cross-harness continuity and evidence.
 
 ## Decision
-Use the documented ADR lifecycle and separate implementation status. AI authors code and tests; humans retain product direction and consequential acceptance. Record actual executors and candidate-specific validation.
+Use the documented ADR lifecycle and separate implementation status. Humans retain product direction and consequential acceptance. All implementation must satisfy architectural invariants and pass deterministic validation. Record actual executors and candidate-specific validation.
 
 ## Consequences
 Routine bounded changes can proceed within accepted policy. Proposed runtime ADRs do not become accepted merely because initialization was authorized.
