@@ -382,4 +382,44 @@ mod tests {
             "budget should drop noise files, kept {mentioned}"
         );
     }
+
+    #[test]
+    fn markdown_architecture_doc_retained_in_context_spec() {
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node(1, "implement markdown ast doc skeleton ADR 0031", &[])],
+        };
+        let target = &graph.nodes[0];
+        let skeletons = vec![
+            (
+                "docs/architecture/adr/0031-markdown-doc-ast-context-engineering.md".to_string(),
+                "# 0031 Markdown AST Context Engineering\n- Status: Accepted\n## Decision\n- Rule 1".to_string(),
+            ),
+            (
+                "crates/meshloop-context/src/doc_skeleton.rs".to_string(),
+                "pub fn prune_markdown(source: &str) -> String;".to_string(),
+            ),
+        ];
+
+        let spec = build_agent_spec_with_context(
+            &graph,
+            target,
+            AttemptId(1),
+            "claude-code",
+            "configured-model",
+            PathBuf::from("/tmp/wt"),
+            Duration::from_secs(300),
+            &skeletons,
+        );
+
+        assert!(
+            spec.prompt
+                .contains("0031-markdown-doc-ast-context-engineering.md")
+        );
+        assert!(
+            spec.prompt
+                .contains("0031 Markdown AST Context Engineering")
+        );
+        assert!(spec.prompt.contains("doc_skeleton.rs"));
+    }
 }

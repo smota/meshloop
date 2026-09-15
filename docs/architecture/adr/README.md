@@ -38,6 +38,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0019 | Origin cockpit and Meshloop-owned Herdr space | Accepted |
 | 0020 | Live Herdr pane is the wait authority | Accepted |
 | 0021 | Restart an accepted plan without replanning | Accepted |
+| 0022 | Daemonless standalone execution and multi-language context engineering | Accepted |
 | 0023 | Measurement, benchmark, and architectural validation framework | Accepted |
 | 0024 | Bounded concurrent execution without Tokio | Proposed |
 | 0025 | Host process-tree ownership via Windows Job Objects | Accepted |
@@ -46,6 +47,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0028 | Upstream graph mutation and dynamic replanning | Proposed |
 | 0029 | Deterministic loop algorithms and quantized signature retrieval | Proposed |
 | 0030 | Internalized petgraph DAG engine, parametric manifests, and scheduling latency gates | Accepted |
+| 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

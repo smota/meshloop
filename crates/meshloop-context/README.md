@@ -1,7 +1,8 @@
 # meshloop-context
 
 Context engineering pipeline for Meshloop:
-- Multi-language AST skeleton extraction (Rust, TypeScript, Python, Go, C#, PHP, C++)
+- Multi-language AST skeleton extraction (Rust, TypeScript, Python, Go, C#, PHP, C++, Markdown)
+- Markdown AST document skeleton extraction with stable cache sentinels (ADR 0031)
 - Public signature extraction and data-oblivious 1-bit/2-bit quantized retrieval (ADR 0029)
 - Tier 1 bulk-reader provider resolution (CLI harnesses, Cloud APIs, Local Ollama)
 - Prompt cache normalization for high cache hit rates (>80%)

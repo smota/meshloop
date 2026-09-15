@@ -208,4 +208,19 @@ mod tests {
         assert!(slice.iter().any(|p| p == "src/auth.rs"));
         assert!(slice.iter().any(|p| p.contains("token") || p == "token.rs"));
     }
+
+    #[test]
+    fn doc_body_edit_does_not_cause_signature_changed() {
+        let before_doc = "# ADR 0031\n- Status: Accepted\n## Context\nOld prose line 1\nOld prose line 2\nOld prose line 3\n## Decision\n- Rule A";
+        let after_doc = "# ADR 0031\n- Status: Accepted\n## Context\nNew prose line A\nNew prose line B\nNew prose line C\n## Decision\n- Rule A";
+
+        let before = SignatureSnapshot::from_sources([("docs/adr/0031.md", before_doc)]);
+        let after = SignatureSnapshot::from_sources([("docs/adr/0031.md", after_doc)]);
+
+        assert_eq!(
+            impact(&before, &after),
+            Impact::BodyOnly,
+            "Editing markdown body must evaluate to BodyOnly"
+        );
+    }
 }

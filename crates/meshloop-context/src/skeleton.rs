@@ -13,6 +13,7 @@ pub enum Language {
     CSharp,
     Php,
     Cpp,
+    Markdown,
     Unknown,
 }
 
@@ -26,6 +27,7 @@ impl Language {
             Some("cs") => Language::CSharp,
             Some("php") => Language::Php,
             Some("cpp" | "cxx" | "cc" | "hpp" | "hh" | "h") => Language::Cpp,
+            Some("md" | "markdown" | "mdown" | "mkd") => Language::Markdown,
             _ => Language::Unknown,
         }
     }
@@ -71,6 +73,7 @@ pub fn extract_skeleton(source: &str, language: Language) -> SkeletonResult {
         Language::CSharp => prune_csharp(source),
         Language::Php => prune_php(source),
         Language::Cpp => prune_cpp(source),
+        Language::Markdown => crate::doc_skeleton::prune_markdown(source),
         Language::Unknown => source.to_string(),
     };
 
@@ -1023,6 +1026,14 @@ int calculate_checksum(const std::string& input)
         );
         assert_eq!(
             Language::from_path(Path::new("README.md")),
+            Language::Markdown
+        );
+        assert_eq!(
+            Language::from_path(Path::new("docs/spec.markdown")),
+            Language::Markdown
+        );
+        assert_eq!(
+            Language::from_path(Path::new("archive.bin")),
             Language::Unknown
         );
     }

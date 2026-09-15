@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod doc_skeleton;
 pub mod quant;
 pub mod signature;
 pub mod skeleton;
@@ -12,6 +13,7 @@ pub mod skeleton_cache;
 pub mod tier1;
 
 pub use cache::{CacheOptimizedPrompt, PromptCacheBuilder};
+pub use doc_skeleton::PRUNED_SENTINEL;
 pub use quant::{BitWidth, DEFAULT_SKELETON_BUDGET, PackedCode, SignatureIndex, select_context};
 pub use signature::{Signature, SignatureKind, extract_signatures};
 pub use skeleton::{Language, SkeletonResult, estimate_tokens, extract_skeleton};

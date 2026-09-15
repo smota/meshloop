@@ -46,12 +46,14 @@ impl PromptCacheBuilder {
     }
 
     pub fn with_system_rule(mut self, rule: impl Into<String>) -> Self {
-        self.system_rules.push(rule.into());
+        self.system_rules
+            .push(normalize_prompt_segment(&rule.into()));
         self
     }
 
     pub fn with_contract(mut self, contract: impl Into<String>) -> Self {
-        self.contracts.push(contract.into());
+        self.contracts
+            .push(normalize_prompt_segment(&contract.into()));
         self
     }
 
@@ -60,7 +62,8 @@ impl PromptCacheBuilder {
         file_path: impl Into<String>,
         skeleton: impl Into<String>,
     ) -> Self {
-        self.ast_skeletons.push((file_path.into(), skeleton.into()));
+        self.ast_skeletons
+            .push((file_path.into(), normalize_prompt_segment(&skeleton.into())));
         self
     }
 
@@ -111,6 +114,19 @@ impl PromptCacheBuilder {
     }
 }
 
+/// Normalizes whitespace and line endings for cross-platform prompt cache alignment:
+/// - Strips UTF-8 BOM if present
+/// - Normalizes CRLF and CR to LF
+/// - Trims trailing whitespace from each line
+pub fn normalize_prompt_segment(input: &str) -> String {
+    let clean = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut lines = Vec::new();
+    for line in clean.lines() {
+        lines.push(line.trim_end());
+    }
+    lines.join("\n")
+}
+
 impl Default for PromptCacheBuilder {
     fn default() -> Self {
         Self::new()
@@ -138,5 +154,20 @@ mod tests {
         // The static prefix must be identical byte-for-byte to trigger prompt caching
         assert_eq!(p1.static_prefix, p2.static_prefix);
         assert!(p1.cache_eligible_ratio() > 50.0);
+    }
+
+    #[test]
+    fn prompt_hygiene_normalizes_crlf_and_trailing_whitespace() {
+        let p1 = PromptCacheBuilder::new()
+            .with_system_rule("Rule 1\r\nRule 2  \r\n")
+            .with_ast_skeleton("docs/adr.md", "# Title  \r\n## Section\r\n")
+            .build("Task", "Action");
+
+        let p2 = PromptCacheBuilder::new()
+            .with_system_rule("Rule 1\nRule 2\n")
+            .with_ast_skeleton("docs/adr.md", "# Title\n## Section\n")
+            .build("Task", "Action");
+
+        assert_eq!(p1.static_prefix, p2.static_prefix);
     }
 }

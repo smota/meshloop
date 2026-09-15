@@ -60,7 +60,7 @@ flowchart LR
 | Crate | Responsibilities (What It Owns) | Invariants (What It Must NOT Contain) |
 | :--- | :--- | :--- |
 | **`meshloop-domain`** | Task graph (DAG) with iterative topological sorting and cycle detection via `petgraph`, lifecycle states, error diagnostic lattice, pure evidence types, and policy definitions. | Zero I/O, zero OS dependencies, zero model or network awareness. |
-| **`meshloop-context`** | AST skeleton pruning across 7 languages (*Rust, TS/JS, Python, Go, C#, PHP, C++*), prompt cache normalizer, quantized signature indexing (64-dim FWHT), and Tier 1 reader resolution. | Zero subprocess execution, zero disk persistence, zero saga lifecycle coupling. |
+| **`meshloop-context`** | AST skeleton pruning across 8 languages (*Rust, TS/JS, Python, Go, C#, PHP, C++, Markdown*), prompt cache normalizer, quantized signature indexing (64-dim FWHT), and Tier 1 reader resolution. | Zero subprocess execution, zero disk persistence, zero saga lifecycle coupling. |
 | **`meshloop-engine`** | Structural DAG planner, adaptive QACR router (*Restless Bandit*), `RunLoop` coordinator with bounded concurrency ($N \in [1, 16]$), and self-repair convergence via Lyapunov potential ($\phi$). | Zero concrete adapter instantiation; operates strictly via traits. |
 | **`meshloop-adapters`** | Direct CLI agent execution (`CliHarness`), Git worktree isolation with `GitAdminMutex`, atomic SQLite WAL persistence with `BEGIN IMMEDIATE`, and process tree management via Win32 Job Objects. | Zero business logic or high-level orchestration decisions. |
 | **`meshloop-cli`** | Command-line argument parsing, adapter composition into the engine, structured JSON reporting, and the stdio Model Context Protocol server (`meshloop mcp`). | Zero orchestration logic in the CLI binary; strictly delegates to the engine. |
@@ -73,10 +73,10 @@ flowchart LR
    Execution model where Meshloop manages agent lifecycles via direct OS subprocesses, eliminating permanent background services, hidden daemons, or terminal multiplexer sockets ([ADR 0022](adr/0022-daemonless-context-engineering.md)).
 2. **Git Worktree Isolation:**  
    Isolation mechanism where every execution attempt runs in a dedicated ephemeral worktree (`.meshloop-worktrees/<task-id>`), leaving the active development branch unmodified until explicit human approval ([ADR 0005](adr/0005-execution-recovery.md)).
-3. **AST Skeleton Pruning:**  
-   Deterministic context engineering technique in `meshloop-context` that parses source code in 7 languages and strips function and method bodies while retaining signatures, types, interfaces, and docstrings. Reduces token consumption by **70% to 90%** ([ADR 0022](adr/0022-daemonless-context-engineering.md)).
+3. **AST Skeleton Pruning & Markdown Document Skeletons:**  
+   Deterministic context engineering technique in `meshloop-context` that parses source code in 7 programming languages plus Markdown technical documentation (.md). For code, it strips method bodies; for documentation, it preserves the heading spine, metadata, and tables while pruning narrative prose to stable sentinels (`<!-- meshloop:pruned -->`). Reduces token consumption by **60% to 90%** ([ADR 0022](adr/0022-daemonless-context-engineering.md), [ADR 0031](adr/0031-markdown-doc-ast-context-engineering.md)).
 4. **Prompt Cache Normalization:**  
-   Structuring prompts with byte-identical static prefixes (system policy, project constraints, and repository skeletons) to maximize provider KV-cache reuse above **80%**.
+   Structuring prompts with byte-identical static prefixes (system policy, project constraints, and repository skeletons) with LF normalization and whitespace stripping to maximize provider KV-cache reuse above **80%** ([ADR 0022](adr/0022-daemonless-context-engineering.md), [ADR 0031](adr/0031-markdown-doc-ast-context-engineering.md)).
 5. **Quantized Signature Retrieval (FWHT):**  
    In-memory code signature index using Fast Walsh-Hadamard Transforms (64 dimensions) and 1-bit/2-bit quantization, enabling sub-millisecond symbol search and ranking without external vector databases or unsafe FFI ([ADR 0029](adr/0029-deterministic-loop-algorithms.md)).
 6. **Diagnostic Lattice & Lyapunov Convergence ($\phi$):**  

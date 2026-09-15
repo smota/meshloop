@@ -164,3 +164,12 @@ With the deterministic regression gate (World D) fully operational, the three hi
   - Implemented `cargo run -p xtask -- bench-world-s` subcommand generating structured JSON and tabular scorecards in `artifacts/bench/world_s.json`.
   - Opt-in design preserves offline speed and reliability for `xtask check` and standard CI.
   - 100% test pass rate across all 136 workspace unit and integration tests.
+
+### Priority 4: Deterministic Markdown AST Context Engineering & Document Skeletons (ADR 0031) — **DELIVERED & VERIFIED**
+- **Objective:** Extend `meshloop-context` beyond source code to technical specifications, ADRs, RFCs, PRDs, and architecture guides (.md), pruning narrative text while preserving heading spines, decision metadata, and tables.
+- **Value:** Eliminates context bloat and "lost-in-the-middle" token exhaustion when agents ingest architectural documentation.
+- **Implementation & Evidence:**
+  - **Independent Grok Architectural Review (`grok -p` / `--prompt-file`):** Grok validated the plan and prevented numbering collisions (assigning ADR 0031); recommended a dedicated `doc_skeleton.rs` streaming state machine; enforced a stable sentinel (`<!-- meshloop:pruned -->`) without dynamic line or token counters to prevent cache busting; mandated universal prompt cache hygiene (LF normalization, trimmed trailing whitespace, BOM stripping); and caught code fence isolation in signature extraction.
+  - **Cycle 1 (Dialect & Loss Hardening):** Validated in `crates/meshloop-context/tests/doc_dialect_tests.rs` covering unclosed code fences, code fences containing `#`, frontmatter vs Setext vs hr, GFM admonitions, Unicode headings, idempotence, and golden structure preservation across real Meshloop ADRs (`0029`, `0030`, `0031`, `template.md`, `runtime-design.md`).
+  - **Cycle 2 (Retrieval & Cache Hardening):** Validated in `crates/meshloop-context/tests/doc_retrieval_cache_tests.rs` and `crates/meshloop-engine`: mixed code/doc quantized ranking in `select_context`, prompt cache static prefix byte-identity under permutation, and syntactic slice impact immunity (`Impact::BodyOnly` on doc body modifications).
+  - 100% test pass rate across all 142 workspace unit and integration tests.

@@ -10,6 +10,7 @@ pub enum SignatureKind {
     Alias,
     Constant,
     Impl,
+    Heading,
     Other,
 }
 
@@ -29,10 +30,22 @@ pub fn file_signature_blob(signatures: &[Signature]) -> String {
 }
 
 pub fn extract_signatures(path: &str, skeleton: &str, language: Language) -> Vec<Signature> {
-    skeleton
-        .lines()
-        .filter_map(|line| classify(path, line, language))
-        .collect()
+    let mut in_fence = false;
+    let mut sigs = Vec::new();
+    for line in skeleton.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some(sig) = classify(path, line, language) {
+            sigs.push(sig);
+        }
+    }
+    sigs
 }
 
 fn classify(path: &str, line: &str, language: Language) -> Option<Signature> {
@@ -51,6 +64,7 @@ fn classify(path: &str, line: &str, language: Language) -> Option<Signature> {
         Language::CSharp => cs_sig(trimmed)?,
         Language::Php => php_sig(trimmed)?,
         Language::Cpp => cpp_sig(trimmed)?,
+        Language::Markdown => md_sig(trimmed)?,
         Language::Unknown => {
             let name = first_ident(trimmed)?;
             (SignatureKind::Other, name)
@@ -203,6 +217,21 @@ fn cpp_sig(t: &str) -> Option<(SignatureKind, String)> {
     None
 }
 
+fn md_sig(t: &str) -> Option<(SignatureKind, String)> {
+    if !t.starts_with('#') {
+        return None;
+    }
+    let hashes = t.bytes().take_while(|&b| b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = t[hashes..].trim().trim_end_matches('#').trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some((SignatureKind::Heading, rest.to_string()))
+}
+
 fn looks_like_fn(t: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| t.starts_with(p))
 }
@@ -275,5 +304,18 @@ mod tests {
         let mut b = a.clone();
         b.reverse();
         assert_eq!(file_signature_blob(&a), file_signature_blob(&b));
+    }
+
+    #[test]
+    fn markdown_headings_extracted_as_signatures() {
+        let src = "# Architecture Overview\n## Context\nParagraph\n### Invariant Rules ###\n";
+        let sigs = extract_signatures("docs/arch.md", src, Language::Markdown);
+        assert_eq!(sigs.len(), 3);
+        assert_eq!(sigs[0].kind, SignatureKind::Heading);
+        assert_eq!(sigs[0].name, "Architecture Overview");
+        assert_eq!(sigs[1].kind, SignatureKind::Heading);
+        assert_eq!(sigs[1].name, "Context");
+        assert_eq!(sigs[2].kind, SignatureKind::Heading);
+        assert_eq!(sigs[2].name, "Invariant Rules");
     }
 }
