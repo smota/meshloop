@@ -59,7 +59,7 @@ flowchart LR
 
 | Crate | Responsibilities (What It Owns) | Invariants (What It Must NOT Contain) |
 | :--- | :--- | :--- |
-| **`meshloop-domain`** | Task graph (DAG), lifecycle states, error diagnostic lattice, pure evidence types, and policy definitions. | Zero I/O, zero OS dependencies, zero model or network awareness. |
+| **`meshloop-domain`** | Task graph (DAG) with iterative topological sorting and cycle detection via `petgraph`, lifecycle states, error diagnostic lattice, pure evidence types, and policy definitions. | Zero I/O, zero OS dependencies, zero model or network awareness. |
 | **`meshloop-context`** | AST skeleton pruning across 7 languages (*Rust, TS/JS, Python, Go, C#, PHP, C++*), prompt cache normalizer, quantized signature indexing (64-dim FWHT), and Tier 1 reader resolution. | Zero subprocess execution, zero disk persistence, zero saga lifecycle coupling. |
 | **`meshloop-engine`** | Structural DAG planner, adaptive QACR router (*Restless Bandit*), `RunLoop` coordinator with bounded concurrency ($N \in [1, 16]$), and self-repair convergence via Lyapunov potential ($\phi$). | Zero concrete adapter instantiation; operates strictly via traits. |
 | **`meshloop-adapters`** | Direct CLI agent execution (`CliHarness`), Git worktree isolation with `GitAdminMutex`, atomic SQLite WAL persistence with `BEGIN IMMEDIATE`, and process tree management via Win32 Job Objects. | Zero business logic or high-level orchestration decisions. |
@@ -89,6 +89,10 @@ flowchart LR
    Task routing algorithm balancing Quality, Affinities, Cost, and Reliability, incorporating exploration bonuses and time-decay weights to manage rate limits ([ADR 0009](adr/0009-routing-budgets.md)).
 10. **Stdio MCP Server:**  
     Synchronous Model Context Protocol server over `stdin`/`stdout` allowing external IDEs and clients to inspect state, trigger plans, and execute tasks via a standardized protocol ([ADR 0027](adr/0027-mcp-modular-server.md)).
+11. **Iterative DAG Engine (`petgraph`):**  
+    Cycle-safe task graph dependency ordering using `petgraph::graphmap::DiGraphMap` with zero recursion, preventing call-stack overflow on deep task hierarchies and guaranteeing sub-millisecond scheduling overhead across 7 canonical manifest topologies ([ADR 0030](adr/0030-petgraph-dag-engine.md)).
+12. **World S Autonomy Benchmark & Wilson 95% CI:**  
+    Opt-in stochastic evaluation suite across 8 polyglot exercises measuring First-Pass Acceptance Rate (FPAR) bounded by analytical Wilson score 95% confidence intervals, preventing deceptive pass rates on small samples ([ADR 0023](adr/0023-measurement-and-benchmark-framework.md)).
 
 ---
 
@@ -96,7 +100,7 @@ flowchart LR
 
 | Category | Capabilities | Guarantees & Invariants |
 | :--- | :--- | :--- |
-| **Integrated & Verified (Tier 1 Core)** | - Synchronous Rust 2024 engine.<br>- Bounded concurrency $N \in [1, 16]$.<br>- Git worktree isolation with `GitAdminMutex`.<br>- SQLite WAL state store with `BEGIN IMMEDIATE`.<br>- AST skeleton pruning across 7 languages.<br>- Subprocess management via Win32 Job Objects / POSIX PGID.<br>- Diagnostic lattice with attempt-scoped self-repair.<br>- Stdio MCP JSON-RPC server. | - `#![forbid(unsafe_code)]` across domain and engine.<br>- Zero async runtime (`tokio`) in domain and engine.<br>- Serial merges into integration branch.<br>- Zero credentials stored by Meshloop.<br>- 100% test pass rate (`xtask check`, `xtask bench`). |
+| **Integrated & Verified (Tier 1 Core)** | - Synchronous Rust 2024 engine.<br>- Bounded concurrency $N \in [1, 16]$.<br>- Git worktree isolation with `GitAdminMutex`.<br>- SQLite WAL state store with `BEGIN IMMEDIATE`.<br>- AST skeleton pruning across 7 languages.<br>- Subprocess management via Win32 Job Objects / POSIX PGID.<br>- Diagnostic lattice with attempt-scoped self-repair.<br>- Iterative petgraph DAG engine with 7 canonical manifests.<br>- World S polyglot autonomy benchmark suite.<br>- Stdio MCP JSON-RPC server. | - `#![forbid(unsafe_code)]` across domain and engine.<br>- Zero async runtime (`tokio`) in domain and engine.<br>- Serial merges into integration branch.<br>- Zero credentials stored by Meshloop.<br>- 100% test pass rate (`xtask check`, `xtask bench`). |
 | **Planned & Feature-Gated (Tier 2)** | - Container isolation (`--features docker`, via `bollard`).<br>- AST parsing via external `ast-grep` (`sg`) binary.<br>- Network-enabled MCP server (`--features mcp-server`).<br>- Dedicated AST cache in SQLite. | - Feature flags never affect standard default build (`default = []`).<br>- Host missing optional tool automatically falls back to native Tier 1 mode. |
 | **Disallowed by Design (Anti-Patterns)** | - **Background daemons:** No background services or hidden daemon processes.<br>- **Viral async in core:** No async runtimes in `domain` or `engine`.<br>- **Unprompted branch mutation:** Meshloop never modifies your working branch without explicit human confirmation.<br>- **Unverified self-reports:** Model text output is never used as proof of task completion; only compiler exit codes (`CheckRunner`) grant verification. | - Invariants ensure operational stability, safety, and predictability. |
 

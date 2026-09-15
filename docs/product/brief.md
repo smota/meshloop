@@ -56,8 +56,10 @@ flowchart TB
 
 ### 2. High-Performance Architecture
 - **Sub-Millisecond Symbol Retrieval:** Quantized 64-dim Fast Walsh-Hadamard Transform (FWHT) indexing searches signatures in $< 500\mu\text{s}$ with **8x memory compression**.
-- **Lightweight Standalone Footprint (<20MB RAM):** Zero background daemons, zero external multiplexers, and instant cold-start execution.
+- **Zero-Daemon Lightweight Footprint (<20MB RAM):** Zero background daemons, zero external multiplexers, and instant cold-start execution.
 - **Bounded Concurrency ($N \in [1, 16]$):** Multiplexes multiple workers concurrently without Tokio or async runtime overhead.
+- **Iterative DAG Engine & Manifest Scheduling (<25ms P95):** Cycle-safe `petgraph` dependency scheduling validated across 7 canonical manifest topologies.
+- **Kernel-Enforced Process-Tree Ownership:** Win32 Job Objects and POSIX process groups guarantee zero orphan background processes upon task abort or timeout (`conc.orphan_process_count = 0`).
 - **Contention-Free Git Operations:** Intra-process `GitAdminMutex` with exponential retry backoff eliminates `.git/index.lock` collisions.
 
 ### 3. Universal Extensibility

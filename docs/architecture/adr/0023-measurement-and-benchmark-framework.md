@@ -1,7 +1,7 @@
 # 0023 Measurement, Benchmark, and Architectural Validation Framework
 
 - Status: Accepted
-- Implementation: completed (World D regression gate, CI pipeline, and thresholds enforced; World S staged)
+- Implementation: implemented (World D CI gate, Tier B DAG manifest suite, and World S opt-in benchmark suite verified)
 - Date: 2026-09-15
 - Author/executor: Antigravity & Grok
 - Decision owner: Samuel
@@ -32,3 +32,9 @@ With the implementation of daemonless standalone execution and 7-language AST co
 - Every pull request receives objective regression protection on context size, parse latency, and safety invariants.
 - Living specification provides explicit extension points (`RFC-BENCH-01` to `RFC-BENCH-04`) for iterative refinement alongside ongoing engine evolution.
 - Transparent scorecards (1-page executive + technical annex) provide auditable evidence of architectural integrity and product efficiency.
+
+## Verification and implementation evidence
+- `cargo run --release -p xtask -- bench`: 19/19 canonical metrics pass against `benches/thresholds.toml`.
+- `cargo run -p xtask -- bench-dag`: 7 canonical manifests evaluated; P95 scheduling overhead <= 25.0ms (observed: 0.054 ms).
+- `cargo run -p xtask -- bench-world-s`: 8 polyglot exercises evaluated with Wilson 95% score interval math; artifact saved to `artifacts/bench/world_s.json`.
+- Standard JSON schema verified: `artifacts/bench/run.json` conforms to `run-record.v1`.

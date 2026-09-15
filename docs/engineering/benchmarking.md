@@ -61,12 +61,13 @@ Prefix convention:
 | `ctx.tokens.pruned` | tokens | Lower | Tokens delivered after AST skeleton pruning. |
 | `ctx.tokens.reduction_pct` | % | Higher | `100 * (1 - pruned / raw)`. Target: 70–90% reduction on structured code. |
 | `ctx.cache.hit_rate_pct` | % | Higher | AST parse cache and prompt prefix hit rate (>80%). |
-| `orch.schedule.overhead_ms` | ms | Lower | Scheduling latency (SQLite read + QACR routing + dispatch). Target p95 < 25ms. |
-| `orch.txn.wal_commit_ms` | ms | Lower | SQLite WAL transaction commit latency. |
+| `orch.schedule.overhead_ms.p95` | ms | Lower | Scheduling latency across 7 manifests via `HdrHistogram`. Target P95 <= 25.0ms. |
+| `orch.txn.wal_commit_ms` | ms | Lower | SQLite WAL transaction commit latency. Target P95 <= 10.0ms. |
 | `iso.worktree.leak_count` | count | Target: 0 | Dirty files or uncommitted references left in the host repo. |
 | `iso.crash.recovery_fidelity`| ratio | Target: 1.0 | Consistency upon crash recovery reconciliation. |
 | `iso.gate.obedience_rate_pct`| % | Target: 100% | Enforcement of human review gates (`review-plan`, `accept`, `integrate`). |
-| `dev.fpar` | % | Higher | First-Pass Acceptance Rate on task diffs. |
+| `conc.orphan_process_count` | count | Target: 0 | Residual child processes after cancellation (enforced via Win32 Job Objects / POSIX PGID). |
+| `dev.fpar` | % | Higher | First-Pass Acceptance Rate with Wilson 95% confidence intervals (World S). |
 | `dev.wall_clock_s` | s | Lower | End-to-end execution time per task node. |
 
 ---
@@ -74,13 +75,19 @@ Prefix convention:
 ## 3. Operational Surface via `xtask`
 
 ```bash
-# Run workspace check suite
+# Run workspace check suite (formatting, clippy -D warnings, workspace tests)
 cargo run -p xtask -- check
 
-# Run canonical SPEC-ML-BENCH-001 scorecard
-cargo run -p xtask -- bench
+# Run canonical SPEC-ML-BENCH-001 scorecard against thresholds.toml
+cargo run --release -p xtask -- bench
 
-# Verify daemonless mode and worktree isolation
+# Benchmark 7 canonical DAG manifests against P95 scheduling gate
+cargo run -p xtask -- bench-dag
+
+# Run World S opt-in autonomy benchmark suite (8 polyglot exercises)
+cargo run -p xtask -- bench-world-s
+
+# Verify daemonless mode and worktree isolation launch gate
 cargo run -p xtask -- live
 
 # Build session pack and embedded bundles

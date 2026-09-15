@@ -41,6 +41,7 @@ flowchart LR
 - **Quantized Signature Indexing:** 64-dimensional Fast Walsh-Hadamard Transform (FWHT) with 1-bit/2-bit quantization achieves sub-500µs symbol search and 8x compression without external vector databases.
 - **Zero-Daemon Overhead:** Standalone, single-process execution with sub-20MB memory footprint and millisecond startup.
 - **Bounded Concurrency ($N \in [1, 16]$):** Non-blocking polling enables multiplexed worker execution without async runtime (Tokio) overhead.
+- **Iterative DAG Engine & Kernel Process Ownership:** Cycle-safe topological sorting via `petgraph` with bounded scheduling overhead (P95 <= 25ms across 7 manifests) and Win32 Job Objects / POSIX process groups eradicating orphaned background processes.
 - **Serialized Contention Management:** `GitAdminMutex` with exponential backoff prevents `.git/index.lock` collisions under parallel worktree creation.
 
 ### 3. Universal Extensibility & Surface Parity
@@ -128,7 +129,7 @@ flowchart TB
 - **[Component Boundaries](architecture/boundaries.md)** — Allowed dependencies and architectural invariants per crate.
 - **[Execution Lifecycle](architecture/execution-lifecycle.md)** — Formal task lifecycle and attempt state machine.
 - **[Threat Model & Security](architecture/threat-model.md)** — Fail-closed isolation, credentials, and network posture.
-- **[Architecture Decision Records (ADRs)](architecture/adr/README.md)** — Historical decision index from ADR 0001 to ADR 0029.
+- **[Architecture Decision Records (ADRs)](architecture/adr/README.md)** — Historical decision index from ADR 0001 to ADR 0030.
 
 ### Engineering & Operations
 - **[Contributing Guide](../CONTRIBUTING.md)** — Workspace layout, adding language support, and extending harnesses.

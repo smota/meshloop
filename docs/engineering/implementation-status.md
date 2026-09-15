@@ -13,15 +13,17 @@ Native Windows (`rustc 1.98.0`).
 |---|---|
 | `cargo run -p xtask -- check` | fmt, clippy `-D warnings`, workspace tests |
 | `cargo run -p xtask -- bench` | SPEC-ML-BENCH-001 scorecard & artifacts/bench/run.json |
+| `cargo run -p xtask -- bench-dag` | Tier B: 7 canonical manifests against P95 scheduling gate |
+| `cargo run -p xtask -- bench-world-s` | Tier S: 8 polyglot exercises & Wilson 95% CI FPAR |
 | `cargo run -p xtask -- live` | Launch gate — verifies doctor `daemonless: true` and git worktree isolation |
 | `cargo run -p xtask -- smoke` | Prefixed CLI / doctor / review-plan in `--help` |
 | `cargo run -p xtask -- bundle` | `dist/meshloop-session-bundle/` (also `meshloop bundle`) |
 | `cargo run -p xtask -- publish-dry` | `cargo package` isolation for all five publishable crates |
 
-- **meshloop-domain:** task graph, lifecycle including `PlanDeclined`,
-  `PlanDecision` (Accept / Decline / Adjust), evidence, policy, prefixed ids
-  (`meshloop:review-plan` → MCP `meshloop_review_plan`), diagnostic lattice and
-  portable FNV-1a digest (ADR 0029).
+- **meshloop-domain:** task graph with internalized `petgraph` iterative topological sorting
+  and cycle detection (ADR 0030), lifecycle including `PlanDeclined`, `PlanDecision`
+  (Accept / Decline / Adjust), evidence, policy, prefixed ids (`meshloop:review-plan` →
+  MCP `meshloop_review_plan`), diagnostic lattice and portable FNV-1a digest (ADR 0029).
 - **meshloop-context:** multi-language AST skeleton extraction across **7 languages**
   (Rust, TypeScript/JS, Python, Go, C#, PHP, C++), Tier 1 dynamic 4-level provider resolution
   (CLI flag > Env > TOML > Auto-detect / local Ollama fallback), deterministic prompt cache
@@ -35,13 +37,13 @@ Native Windows (`rustc 1.98.0`).
 - **meshloop-adapters:** `CliHarness` (direct CLI subprocess execution with non-blocking `try_collect`
   and CI double), Git worktree adapter with `GitAdminMutex` index-lock backoff, SQLite **schema v4**
   (`pane_id` / attempt tracking, `review_note` on runs, WAL, `BEGIN IMMEDIATE`), and host process-tree
-  ownership (ADR 0025). Herdr dependency completely purged.
+  ownership via Win32 Job Objects / POSIX PGID (ADR 0025). Herdr dependency completely purged.
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
   `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (reports `daemonless: true`),
   `orchestrate`, `mcp` (with MCP protocol version negotiation and resource/prompt support, ADR 0027),
   `bundle`. Store: `.meshloop/state.sqlite`.
-- **ADRs:** 0001–0022 accepted. 0023–0029 proposed & implemented/verified.
-- **xtask:** commands for `check`, `bench` (SPEC-ML-BENCH-001 scorecard), `live`, `smoke`, `bundle`, `publish-dry`.
+- **ADRs:** 0001–0022 accepted. 0023, 0025, 0030 accepted. 0024, 0026–0029 proposed & implemented/verified.
+- **xtask:** commands for `check`, `bench` (SPEC-ML-BENCH-001 scorecard), `bench-dag`, `bench-world-s`, `live`, `smoke`, `bundle`, `publish-dry`.
 
 Fixture e2e covers canned plan, `--accept-plan`, empty-diff failure, node
 accept+resume, review-plan accept/decline/adjust, and concurrent multi-worker execution.

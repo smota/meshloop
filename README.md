@@ -34,6 +34,8 @@ Meshloop is designed from first principles around three pillars of engineering v
 - **Sub-Millisecond Symbol Indexing (<500µs):** Fast Walsh-Hadamard Transform (64-dim FWHT) with 1-bit/2-bit quantization achieves **8x memory compression** and sub-500µs symbol search and ranking without external vector databases or neural network dependencies.
 - **Zero-Daemon Lightweight Footprint (<20MB RAM):** Starts on demand and terminates cleanly. No persistent OS background services, no hidden multiplexers, and millisecond cold-start latency.
 - **Bounded Multiplexed Concurrency ($N \in [1, 16]$):** Executes non-dependent tasks across multiple concurrent agent workers simultaneously using a synchronous, non-blocking polling cycle without async runtime (Tokio) bloat.
+- **Iterative DAG Engine & Bounded Scheduling (<25ms P95):** Cycle-safe `petgraph` dependency engine evaluates topological task orderings iteratively without recursion, validated across 7 canonical manifest topologies.
+- **Kernel-Enforced Process-Tree Ownership:** Windows Job Objects (`KILL_ON_JOB_CLOSE`) and POSIX process groups (`setpgid`) eradicate orphaned background compilers or test runners (`conc.orphan_process_count = 0`).
 - **Fast Transaction Persistence:** SQLite WAL engine with `BEGIN IMMEDIATE` and serialized `GitAdminMutex` with exponential backoff prevents `.git/index.lock` contention and guarantees sub-10ms transactional writes.
 
 ### 3. Universal Extensibility & Surface Parity
@@ -200,9 +202,11 @@ flowchart TB
 
 ```bash
 cargo build -p meshloop-cli
-cargo run -p xtask -- check    # Format, clippy -D warnings, workspace tests
-cargo run -p xtask -- bench    # SPEC-ML-BENCH-001 scorecard & metrics
-cargo run -p xtask -- live     # Launch gate: verifies doctor daemonless and worktree isolation
+cargo run -p xtask -- check          # Format, clippy -D warnings, workspace tests
+cargo run --release -p xtask -- bench # SPEC-ML-BENCH-001 scorecard & metrics
+cargo run -p xtask -- bench-dag      # Evaluates 7 canonical manifests against P95 scheduling gate
+cargo run -p xtask -- bench-world-s  # Opt-in polyglot benchmark suite & Wilson 95% CI FPAR
+cargo run -p xtask -- live           # Launch gate: verifies doctor daemonless and worktree isolation
 ```
 
 ---

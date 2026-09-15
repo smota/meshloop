@@ -15,7 +15,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 0.016
+      "value": 0.0015999999999999999
     },
     {
       "name": "ctx.cache.stale_hit_rate_pct",
@@ -39,7 +39,7 @@
       "target_op": "lte",
       "target_value": 500.0,
       "unit": "us",
-      "value": 491.0
+      "value": 104.0
     },
     {
       "name": "quant.recall_at_k",
@@ -55,7 +55,7 @@
       "target_op": "lte",
       "target_value": 10.0,
       "unit": "ms",
-      "value": 1.7386000000000001
+      "value": 1.2145000000000001
     },
     {
       "name": "conc.wal.write_contention_ms",
@@ -63,7 +63,7 @@
       "target_op": "lte",
       "target_value": 15.0,
       "unit": "ms",
-      "value": 1.127218
+      "value": 2.049848
     },
     {
       "name": "conc.git_admin.lock_contention_ms",
@@ -71,7 +71,7 @@
       "target_op": "lte",
       "target_value": 200.0,
       "unit": "ms",
-      "value": 84.8711
+      "value": 159.62019999999998
     },
     {
       "name": "conc.throughput_gain",
@@ -79,7 +79,7 @@
       "target_op": "gte",
       "target_value": 1.0,
       "unit": "x",
-      "value": 1.747008547008547
+      "value": 1.2894409937888198
     },
     {
       "name": "iso.redact.pass_rate_pct",
@@ -135,7 +135,7 @@
       "target_op": "lte",
       "target_value": 25.0,
       "unit": "ms",
-      "value": 0.105
+      "value": 0.006
     },
     {
       "name": "conc.orphan_process_count",
@@ -172,13 +172,13 @@
       "meshloop-domain": "0.1.0",
       "meshloop-engine": "0.1.0"
     },
-    "git_sha": "1c6513b8495d2502614a78519c02d4b22d6896d5",
+    "git_sha": "4b3b4f8cf87cbd51a017cd3384b039e2a84e4465",
     "hostname": "SKYNET-SAM01",
     "os": "windows",
-    "recorded_at": "2026-09-15T23:01:26+02:00",
+    "recorded_at": "2026-09-15T23:08:57+02:00",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
   },
-  "run_id": "6aa9b335-1374-406c-a001-cde830a4bbd5",
+  "run_id": "6aa9b4a5-d514-4f02-a000-0442192735a4",
   "schema_version": "1.0.0",
   "status": {
     "invariants": "pass",

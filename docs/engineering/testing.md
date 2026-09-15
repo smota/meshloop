@@ -12,8 +12,13 @@ rejection, and unprefixed-role rejection. End-to-end CLI tests drive the compile
 binary against `fixture_harness` on disposable git repos (canned plan, `--accept-plan`
 gate, empty-diff failure, accept then resume to Integrated). `cargo run -p xtask -- live`
 verifies daemonless operation (`doctor` reporting `daemonless: true` and `live_transport: direct-cli`)
-and git worktree isolation operational state (launch gate). `cargo run -p xtask -- publish-dry`
-packages all five publishable crates in isolation (ADR 0018); it is not a crates.io upload.
+and git worktree isolation operational state (launch gate). `cargo run --release -p xtask -- bench`
+evaluates the 19 canonical SPEC-ML-BENCH-001 architectural metrics against `benches/thresholds.toml`.
+`cargo run -p xtask -- bench-dag` evaluates 7 canonical DAG manifests against the P95 scheduling overhead
+gate (`orch.schedule.overhead_ms.p95 <= 25.0ms`). `cargo run -p xtask -- bench-world-s` runs the opt-in
+World S benchmark across 8 polyglot exercises with Wilson 95% confidence intervals.
+`cargo run -p xtask -- publish-dry` packages all five publishable crates in isolation (ADR 0018);
+it is not a crates.io upload.
 
 Future critical cases: DAG cycles, dependency failure, concurrency limits, cancellation,
 timeout, fallback exhaustion, recovery, stale evidence, path escape, test tampering,

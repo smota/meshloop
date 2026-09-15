@@ -6,7 +6,7 @@
 | **Title** | Continuous Measurement and Benchmark Framework for Meshloop |
 | **Status** | **Living Specification** |
 | **Version** | `0.1.0` |
-| **Related Decisions** | ADR 0003, ADR 0005, ADR 0007, ADR 0009, ADR 0016, ADR 0017, ADR 0022, ADR 0024, ADR 0025, ADR 0026, ADR 0029 |
+| **Related Decisions** | ADR 0003, ADR 0005, ADR 0007, ADR 0009, ADR 0016, ADR 0017, ADR 0022, ADR 0024, ADR 0025, ADR 0026, ADR 0029, ADR 0030 |
 | **Impacted Crates** | `meshloop-context`, `meshloop-engine`, `meshloop-domain`, `meshloop-adapters`, `xtask` |
 
 ---
@@ -47,6 +47,7 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 ### 3.2 Orchestration Metrics (`orch.*`)
 - `orch.route.accuracy_pct`: Percentage of tasks routed to the policy-dictated model tier.
 - `orch.schedule.overhead_ms`: Scheduler overhead from node readiness to process dispatch.
+- `orch.schedule.overhead_ms.p95`: 95th percentile scheduling overhead across 7 canonical manifests using `HdrHistogram` (**Target: $\le 25.0\text{ms}$**).
 - `orch.cooldown.violation_count`: Invocations attempted against harnesses under active cooldown (**Invariant: 0**).
 - `orch.txn.wal_commit_ms`: RunLoop transaction persistence latency in SQLite WAL.
 
@@ -57,7 +58,8 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 - `iso.gate.obedience_rate_pct`: Adherence to mandatory human approval gates (`review-plan`, `accept`, `integrate`) (**CI Gate: 100%**).
 
 ### 3.4 Developer Cycle Metrics (`dev.*`)
-- `dev.fpar`: *First-Pass Acceptance Rate* — Proportion of tasks accepted without retry loops.
+- `dev.fpar`: *First-Pass Acceptance Rate* — Proportion of tasks accepted on initial attempt without retry loops. Measured in World S with pure Rust analytical Wilson score 95% confidence intervals ($z = 1.95996$):
+  $$w = \frac{\hat{p} + \frac{z^2}{2n} \pm z \sqrt{\frac{\hat{p}(1-\hat{p})}{n} + \frac{z^2}{4n^2}}}{1 + \frac{z^2}{n}}$$
 - `dev.diff_valid_rate`: Percentage of generated patches that compile and apply cleanly.
 - `dev.wall_clock_s`: End-to-end task cycle duration, decomposed by execution phase.
 
@@ -111,6 +113,7 @@ Benchmark runs generate a standardized JSON record in `artifacts/bench/run.json`
     { "name": "quant.search.latency_us", "value": 12.5, "status": "pass" },
     { "name": "quant.recall_at_k", "value": 98.5, "status": "pass" },
     { "name": "slice.build_avoidance_rate", "value": 66.7, "status": "pass" },
+    { "name": "orch.schedule.overhead_ms.p95", "value": 0.054, "status": "pass" },
     { "name": "conc.orphan_process_count", "value": 0, "status": "pass" },
     { "name": "conc.throughput_gain", "value": 1.85, "status": "pass" }
   ],
@@ -122,17 +125,48 @@ Benchmark runs generate a standardized JSON record in `artifacts/bench/run.json`
 }
 ```
 
+### 4.1 Tier B: Parametric Manifest Suite (`benches/manifests/`)
+
+Standardized synthetic DAG workloads validating topological sorting, cycle detection, and scheduling latency across 7 canonical graph structures:
+- `chain.json`: Linear sequential dependencies ($N=4$).
+- `diamond.json`: Classic diamond fan-out / fan-in ($N=4$).
+- `wide-fanout.json`: 1 root spawning 16 parallel tasks ($N=17$).
+- `wide-fanin.json`: 16 parallel tasks converging into 1 terminal sink ($N=17$).
+- `forest.json`: Disconnected subgraphs / disjoint components ($N=8$).
+- `nested-diamond.json`: Multi-stage layered diamonds ($N=10$).
+- `cyclic-negative-control.json`: Negative control containing an intentional cycle.
+
+### 4.2 Tier S: World S Autonomy Benchmark (`benches/world-s/`)
+
+Opt-in polyglot evaluation suite executing real-world agent tasks across 8 curated exercises:
+- `rust-two-fer` (Rust)
+- `rust-clock` (Rust)
+- `ts-bob` (TypeScript)
+- `py-luhn` (Python)
+- `go-hamming` (Go)
+- `cs-nucleotide-count` (C#)
+- `php-gigasecond` (PHP)
+- `cpp-reverse-string` (C++)
+
+Generates `artifacts/bench/world_s.json` reporting task resolution rate and First-Pass Acceptance Rate (FPAR) bounded by Wilson score 95% confidence intervals.
+
 ---
 
 ## 5. Verification Commands
 
 ```bash
-# Execute benchmark suite and generate run.json artifact
-cargo run -p xtask -- bench
+# Execute canonical SPEC-ML-BENCH-001 scorecard against thresholds.toml
+cargo run --release -p xtask -- bench
+
+# Benchmark 7 canonical DAG manifests against P95 scheduling gate
+cargo run -p xtask -- bench-dag
+
+# Run World S opt-in autonomy benchmark suite (8 polyglot exercises)
+cargo run -p xtask -- bench-world-s
 
 # Check workspace formatting, lints, and unit tests
 cargo run -p xtask -- check
 
-# Verify daemonless mode and worktree isolation
+# Verify daemonless mode and worktree isolation launch gate
 cargo run -p xtask -- live
 ```
