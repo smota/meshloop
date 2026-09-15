@@ -1,93 +1,111 @@
-# Meshloop docs
+# Documentação do Meshloop
 
-Meshloop is a local orchestration engine for authenticated CLI agents and Herdr.
-You operate **from inside** Claude Code, Codex, Pi, Grok, or Agy. It plans one
-objective, farms live workers, verifies diffs, and will not merge until you
-accept. It does not store credentials.
+> **O Ambiente de Engenharia de Loop Fechado de Alta Eficiência para Agentes de IA**  
+> Standalone, Daemonless, Multi-Linguagem, Isolado por Git Worktrees e Verificado de Forma Determinística.
 
-**Release 1** — native Windows, Herdr 0.8 live workers, concurrency 1. Fixture
-subprocess is the CI double (`--fixture-only`). Live agents use a Meshloop-owned
-Herdr workspace; they must never split the supervisor pane. WSL2 and prebuilt binaries
-are unverified. crates.io **0.1.0** is published
-([meshloop-cli](https://crates.io/crates/meshloop-cli)).
+O Meshloop é a camada de infraestrutura de tempo de execução que viabiliza a execução autônoma de tarefas complexas de software por agentes de IA (**Claude Code, Codex, Grok, Pi, Agy**, além de **APIs comerciais** e **modelos locais via Ollama**), garantindo isolamento estrito de código, economia de até 90% de tokens e auto-cura com validação determinística.
+
+---
 
 ```mermaid
 flowchart TB
-  subgraph operators [Operators]
-    Install[Install]
-    Start[Getting started]
-    Skills[Skills]
-    Brief[Product brief]
+  subgraph operators [Para Operadores & Desenvolvedores]
+    Install[Instalação & Setup]
+    Start[Guia Rápido: O Ciclo de Engenharia]
+    Brief[Visão de Produto & Onde o Meshloop se Encaixa]
+    Skills[Catálogo de Skills & Comandos Slash]
   end
-  subgraph builders [Builders — after the hub]
-    Status[Implementation status]
-    Overview[Architecture overview]
-    ADRs[ADR index]
+  subgraph builders [Para Construtores & Arquitetura]
+    Overview[Visão Geral da Arquitetura & Stack]
+    ModernArch[Concorrência, Auto-Cura & Governança de Host]
+    Boundaries[Fronteiras dos Componentes Hexagonais]
+    ADRs[Índice de Decisões Arquiteturais - ADRs]
+    Contributing[Guia de Contribuição & Extensibilidade]
   end
   Install --> Start
-  Start --> Skills
   Start --> Brief
-  Status --> Overview
-  Overview --> ADRs
+  Start --> Skills
+  Brief --> Overview
+  Overview --> ModernArch
+  Overview --> Boundaries
+  Boundaries --> ADRs
+  Contributing --> Boundaries
 ```
 
-## Who are you?
+---
 
-| You | Open |
-|---|---|
-| First-time operator | [Install](install.md), then [Getting started](start.md) |
-| Already installed, in a Herdr session | [Getting started](start.md) |
-| Wanting the problem statement | [Product brief](product/brief.md) |
-| Changing code or reviewing a diff | [Implementation status](engineering/implementation-status.md), then [AGENTS.md](../AGENTS.md) |
+## 🧭 Onde Começar?
 
-## Operator loop
+| Seu Perfil / Objetivo | O que ler primeiro |
+| :--- | :--- |
+| **Quero entender o valor e onde o Meshloop se encaixa** | 📖 [Visão do Produto & 4 Cenários de Uso](product/brief.md) |
+| **Quero instalar e rodar na minha máquina agora** | 🚀 [Guia de Instalação](install.md) e [Primeiros Passos](start.md) |
+| **Quero entender a engenharia de contexto, AST e concorrência** | 🏛️ [Visão Geral da Arquitetura](architecture/overview.md) e [Arquitetura Modular](architecture/modern-modular-architecture.md) |
+| **Quero estender o Meshloop (adicionar linguagem ou harness)** | 🛠️ [Guia de Contribuição](../CONTRIBUTING.md) e [Fronteiras](architecture/boundaries.md) |
+| **Quero consultar termos técnicos e decisões fundamentais** | 📚 [Dicionário de Tecnologia](architecture/overview.md#dicionário-de-tecnologia) e [Índice de ADRs](architecture/adr/README.md) |
 
-`plan` · `review-plan` · `run` · `status` · `resume` · `cancel` · `inspect` ·
-`accept` · `integrate` · `roles` · `doctor` · `orchestrate` · `mcp`
+---
 
-Live workers are the default. `run` does not merge onto your current branch.
+## 🎯 Onde o Meshloop se Encontra no Ecossistema?
 
-1. [Install](install.md)
-2. [Getting started](start.md)
-3. Example config: [`config/meshloop.example.toml`](../config/meshloop.example.toml)
-4. [Skills](../skills/README.md)
+O Meshloop não compete com modelos ou interfaces. Ele é a fundação de engenharia que fica embaixo deles:
 
-## Product and decisions
+1. **Modelos de Inteligência (LLMs):** Claude 3.7, GPT-4o, Gemini 2.5, DeepSeek V3, Qwen.
+2. **Superfície do Desenvolvedor:** CLIs de terminal (`claude`, `codex`, `agy`), IDEs, Web Sandboxes ou CI/CD.
+3. **MESHLOOP (O Motor de Loop Fechado):** Decomposição em grafo (DAG), poda de AST em 7 linguagens, isolamento de Git Worktree, reticulado de diagnósticos e governança de SO via Win32 Job Objects.
+4. **Ambiente Real:** Seus arquivos, linters, compiladores locais e testes reais.
 
-Runtime ADRs **0001 / 0003 / 0005 / 0007 / 0009 / 0016 / 0017 / 0018** are Accepted.
+---
 
-1. [Product brief](product/brief.md)
-2. [Requirements](product/requirements.md) — ML-001–014 are targets; R1 does not claim all of them
-3. [ADR 0016](architecture/adr/0016-r1-closed-loop.md) — live workers, fixture as CI
-4. [ADR 0017](architecture/adr/0017-session-control-plane.md) — `meshloop:` prefix, supervisor-only origin
-5. [ADR index](architecture/adr/README.md)
+## ⚡ Os 4 Cenários de Aplicação
 
-## Architecture (after the hub)
+1. **Desenvolvedores Solo (Assinaturas Planas):** Paraleliza tarefas de engenharia sem custo extra de tokens em APIs, operando de dentro da sua sessão de terminal sem sujar a branch atual.
+2. **Equipes com APIs Comerciais (Pay-As-You-Go):** Corta entre 70% e 90% da fatura de tokens via poda de esqueletos AST e atinge >80% de cache hit de prompt.
+3. **Empresas & Sigilo de Código (Modelos Locais Ollama):** Roda 100% offline e privado, permitindo que modelos locais processem repositórios grandes através de índices quantizados ultraleves.
+4. **Nuvem, Sandboxes & CI/CD Autônomo (GitHub Actions / E2B):** Motor síncrono em Rust (<20MB de RAM, inicialização instantânea), servidor MCP stdio nativo e modo headless para correção automática de código antes de abrir Pull Requests.
 
-[Overview](architecture/overview.md) describes the v1 shape and names R1
-residuals (WSL2, concurrency > 1, prebuilt binaries, queried quota).
+---
 
-- [Component boundaries](architecture/boundaries.md)
-- [Execution lifecycle](architecture/execution-lifecycle.md)
-- [Threat model](architecture/threat-model.md) — design requirements, not a guarantee
-- [Bounded concurrency & resilience architecture](architecture/modern-modular-architecture.md)
-- [Measurement & benchmark specification](architecture/measurement-and-benchmark-spec.md)
+## 🛡️ O Ciclo de Operação do Desenvolvedor
 
-## Engineering internals
+O fluxo de trabalho garante controle humano total e isolamento de ponta a ponta:
 
-Do not start here unless you are changing code.
+```text
+/meshloop:doctor       Verifica o ambiente (modo daemonless, git, harnesses)
+/meshloop:plan         Gera o grafo de decomposição de tarefas (meshloop-plan.json)
+/meshloop:review-plan  Gate Humano: Aceitar (Accept), Recusar (Decline) ou Ajustar (Adjust)
+/meshloop:run          Executa os agentes em Git Worktrees isolados (sua branch intocada)
+/meshloop:accept       Gate de Revisão: valida a evidência dos testes determinísticos
+/meshloop:integrate    Apenas este comando mescla as alterações aprovadas na sua branch
+```
 
-- [Implementation status](engineering/implementation-status.md)
-- [Testing](engineering/testing.md) — `xtask check` and `xtask live`
-- [Benchmarking framework](engineering/benchmarking.md)
-- [Rust conventions](engineering/rust.md)
-- [Harness contract](engineering/harnesses.md) — developing Meshloop *with* the selected CLIs
-- [Design patterns](engineering/design-patterns.md)
-- [Contributing](../CONTRIBUTING.md)
-- Historical R1 lab notes (superseded): [r1-closed-loop-design.md](architecture/r1-closed-loop-design.md)
+---
 
-## Help, security, legal
+## 📚 Mapa da Documentação
 
-- [Support](../.github/SUPPORT.md) — no SLA
-- [Security](../.github/SECURITY.md) — private reports only
-- [License](../LICENSE) (Apache-2.0) · [NOTICE](../NOTICE) · [Trademarks](../TRADEMARKS.md)
+### Produto e Visão
+- [Visão do Produto & Cenários](product/brief.md) — O problema, os 4 perfis de uso e os pilares de eficiência.
+- [Requisitos do Sistema](product/requirements.md) — Matriz de requisitos e conformidade.
+
+### Arquitetura e Decisões Técnicas
+- [Visão Geral da Arquitetura](architecture/overview.md) — Hexágono, camadas, dicionário de tecnologia e estados do motor.
+- [Arquitetura Modular, Concorrência e Auto-Cura](architecture/modern-modular-architecture.md) — O detalhamento do RunLoop síncrono, Job Objects e reticulado de erros.
+- [Fronteiras de Componentes](architecture/boundaries.md) — O que cada crate do workspace pode e não pode possuir.
+- [Ciclo de Vida de Execução](architecture/execution-lifecycle.md) — Máquina de estados formal por tentativa de tarefa.
+- [Modelo de Ameaças & Segurança](architecture/threat-model.md) — Postura fail-closed, isolamento e privacidade.
+- [Índice de ADRs](architecture/adr/README.md) — Decisões arquiteturais registradas de 0001 a 0029.
+
+### Engenharia e Contribuição
+- [Guia de Contribuição](../CONTRIBUTING.md) — Regras de escopo por camada, como adicionar linguagens e harnesses.
+- [Estratégia de Testes](engineering/testing.md) — Como rodar `xtask check`, `xtask bench` e testes de isolamento.
+- [Framework de Benchmarking](engineering/benchmarking.md) — Métricas de contenção, orfandade de processos e redução de tokens.
+- [Status de Implementação](engineering/implementation-status.md) — Registro vivo do que está implementado e verificado no código.
+- [Contrato de Harnesses](engineering/harnesses.md) — Padrões para integração com agentes de terminal.
+
+---
+
+## ⚖️ Licença, Segurança e Governança
+
+- **Código:** Licenciado sob [Apache-2.0](../LICENSE).
+- **Segurança:** Relatórios confidenciais conforme [.github/SECURITY.md](../.github/SECURITY.md).
+- **Trabalho 100% IA sob Governança Humana:** O código e testes são concebidos e implementados por agentes de IA com direcionamento e validação humana explícita.

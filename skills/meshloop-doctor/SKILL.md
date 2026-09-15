@@ -1,6 +1,6 @@
 ---
 name: meshloop-doctor
-description: Probe Meshloop + Herdr readiness and origin pane. Slash /meshloop:doctor. Does not split panes.
+description: Probe Meshloop readiness, daemonless state, and origin pane. Slash /meshloop:doctor. Does not split panes.
 ---
 
 # /meshloop:doctor
@@ -11,8 +11,7 @@ meshloop doctor --json
 
 Does **not** split panes.
 
-- If `herdr_server_running` is not true: tell the user Herdr 0.8 is down and
-  **stop**. Do not invent a pane id. Do not plan.
+- Verify `daemonless: true` and `git_available: true`. If not ready, tell the user and stop.
 - Otherwise read `origin_session` and `origin_harness`. If
   `MESHLOOP_ORIGIN_SESSION` is unset, set it from that JSON (and
   `MESHLOOP_ORIGIN_HARNESS` from this session's kind).

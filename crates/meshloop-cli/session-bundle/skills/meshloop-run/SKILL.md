@@ -15,7 +15,7 @@ If the engine says the plan is not accepted, ask `/meshloop:review-plan` — do
 meshloop run --plan <file> --json --origin-harness <h> --origin-session <id>
 ```
 
-A **worker pane must open in the Meshloop Herdr space**, plus a git worktree.
+A **worker executes via direct CLI in an ephemeral git worktree**.
 This origin pane must not implement the work. Current branch stays put.
 
 Do not poll. Read the JSON idle reason; then `/meshloop:status` or

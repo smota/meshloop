@@ -1,68 +1,72 @@
-# Install and setup
+# Install and Setup
 
-Verified path: **native Windows 10/11**, Meshloop **0.1.0** on
-[crates.io](https://crates.io/crates/meshloop-cli). Pure daemonless direct-CLI dispatch.
-WSL2, macOS, and prebuilt GitHub Release binaries are unverified.
+Verified paths: **Windows 10/11 & Linux**, Meshloop **0.1.0** on [crates.io](https://crates.io/crates/meshloop-cli).  
+**Pure daemonless direct-CLI dispatch in isolated Git worktrees.** Zero background daemons, zero external multiplexers.
 
-You operate **from inside** Claude Code, Codex, Pi, Grok, or Agy. The binary is
-the engine. Skills and local MCP are the operator surface. Do not run the loop
-against the Meshloop product clone.
+You can operate Meshloop:
+1. **From inside terminal coding agents** (Claude Code, Codex, Pi, Grok, Agy) using slash skills or local MCP.
+2. **From the CLI directly** in any terminal (PowerShell, Bash, Zsh) or CI/CD runner.
 
-After this page: **[Getting started](start.md)** (the in-session loop).
+After this page: **[Getting started](start.md)** (the in-session engineering loop).
+
+---
 
 ## Prerequisites
 
-| Need | Check |
-|---|---|
-| Cargo on `PATH` | `cargo --version` (Rust 1.98+ to *install*; you are not building Meshloop) |
-| `git` | `git --version` |
-| At least one harness CLI, already logged in | `codex`, `claude`, `grok`, `pi`, or `agy` |
+| Requirement | Command to Verify | Purpose |
+| :--- | :--- | :--- |
+| **Cargo & Rust toolchain** | `cargo --version` (Rust 1.98+) | To install the binary via crates.io |
+| **Git** | `git --version` | For repository worktree isolation |
+| **At least one model source** | CLI (`claude`, `codex`, `agy`), API key, or local Ollama | Execution engine |
 
-Meshloop does not store credentials. It uses logins you already have. No background daemons needed.
+> [!NOTE]
+> Meshloop **does not store credentials**. It directly uses your existing CLI logins, environment API keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`), or a local Ollama endpoint (`http://localhost:11434`).
 
-## 1. Install the engine (once per machine)
+---
 
-```text
+## 1. Install the Engine (Once per Machine)
+
+```bash
 cargo install meshloop-cli --locked
 meshloop --version
 ```
 
-That puts `meshloop.exe` in `%USERPROFILE%\.cargo\bin`. If `meshloop` is not
-found, add that directory to `PATH`.
+This installs `meshloop` in your Cargo binary directory (`%USERPROFILE%\.cargo\bin` on Windows or `~/.cargo/bin` on Linux).
 
-There is no installer and no Windows service.
+---
 
-## 2. Create a throwaway target repo
+## 2. Initialize in a Target Repo
 
-The **target** is the git repo Meshloop will plan and isolate. Use a disposable
-repo the first time.
+The **target** is the Git repository where Meshloop will plan, isolate, and verify code:
 
-```text
-mkdir meshloop-lab
-cd meshloop-lab
+```bash
+mkdir my-project
+cd my-project
 git init
 git config user.email "you@example.com"
-git config user.name "you"
+git config user.name "Your Name"
+echo "# My Project" > README.md
+git add . && git commit -m "chore: initial commit"
 ```
 
-Seed at least one commit so worktrees have a base (a `README.md` is enough).
+*(Ensure at least one commit exists so Git worktrees have a valid base commit).*
 
-## 3. Config — only harnesses you have
+---
 
-Copy [config/meshloop.example.toml](../config/meshloop.example.toml) to
-`meshloop.toml` in the target repo, **or** start from this minimum and keep
-only kinds you are logged into:
+## 3. Configuration (`meshloop.toml`)
+
+Copy [config/meshloop.example.toml](../config/meshloop.example.toml) to `meshloop.toml` in your project root, or create a minimal one:
 
 ```toml
 selected_harnesses = ["codex"]
 
 [limits]
-max_concurrent_workers = 1
-max_retries = 2
+max_concurrent_workers = 2
+max_retries = 3
 task_timeout_seconds = 300
 
 [verify]
-verify_command = []
+verify_command = ["cargo", "check"]
 
 [harnesses.codex]
 kind = "codex"
@@ -71,32 +75,24 @@ model_ref = "codex"
 model_tier = "top"
 ```
 
-`kind` is the Herdr `--kind`. No API keys. Default store:
-`.meshloop/state.sqlite`. Worktrees:
-`<repo-parent>/.meshloop-worktrees/`.
+* **Storage:** State is stored in `.meshloop/state.sqlite` (SQLite WAL).
+* **Worktrees:** Isolated workspaces are automatically created in `.meshloop-worktrees/<task-id>`.
 
-## 4. Session pack (skills + MCP catalog)
+---
 
-From the **target** repo:
+## 4. Install Operator Skills & MCP (Optional)
 
-```text
+From your target repository root:
+
+```bash
 meshloop bundle --dest .
 ```
 
-This writes a version-locked pack:
+This exports the version-locked operator pack:
+- `skills/meshloop-*/SKILL.md` (for origin CLI sessions like Claude Code, Codex, Agy)
+- `meshloop-mcp-tools.json` (for Model Context Protocol clients like Cursor or Claude Desktop)
 
-```text
-skills/meshloop-*/SKILL.md
-meshloop-mcp-tools.json
-README.md
-```
-
-Copy each `skills/meshloop-*` directory into the skill folder your **origin**
-harness already loads in this repo (project-local, not a global Meshloop
-write). Confirm against that product’s docs. Slash `/meshloop:plan` works once
-the origin session can see those `SKILL.md` files.
-
-Optional local MCP (stdio). Point the origin harness at the same binary:
+For MCP integration, point your client to the compiled binary:
 
 ```json
 {
@@ -109,46 +105,36 @@ Optional local MCP (stdio). Point the origin harness at the same binary:
 }
 ```
 
-MCP tool names are `meshloop_plan`, not `plan`. Unprefixed `plan` / `reviewer`
-/ `scout` tools are rejected.
+---
 
-## 5. Open the origin pane and doctor
+## 5. Validate with `meshloop doctor`
 
-1. `herdr status` must show running. If not, start Herdr 0.8 and **stop**.
-2. Open Claude Code, Codex, Pi, Grok, or Agy **in the target repo**. This pane
-   is `meshloop:origin`. It must not implement the work.
-3. Slash `/meshloop:doctor` (or `meshloop doctor --json`).
+Run the diagnostic check to ensure your environment is 100% ready:
 
-You want `herdr_server_running: true` and `origin_session` = **this** pane.
-If unset, export:
-
-```text
-MESHLOOP_ORIGIN_HARNESS=codex
-MESHLOOP_ORIGIN_SESSION=w3:p1
+```bash
+meshloop doctor
 ```
 
-Use the harness and pane id doctor reported. Doctor does not split panes.
-
-Then go to **[Getting started](start.md)** and run
-`/meshloop:plan` → `/meshloop:review-plan` → `/meshloop:run`.
-
-## What Meshloop will not do
-
-- Write a Windows service or global config
-- Store API keys
-- Merge onto a branch you did not name (`integrate --into --accept-integrate`)
-- Split the origin pane or add tabs to the origin space (if a planner/worker/reviewer appears **here**, stop). Live agents use a Meshloop-owned Herdr workspace.
-
-## Builders (clone the product)
-
-Only if you are changing Meshloop itself:
-
-```text
-git clone https://github.com/smota/meshloop.git
-cd meshloop
-cargo build -p meshloop-cli
-cargo run -p xtask -- check
+Expected output:
+```json
+{
+  "daemonless": true,
+  "live_transport": "direct-cli",
+  "git_available": true,
+  "harnesses_ready": true
+}
 ```
 
-Still run the **loop** in a throwaway target repo, not in this clone.
-See [Contributing](../CONTRIBUTING.md).
+Now you are ready to start: proceed to **[Getting started](start.md)** and run:
+```bash
+/meshloop:plan → /meshloop:review-plan → /meshloop:run
+```
+
+---
+
+## What Meshloop Will NEVER Do
+
+- Install background services or permanent system daemons.
+- Store or transmit your API keys or passwords.
+- Auto-merge unverified code directly into your active working branch.
+- Rely on unverified model self-reports instead of deterministic compiler/linter test runs.

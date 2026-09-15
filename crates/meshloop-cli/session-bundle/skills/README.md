@@ -11,7 +11,7 @@ You stay in this pane. Call, in order:
 
 Every live command injects `--origin-harness` / `--origin-session` from
 `MESHLOOP_ORIGIN_*` or doctor JSON so **this pane is not split**. Live workers
-use Herdr. `--fixture-only` is CI.
+execute via direct CLI dispatch in isolated Git worktrees. `--fixture-only` is CI.
 
 Skills wrap `meshloop.exe` only (ML-014). **No saga in SKILL.md.**
 
