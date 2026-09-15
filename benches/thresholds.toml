@@ -1,0 +1,20 @@
+score_version = "1"
+schema_version = "1.0.0"
+
+# Fail-Closed Architectural Invariants (Blocking CI Gate)
+[invariants]
+"iso.worktree.leak_count" = { op = "eq", value = 0 }
+"iso.redact.pass_rate_pct" = { op = "eq", value = 100 }
+"iso.gate.bypass_count" = { op = "eq", value = 0 }
+"iso.crash.recovery_fidelity" = { op = "eq", value = 1.0 }
+"conc.orphan_process_count" = { op = "eq", value = 0 }
+"ctx.cache.stale_hit_rate_pct" = { op = "eq", value = 0 }
+
+# Performance and Efficiency Targets
+[performance.targets]
+"ctx.tokens.reduction_pct" = { op = "gte", value = 65.0 }
+"ctx.parse.latency_ms.p95" = { op = "lte", value = 15.0 }
+"quant.search.latency_us.p95" = { op = "lte", value = 500.0 }
+"quant.index.compression_ratio" = { op = "gte", value = 4.0 }
+"orch.txn.wal_commit_ms.p95" = { op = "lte", value = 10.0 }
+"smoke.wall_clock_s" = { op = "lte", value = 5.0 }

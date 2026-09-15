@@ -1,44 +1,42 @@
-# Product brief — Meshloop
+# Product Brief — Meshloop
 
-> **The State-of-the-Art Closed-Loop Engineering Environment for AI Agents**  
-> Standalone, Daemonless, Multi-Language, and Deterministically Verified.
+Meshloop is a local orchestration runtime for AI coding agents. It provides task decomposition, multi-language AST context reduction, Git worktree process isolation, and compiler-driven verification without background daemons.
 
-Public map: [docs/README.md](../README.md) · Architecture: [architecture/overview.md](../architecture/overview.md) · Install: [Install](../install.md)
+Documentation Hub: [docs/README.md](../README.md) · Architecture: [architecture/overview.md](../architecture/overview.md) · Installation: [Install](../install.md)
 
 ---
 
-## 1. O que é o Meshloop? (Onde ele se Encontra no Stack)
+## 1. Problem Statement & Stack Positioning
 
-Hoje, a indústria possui modelos de linguagem excepcionais (Claude, GPT, Gemini, DeepSeek, Qwen) e interfaces de desenvolvedor ágeis (Claude Code, Codex CLI, Agy, Cursor). No entanto, quando esses agentes são colocados para resolver tarefas de engenharia de software em repositórios reais, eles enfrentam gargalos físicos críticos:
+Modern coding agents (Claude Code, Codex, Agy, Cursor) and language models produce capable code suggestions. However, executing multi-step engineering tasks against real repositories introduces operational challenges:
 
-- **Esgotamento de contexto:** Projetos grandes estouram janelas de tokens ou custam fortunas.
-- **Contaminação de repositório:** Agentes soltos quebram branches ativas e deixam lixo não versionado.
-- **Processos zumbis no host:** Falhas de execução deixam compiladores e servidores rodando em segundo plano.
-- **Alucinação de sucesso:** A IA afirma que "terminou com sucesso", mas o código não compila nem passa nos testes.
+- **Context Window Saturation:** Large repositories quickly exceed token limits or increase API costs when full source files are sent repeatedly.
+- **Working Tree Pollution:** Unconstrained agents can modify active branches, leave unstaged files, or overwrite uncommitted developer changes.
+- **Orphan Background Processes:** Cancelled or interrupted agent runs often leave child compiler or test runner processes running in the background.
+- **Unverified Completion:** Language models may claim a task is complete when code still fails to compile or pass automated test suites.
 
-**O Meshloop não é mais um modelo e não é um simples encadeador de prompts.**  
-O Meshloop é o **Runtime de Engenharia de Loop Fechado (*Closed-Loop Engineering Runtime*)**: a camada de infraestrutura que fornece a física, o isolamento, a eficiência de contexto e a verificação determinística para que qualquer agente produza software seguro.
+Meshloop addresses these issues by acting as a local execution runtime between developer-facing surfaces and host operating system environments:
 
 ```mermaid
 flowchart TB
-  subgraph L1 ["1. Camada de Inteligência / Modelos (LLMs)"]
-    M["Claude 3.7 · GPT-4o · Gemini 2.5 · DeepSeek V3 · Qwen (Ollama)"]
+  subgraph L1 ["1. Intelligence Layer (LLMs)"]
+    M["Claude · GPT · Gemini · DeepSeek · Qwen (Ollama)"]
   end
 
-  subgraph L2 ["2. Camada de Superfície / Interface do Desenvolvedor"]
-    CLI["CLIs Locais (Claude Code, Codex, Agy) · IDEs (Cursor) · Web Sandboxes · CI/CD"]
+  subgraph L2 ["2. Developer Surface"]
+    CLI["CLI Agents (Claude Code, Codex, Agy) · IDEs (Cursor) · Web Sandboxes · CI/CD"]
   end
 
-  subgraph L3 ["3. MESHLOOP: O Runtime de Loop Fechado (Motor em Rust)"]
-    D["1. Decomposição Eficiente (DAG de Tarefas & Tiers)"]
-    C["2. Engenharia de Contexto SOTA (Poda de AST 70-90% + Prompt Cache)"]
-    W["3. Isolamento em Git Worktrees Efêmeros & Win32 Job Objects"]
-    V["4. Verificação Determinística & Auto-Cura (Reticulado Lyapunov phi)"]
+  subgraph L3 ["3. MESHLOOP Runtime (Rust Engine)"]
+    D["1. Task DAG Decomposition & Tier Allocation"]
+    C["2. AST Context Pruning (7 Languages) & Prompt Cache Normalization"]
+    W["3. Ephemeral Git Worktree Isolation & Win32 Job Objects / POSIX PGID"]
+    V["4. Deterministic Verification & Self-Repair (Lyapunov phi Lattice)"]
     D --> C --> W --> V
   end
 
-  subgraph L4 ["4. Ambiente Real do Sistema Operacional"]
-    Host["Seu Repositório Git · Compiladores Locais · Linters · Suítes de Teste"]
+  subgraph L4 ["4. Host Operating System & Workspace"]
+    Host["Your Shared Git Repository · Local Compilers · Linters · Test Suites"]
   end
 
   L1 --> L2
@@ -48,59 +46,57 @@ flowchart TB
 
 ---
 
-## 2. Onde e Como Usar? (4 Cenários e Benefícios Reais)
+## 2. Supported Execution Environments
 
-O Meshloop se adapta de forma transparente ao perfil do seu fluxo de trabalho:
+Meshloop adapts to four primary development environments:
 
-### Cenário A: Desenvolvedor Solo no Desktop (Assinaturas Planas de CLI)
-* **Perfil:** Você já assina ferramentas de terminal como Claude Code, Codex, Agy, Grok ou Pi.
-* **Como o Meshloop ajuda:**
-  * Você não gasta nada a mais em APIs por token.
-  * Você opera direto da sua sessão de terminal (`/meshloop:plan`, `/meshloop:run`).
-  * O Meshloop cria Git Worktrees efêmeros em segundo plano. Sua branch de trabalho continua 100% limpa enquanto os agentes trabalham.
-  * Quando um agente conclui, ele só integra o código na sua branch se passar nos testes locais e após seu aceite explícito (`/meshloop:review-plan` e `accept`).
+### Scenario A: Solo Developer at Terminal (Flat-Rate CLI Subscriptions)
+- **Profile:** Developers with active terminal subscriptions (Claude Code, Codex, Agy, Grok, Pi).
+- **Operation:**
+  - Coordinates installed CLI tools directly without requiring additional API tokens.
+  - Commands run from the active session (`/meshloop:plan`, `/meshloop:run`).
+  - Workers execute in isolated Git worktrees in the background, keeping the active working branch clean.
+  - Changes are merged into your working branch only after deterministic checks pass and explicit human approval (`/meshloop:accept` and `meshloop integrate`).
 
-### Cenário B: Desenvolvedores e Equipes usando APIs Comerciais (Gemini, Anthropic, DeepSeek)
-* **Perfil:** Você consome chaves de API direto no terminal ou em automações de equipe.
-* **Como o Meshloop ajuda:**
-  * **Redução de 70% a 90% na fatura de tokens:** A poda de AST em 7 linguagens (*Rust, TS/JS, Python, Go, C#, PHP, C++*) descarta corpos de funções internas e preserva apenas contratos e tipos essenciais.
-  * **Alinhamento de Prompt Cache (>80% de hit):** Prefixos de prompt determinísticos garantem aproveitamento máximo do cache do provedor.
-  * **Roteamento Híbrido (Tier 1 vs Tier 2):** Despacha a leitura pesada de arquivos para modelos ultrabaratos de contexto longo (ex: Gemini Flash) e reserva modelos de alto raciocínio para a escrita cirúrgica.
+### Scenario B: Teams Using Commercial APIs (Pay-As-You-Go)
+- **Profile:** Teams using API keys (Gemini, Anthropic, DeepSeek, OpenAI).
+- **Operation:**
+  - **70% to 90% Context Token Reduction:** Multi-language AST pruning across 7 languages (*Rust, TS/JS, Python, Go, C#, PHP, C++*) strips function bodies, retaining only type signatures and interfaces.
+  - **Prompt Cache Alignment:** Normalizes static prompt prefixes to maximize provider KV-cache reuse above 80%.
+  - **Tier Routing:** Routes broad context analysis to long-context models and targeted code modifications to high-capability reasoning models.
 
-### Cenário C: Empresas com Sigilo de Código / Ambientes Air-Gapped (Modelos Locais via Ollama)
-* **Perfil:** Código confidencial ou proprietário que não pode sair da rede interna.
-* **Como o Meshloop ajuda:**
-  * Funciona 100% offline com instâncias locais do Ollama (`qwen2.5-coder`).
-  * Como modelos locais possuem memória e contexto limitados, a indexação quantizada em memória (FWHT) e a poda sintática permitem que o modelo local compreenda o repositório sem engasgar.
-  * Zero vazamento de dados ou telemetria.
+### Scenario C: Offline & Air-Gapped Systems (Local Models via Ollama)
+- **Profile:** Proprietary or regulated codebases that cannot transmit data outside local infrastructure.
+- **Operation:**
+  - Runs fully offline using local Ollama instances (e.g., `qwen2.5-coder`).
+  - Fast Walsh-Hadamard Transform (FWHT) quantized indexing and AST skeleton pruning enable local models with smaller context windows to navigate large repositories.
+  - Zero external telemetry or network data transmission.
 
-### Cenário D: Plataformas Web, Agentes em Nuvem e CI/CD (E2B, Modal, GitHub Actions)
-* **Perfil:** Plataformas autônomas de software na nuvem (estilo Devin/Bolt) ou pipelines de manutenção contínua de código.
-* **Como o Meshloop ajuda:**
-  * Binário único em Rust, ultraleve (<20MB de RAM, inicialização em milissegundos).
-  * Servidor MCP stdio integrado ([`meshloop mcp`](../architecture/adr/0027-mcp-modular-server.md)) e suporte a containers Docker (`--features docker`).
-  * Execução *headless* em pipelines de CI (`meshloop plan --accept-plan && meshloop run --accept-integrate`). Se um teste falhar, o motor ativa a auto-cura interna e só abre o PR com código validado.
-
----
-
-## 3. Os 4 Pilares da Eficiência do Loop
-
-O diferencial do Meshloop reside na sua eficiência mecânica:
-
-1. **Eficiência de Decomposição:**  
-   Planejamento estruturado em grafo acíclico dirigido (DAG). Tarefas são fatiadas em escopos atômicos com tiers de complexidade, evitando tarefas genéricas ou alucinações de escopo.
-2. **Eficiência de Contexto:**  
-   Poda de AST agnóstica em 7 linguagens, normalização de prompt cache e indexação quantizada de assinaturas via Walsh-Hadamard (FWHT) para busca de símbolos em sub-milissegundo sem FFI inseguro.
-3. **Eficiência de Ambiente e Host:**  
-   Isolamento estrito em Git Worktrees (`.meshloop-worktrees/<task-id>`). O `GitAdminMutex` com *backoff* exponencial previne conflitos de trava de arquivos no Windows (`.git/index.lock`), e os Win32 Job Objects erradicam qualquer processo zumbi (`conc.orphan_process_count = 0`).
-4. **Eficiência de Verificação e Auto-Cura:**  
-   O `CheckRunner` roda linters, compiladores e testes determinísticos da sua própria máquina. Se houver falha sintática ou lógica, o reticulado de diagnósticos confere se a energia de erro ($\phi$) está decrescendo. Se convergir, o agente corrige o código em até 3 rodadas; se regredir, o Meshloop reverte as alterações via `git reset --hard` instantaneamente.
+### Scenario D: Cloud Sandboxes, Web Platforms & CI/CD Pipelines
+- **Profile:** Autonomous agent platforms or continuous integration validation runners (GitHub Actions, Modal, E2B).
+- **Operation:**
+  - Standalone Rust binary (<20MB RAM, fast startup).
+  - Integrated stdio Model Context Protocol server ([`meshloop mcp`](../architecture/adr/0027-mcp-modular-server.md)) and optional container support.
+  - Headless execution mode (`meshloop plan --accept-plan && meshloop run`). Automated self-repair attempts resolution before reporting final test status.
 
 ---
 
-## 4. Garantias Inegociáveis de Segurança
+## 3. Core Mechanisms
 
-- **Zero Daemons em Background:** Sem serviços residentes no Windows, sem sockets ocultos. O Meshloop roda quando você manda e encerra quando conclui.
-- **Zero Vazamento de Credenciais:** O Meshloop não armazena nem gerencia senhas ou chaves em banco local. Ele herda a autenticação do seu ambiente.
-- **Sua Branch é Sagrada:** Nenhum agente escreve diretamente na sua branch ativa. A integração final para sua branch depende de aceite humano.
-- **Determinismo Real:** A palavra da IA nunca é aceita como verdade. O único juiz de sucesso é o código de saída zero dos seus testes reais.
+1. **DAG Decomposition:**  
+   Plans are decomposed into a Directed Acyclic Graph (DAG) with explicit dependency tiers, isolating changes into bounded units of work.
+2. **Context Optimization:**  
+   AST skeleton extraction across 7 languages, prompt cache prefix normalization, and quantized signature indexing enable fast symbol discovery.
+3. **Workspace Isolation:**  
+   Every attempt executes inside an ephemeral Git worktree (`.meshloop-worktrees/<task-id>`). A serialized `GitAdminMutex` prevents `.git/index.lock` contention, and Win32 Job Objects prevent orphan processes.
+4. **Deterministic Verification & Self-Repair:**  
+   Local compilers and test suites drive task evaluation through `CheckRunner`. If checks fail, a diagnostic lattice evaluates error energy ($\phi$): if error energy decreases, the agent continues repair; if regression occurs, changes are rolled back via `git reset --hard`.
+
+---
+
+## 4. Safety Invariants
+
+- **No Daemons:** Runs on demand and exits cleanly without lingering background services.
+- **No Stored Credentials:** Inherits authentication from the environment or local CLI tools; never stores keys or tokens in local databases.
+- **Working Tree Integrity:** The active branch is never modified by worker agents; only explicit integration (`meshloop integrate --into`) updates the branch.
+- **Deterministic Validation:** Compiler and test exit codes determine success, not model self-reports.

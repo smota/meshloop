@@ -1,141 +1,108 @@
-# Getting started
+# Getting Started
 
-Install and first-time setup: **[Install](install.md)**
-(`cargo install meshloop-cli --locked`, then `meshloop bundle`).
+Install and first-time setup: **[Install and Setup](install.md)** (`cargo install meshloop-cli --locked`, then `meshloop bundle`).
 
-**This session stays.** You are in Claude Code, Codex, Pi, Grok, or Agy. You are `meshloop:origin`.
-Meshloop executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees
-(`.meshloop-worktrees/<task-id>`), with multi-language AST context optimization (7 languages)
-and deterministic prompt caching. No background daemons or multiplexer servers are required.
+You operate Meshloop directly from your existing terminal agent (Claude Code, Codex, Pi, Grok, Agy) as `meshloop:origin`. Meshloop executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`), with multi-language AST context reduction and deterministic prompt caching. No background daemons or multiplexer servers are required.
 
-The origin agent asks **Accept / Decline / Adjust in English**. You may answer
-in Portuguese (`aceitar` / `recusar` / `ajustar`). You should not have to type
-flags.
+---
 
-**Run the loop in the throwaway target repo**, not in the Meshloop product
-clone. WSL2 and prebuilt GitHub Release binaries: unverified. Concurrency is
-1. Fixture = [CI appendix](#ci-appendix-fixture-double).
+## Operator Surface Reference
 
-## What you should see
+Meshloop operations can be triggered through terminal slash commands, MCP tools, or direct CLI verbs:
 
-| State | What you should see | What you do |
+| Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
+| :--- | :--- | :--- | :--- | :--- |
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
+| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
+| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
+| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
+| `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
+| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. |
+| `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
+| `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Merges verified worktree changes into the target branch. |
+| `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agents. |
+| `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
+| `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
+| `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
+
+---
+
+## The Engineering Loop
+
+The standard workflow runs in a target Git repository:
+
+| State | What you see | Action |
 |---|---|---|
-| Ready | `daemonless: true`, `live_transport: direct-cli`, harnesses verified | `/meshloop:plan` |
-| Plan in flight | Planner running; outputs `meshloop-plan.json` | Stay. Wait for the 3-way question |
-| Accept | No worker yet. Status `PlanAccepted` | `/meshloop:run` |
-| Decline | Status `PlanDeclined`. No worker. `run` refuses | Stop, or Adjust — never `run --accept-plan` |
-| Adjust | Planner runs **again**; still awaiting review; question repeats | Answer again |
-| Run | **Worker** running in isolated git worktree; **this branch unchanged** | Stay. `/meshloop:accept` then `/meshloop:resume` |
-| FailedTerminal | Same accepted plan, nothing Ready | `meshloop resume --restart` (not a new `graph_id`) |
+| **Ready** | `daemonless: true`, `live_transport: direct-cli`, harnesses verified | `/meshloop:doctor` then `/meshloop:plan` |
+| **Plan in flight** | Planner executes; writes `meshloop-plan.json` | Review the generated task graph |
+| **Review Plan** | Interactive 3-way decision prompt | `/meshloop:review-plan` — choose **Accept**, **Decline**, or **Adjust** |
+| **Accept** | Plan accepted (`PlanAccepted`); no workers spawned yet | `/meshloop:run` |
+| **Decline** | Plan declined (`PlanDeclined`); execution refused | `/meshloop:review-plan --adjust` to revise |
+| **Adjust** | Planner re-executes with feedback; graph regenerated | Repeat review |
+| **Run** | Worker executes in isolated worktree; main branch untouched | `/meshloop:accept` then `/meshloop:resume` |
+| **Integrate** | All tasks verified and accepted | `meshloop integrate --into <branch> --accept-integrate` |
 
-`resume` merges into the **integrate worktree**. Only
-`meshloop integrate --into --accept-integrate` lands on a branch you name.
+---
 
-## 0. Already installed?
+## Step-by-Step Walkthrough
 
-From [Install](install.md) you should have: `meshloop` on `PATH`, a throwaway
-git **target** repo with `meshloop.toml`, the session pack (`meshloop bundle`),
-and this session opened **in that target repo**.
+### 0. Verification Before Starting
+From [Install and Setup](install.md), ensure `meshloop` is on `PATH`, your project has `meshloop.toml`, and you exported the skills with `meshloop bundle --dest .`:
 
-```text
+```bash
 meshloop --version
-meshloop doctor --json
+meshloop doctor
 ```
 
-Default store: `.meshloop/state.sqlite`. Worktrees:
-`<repo-parent>/.meshloop-worktrees/`. No credentials in config. No Windows
-service. Every `/meshloop:*` runs in the target repo.
-
-## 1. Doctor — verify environment
-
-Slash: `/meshloop:doctor`.
-
-You want `daemonless: true` and `live_transport: "direct-cli"`. If doctor fails,
-fix your local CLI harness paths before proceeding.
-
+### 1. Doctor — Verify Environment
 ```text
-MESHLOOP_ORIGIN_HARNESS=codex
+/meshloop:doctor
+```
+Ensures `daemonless: true` and `live_transport: "direct-cli"`. If doctor fails, check CLI harness paths in `meshloop.toml`.
+
+### 2. Plan — Decompose Objective into Task Graph
+```text
+/meshloop:plan
+```
+Generates a Directed Acyclic Graph (DAG) of tasks written to `meshloop-plan.json`. No code is modified and no workers are dispatched at this stage.
+
+### 3. Review Plan — Human Gate
+```text
+/meshloop:review-plan
+```
+Prompts for approval before execution:
+- **Accept** (`--accept`): Advances plan to `PlanAccepted`. Ready for `/meshloop:run`.
+- **Decline** (`--decline`): Transitions plan to `PlanDeclined`. Workers refuse to run.
+- **Adjust** (`--adjust`): Re-invokes planner with feedback to regenerate `meshloop-plan.json`.
+
+*(Supports Portuguese input aliases: `aceitar` -> Accept, `recusar` -> Decline, `ajustar` -> Adjust).*
+
+### 4. Run — Worker Execution in Isolated Worktrees
+```text
+/meshloop:run
+```
+Dispatches worker agents in dedicated Git worktrees (`.meshloop-worktrees/<task-id>`). Your working branch is never modified during worker execution.
+
+When a task completes, verify compiler and test evidence:
+```bash
+meshloop accept --task 1 --as your-name
+meshloop resume
 ```
 
-## 2. Plan
-
-Stay supervisor. Intent can be conversation text or a `.md` (`--intent-file`).
-
-Slash: `/meshloop:plan`. A **planner** pane appears in the Meshloop space, not
-this pane. Meshloop checks
-the graph is a DAG, not whether the breakdown is wise. Nothing is scheduled.
-
-## 3. Review-plan — wait for their answer
-
-Slash: `/meshloop:review-plan`. Ask once, in English:
-
-> **Accept** this graph (then we can run), **Decline** it (stop, no worker), or
-> **Adjust** (planner runs again).
-
-Wait. Then send **exactly one** flag. Do not show CLI before they choose.
-
-| Reply | Stored | Next |
-|---|---|---|
-| Accept / aceitar | `PlanAccepted` | `/meshloop:run` |
-| Decline / recusar | `PlanDeclined` | `run` refuses until a later Accept |
-| Adjust / ajustar | still `AwaitingPlanReview` | planner again; ask again |
-
-CLI shortcut (debug, not the skill default): `meshloop run --plan … --accept-plan`.
-
-## 4. Run
-
-Only after Accept. Slash: `/meshloop:run`.
-
-A **worker** pane + attempt worktree. Your current branch does not move.
-Verification is the git diff against the attempt base.
-
-```text
-# node gate — not the plan gate
-/meshloop:accept   →  meshloop accept --task 1 --as sam
-/meshloop:resume
+### 5. Integrate — Land Changes on Target Branch
+Only explicit integration merges verified commits into your active branch:
+```bash
+meshloop integrate --graph <id> --into main --accept-integrate
 ```
+Without `--accept-integrate`, integration is refused.
 
-`you` is not a magic identity.
+---
 
-## 5. Optional reviewers, then land
+## CI / Fixture Mode (Offline Testing)
 
-`/meshloop:orchestrate` — two `meshloop:reviewer` panes in the Meshloop space,
-never origin. Synthesis is advisory. Node accept is still required.
-
-```text
-meshloop integrate --graph <id> --into <ref> --accept-integrate
-```
-
-Without `--accept-integrate`, refuse. Leftovers: `.meshloop/` and
-`.meshloop-worktrees/`.
-
-<details>
-<summary>Raw engine CLI (debug)</summary>
-
-Skills inject `--json --origin-harness --origin-session`. Typed by hand:
-
-```text
-meshloop doctor --json
-meshloop plan --objective "<intent>" --json --origin-harness <this> --origin-session <id> --config meshloop.toml
-meshloop review-plan --plan meshloop-plan.json --accept --as sam --json
-meshloop run --plan meshloop-plan.json --json --config meshloop.toml
-```
-
-</details>
-
-## CI appendix (fixture double)
-
-Offline `xtask check` uses a dummy worker, not Claude or Codex:
-
-```text
+For CI pipelines or automated testing without live CLI agents:
+```bash
 cargo build -p meshloop-adapters --bin fixture_harness
 meshloop plan --objective "Add a hello.txt file" --config config/meshloop.fixture.toml
 meshloop run --plan meshloop-plan.json --accept-plan --config config/meshloop.fixture.toml --fixture-only
 ```
-
-## Next
-
-- [Install](install.md)
-- [Docs hub](README.md)
-- [Product brief](product/brief.md)
-- [Skills](../skills/README.md)

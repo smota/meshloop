@@ -1,61 +1,82 @@
-# Install and Setup
+# Installation and Setup
 
-Verified paths: **Windows 10/11 & Linux**, Meshloop **0.1.0** on [crates.io](https://crates.io/crates/meshloop-cli).  
-**Pure daemonless direct-CLI dispatch in isolated Git worktrees.** Zero background daemons, zero external multiplexers.
+Meshloop operates as a standalone Rust binary on **native Windows 10/11 and Linux**. It requires zero background daemons, zero external multiplexers, and stores no credentials.
 
-You can operate Meshloop:
-1. **From inside terminal coding agents** (Claude Code, Codex, Pi, Grok, Agy) using slash skills or local MCP.
-2. **From the CLI directly** in any terminal (PowerShell, Bash, Zsh) or CI/CD runner.
+---
 
-After this page: **[Getting started](start.md)** (the in-session engineering loop).
+## Quick Reference: Operator Surface & Command Mapping
+
+Once installed, Meshloop operations can be triggered via terminal slash commands, MCP tools, or direct CLI verbs:
+
+| Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
+| :--- | :--- | :--- | :--- | :--- |
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
+| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
+| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
+| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
+| `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
+| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. |
+| `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
+| `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Merges verified worktree changes into the target branch. |
+| `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agents. |
+| `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
+| `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
+| `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
 
 ---
 
 ## Prerequisites
 
-| Requirement | Command to Verify | Purpose |
+| Requirement | Verification Command | Purpose |
 | :--- | :--- | :--- |
-| **Cargo & Rust toolchain** | `cargo --version` (Rust 1.98+) | To install the binary via crates.io |
-| **Git** | `git --version` | For repository worktree isolation |
-| **At least one model source** | CLI (`claude`, `codex`, `agy`), API key, or local Ollama | Execution engine |
+| **Cargo & Rust Toolchain** | `cargo --version` (Rust 1.98+) | Installs and compiles the binary |
+| **Git** | `git --version` | Manages isolated worktrees and diff verification |
+| **At least one agent harness or model** | CLI (`claude`, `codex`, `agy`), API keys, or local Ollama | Task executor |
 
 > [!NOTE]
-> Meshloop **does not store credentials**. It directly uses your existing CLI logins, environment API keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`), or a local Ollama endpoint (`http://localhost:11434`).
+> Meshloop **does not store credentials**. It directly uses existing CLI logins, environment variables (e.g., `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`), or local endpoints (e.g., Ollama at `http://localhost:11434`).
 
 ---
 
-## 1. Install the Engine (Once per Machine)
+## Step 1: Install the Meshloop Engine (Machine-wide)
+
+Install the compiled binary from crates.io:
 
 ```bash
 cargo install meshloop-cli --locked
+```
+
+Verify that the executable is accessible in your `PATH`:
+
+```bash
 meshloop --version
 ```
 
-This installs `meshloop` in your Cargo binary directory (`%USERPROFILE%\.cargo\bin` on Windows or `~/.cargo/bin` on Linux).
+On Windows, the binary is placed in `%USERPROFILE%\.cargo\bin\meshloop.exe`.  
+On Linux/macOS, it is placed in `~/.cargo/bin/meshloop`.
 
 ---
 
-## 2. Initialize in a Target Repo
+## Step 2: Initialize in Your Project Repository
 
-The **target** is the Git repository where Meshloop will plan, isolate, and verify code:
+The **target repository** is the Git repository where Meshloop will execute and verify tasks:
 
 ```bash
-mkdir my-project
-cd my-project
+cd /path/to/your/project
+```
+
+Ensure the repository is a Git repo with at least one commit so that worktrees have a valid base commit:
+
+```bash
 git init
-git config user.email "you@example.com"
-git config user.name "Your Name"
-echo "# My Project" > README.md
 git add . && git commit -m "chore: initial commit"
 ```
 
-*(Ensure at least one commit exists so Git worktrees have a valid base commit).*
-
 ---
 
-## 3. Configuration (`meshloop.toml`)
+## Step 3: Configure `meshloop.toml`
 
-Copy [config/meshloop.example.toml](../config/meshloop.example.toml) to `meshloop.toml` in your project root, or create a minimal one:
+Create a `meshloop.toml` file in your repository root, or copy from [`config/meshloop.example.toml`](../config/meshloop.example.toml):
 
 ```toml
 selected_harnesses = ["codex"]
@@ -75,24 +96,28 @@ model_ref = "codex"
 model_tier = "top"
 ```
 
-* **Storage:** State is stored in `.meshloop/state.sqlite` (SQLite WAL).
-* **Worktrees:** Isolated workspaces are automatically created in `.meshloop-worktrees/<task-id>`.
+- **Database:** Local execution state is stored in `.meshloop/state.sqlite` (SQLite WAL mode).
+- **Workspaces:** Isolated task executions occur in `.meshloop-worktrees/<task-id>`.
 
 ---
 
-## 4. Install Operator Skills & MCP (Optional)
+## Step 4: Export Operator Skills & MCP Catalog
 
-From your target repository root:
+From your target repository root, run the bundled packager:
 
 ```bash
 meshloop bundle --dest .
 ```
 
-This exports the version-locked operator pack:
-- `skills/meshloop-*/SKILL.md` (for origin CLI sessions like Claude Code, Codex, Agy)
-- `meshloop-mcp-tools.json` (for Model Context Protocol clients like Cursor or Claude Desktop)
+This generates:
+- `skills/meshloop-*/SKILL.md`: Skill definitions for CLI agent sessions (Claude Code, Codex, Agy, Pi, Grok).
+- `meshloop-mcp-tools.json`: Tool catalog for Model Context Protocol clients.
 
-For MCP integration, point your client to the compiled binary:
+---
+
+## Step 5: Configure MCP Client (Cursor, Claude Desktop, etc.)
+
+To use Meshloop tools inside an MCP-compliant IDE or client, add `meshloop mcp` to your MCP configuration file:
 
 ```json
 {
@@ -105,11 +130,13 @@ For MCP integration, point your client to the compiled binary:
 }
 ```
 
+The MCP server runs over standard I/O (`stdio`), connects to the local `meshloop` CLI, and shuts down cleanly when the client closes the session.
+
 ---
 
-## 5. Validate with `meshloop doctor`
+## Step 6: Verify Environment with `meshloop doctor`
 
-Run the diagnostic check to ensure your environment is 100% ready:
+Run the diagnostic check:
 
 ```bash
 meshloop doctor
@@ -125,16 +152,16 @@ Expected output:
 }
 ```
 
-Now you are ready to start: proceed to **[Getting started](start.md)** and run:
-```bash
+When `doctor` passes, proceed to the **[Getting Started Guide](start.md)** to run the planning and execution loop:
+```text
 /meshloop:plan → /meshloop:review-plan → /meshloop:run
 ```
 
 ---
 
-## What Meshloop Will NEVER Do
+## System Invariants
 
-- Install background services or permanent system daemons.
-- Store or transmit your API keys or passwords.
-- Auto-merge unverified code directly into your active working branch.
-- Rely on unverified model self-reports instead of deterministic compiler/linter test runs.
+- **No background daemons:** Meshloop executes on demand and exits cleanly.
+- **No credential persistence:** No tokens or secrets are written to disk.
+- **Fail-closed isolation:** Worker attempts run in isolated Git worktrees. Your working branch remains untouched until explicit integration (`meshloop integrate --into`).
+- **Deterministic verification:** Compiler and linter exit codes govern acceptance.

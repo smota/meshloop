@@ -2,29 +2,54 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "metrics": [
     {
+      "name": "ctx.tokens.reduction_pct",
+      "status": "pass",
+      "value": 67.67397666848525
+    },
+    {
+      "name": "ctx.parse.latency_ms",
+      "status": "pass",
+      "value": 0.009685714285714285
+    },
+    {
+      "name": "quant.index.compression_ratio",
+      "status": "pass",
+      "value": 4.6125
+    },
+    {
+      "name": "quant.search.latency_us",
+      "status": "pass",
+      "value": 217.967
+    },
+    {
+      "name": "quant.recall_at_k",
+      "status": "pass",
+      "value": 100.0
+    },
+    {
+      "name": "orch.txn.wal_commit_ms",
+      "status": "pass",
+      "value": 1.066206
+    },
+    {
+      "name": "iso.redact.pass_rate_pct",
+      "status": "pass",
+      "value": 100.0
+    },
+    {
+      "name": "iso.worktree.leak_count",
+      "status": "pass",
+      "value": 0
+    },
+    {
       "name": "conv.lattice.reduction_rate",
       "status": "pass",
-      "value": 1.5
+      "value": 1.0
     },
     {
       "name": "conv.self_repair.success_rate",
       "status": "pass",
       "value": 100.0
-    },
-    {
-      "name": "quant.index.compression_ratio",
-      "status": "pass",
-      "value": 8.85
-    },
-    {
-      "name": "quant.search.latency_us",
-      "status": "pass",
-      "value": 137.005
-    },
-    {
-      "name": "quant.recall_at_k",
-      "status": "pass",
-      "value": 98.5
     },
     {
       "name": "slice.build_avoidance_rate",
@@ -35,11 +60,6 @@
       "name": "conc.orphan_process_count",
       "status": "pass",
       "value": 0
-    },
-    {
-      "name": "conc.throughput_gain",
-      "status": "pass",
-      "value": 1.85
     }
   ],
   "schema_version": "1.0.0",
