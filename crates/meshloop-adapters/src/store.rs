@@ -287,6 +287,7 @@ fn parse_event(s: &str) -> Result<Event, StoreError> {
         "RetryAuthorized" => Ok(Event::RetryAuthorized),
         "LiveWorkerSettled" => Ok(Event::LiveWorkerSettled),
         "DependencyCleared" => Ok(Event::DependencyCleared),
+        "GraphMutated" => Ok(Event::GraphMutated),
         other => Err(StoreError::Corrupt(format!("unknown event {other}"))),
     }
 }

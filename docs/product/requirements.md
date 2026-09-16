@@ -27,5 +27,8 @@ Public map: [docs/README.md](../README.md). R1 is a named subset — see
   in the binary); any convenience wrapper (skill or otherwise) must add zero engine-side
   logic or dependency. R1 operator UX is those wrappers (`meshloop:` skills + local MCP),
   per ADR 0001.
+- ML-015: Support dynamic upstream task graph mutation and replanning for pending nodes,
+  preserving DAG acyclicity, active-state immutability, deterministic event sourcing, and
+  operator review gating (ADR 0028).
 
 Each implementation task must add concrete scenarios and link applicable ADRs before coding.

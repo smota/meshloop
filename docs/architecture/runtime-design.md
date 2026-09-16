@@ -315,3 +315,41 @@ neighbors.
 (`c = 0.7`). Cooldown remains a hard filter (the arm is not pullable). Missing headroom
 is 0, never 1. Historical success remains a separate signal so adding this one does not
 retune exploitation.
+
+## 7. Dynamic graph mutation and replanning (ADR 0028)
+
+**Graph mutation primitive.** Multi-agent loops can encounter unforeseen prerequisites
+during task execution. Rather than aborting and re-planning from scratch, `RunLoop::mutate_plan`
+applies atomic graph mutations (`GraphMutation`, serialized with `#[serde(tag = "type", rename_all = "snake_case")]`):
+
+- `InsertPrerequisite { target_task, new_tasks }`: New sub-graph tasks are inserted. Terminal nodes
+  of `new_tasks` (nodes without dependents inside `new_tasks`) are rewired into `target_task.depends_on`.
+  Existing dependencies of `target_task` are strictly preserved.
+- `AppendFollowup { source_task, new_tasks }`: `source_task` is appended as a dependency to the root
+  nodes of `new_tasks` (nodes with empty `depends_on`).
+
+**DAG invariants & validation.** Every mutation is checked via petgraph before committing:
+- Rejects cycles (`petgraph::algo::is_cyclic_directed`).
+- Rejects dangling dependencies (all referenced IDs must exist in the resulting graph).
+- Rejects duplicate IDs and reserved task ID 0.
+- On failure, the mutation rolls back atomically to the prior graph state.
+
+**Active-state immutability.** A target task cannot have prerequisites inserted if it has already
+entered execution (`Running`, `Verifying`, `AwaitingReview`, `Accepted`, `Integrated`).
+Attempting to mutate an active task yields `OrchestratorError::Illegal`.
+
+**Readiness reversal.** Prepending prerequisites to a `Ready` task transitions it back to `Pending`
+via domain event `Event::GraphMutated`:
+- `(Ready, GraphMutated) => Pending`
+- `(Pending, GraphMutated) => Pending`
+- `(Blocked, GraphMutated) => Blocked`
+
+**Persistence & replay.**
+- Mutated graph tiers are recomputed via `assign_tiers`.
+- Updated plan JSON and SHA-256 are persisted in SQLite `runs` table and `.meshloop/plan.json`.
+- `Event::GraphMutated` transition is appended to SQLite event log.
+- `replay_tasks` cleanly folds `Event::GraphMutated` and dynamic task rows during crash recovery.
+
+**Operator governance.** If invoked with `--require-review`, `RunLoop::mutate_plan` transitions the
+run to `PlanState::AwaitingPlanReview`. `meshloop resume` is refused until the operator accepts the
+modified plan via `meshloop review-plan --plan .meshloop/plan.json --accept --as <identity>`.

@@ -867,3 +867,351 @@ fn run_concurrent_workers_executes_parallel_tasks() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
+    let dir = disposable_repo("mutate_insert");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g_mutate_prereq","nodes":[{"id":1,"description":"initial root","depends_on":[],"tier":null},{"id":2,"description":"downstream task","depends_on":[1],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    // 1. Run initial plan with auto-accept
+    let run_out = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run initial plan");
+    assert!(
+        run_out.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+
+    // 2. Accept task 1 (task 2 is still pending downstream)
+    let accept1 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "1", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 1");
+    assert!(
+        accept1.status.success(),
+        "accept 1: {}",
+        String::from_utf8_lossy(&accept1.stderr)
+    );
+
+    // 3. Mutate plan before resume: inject task 3 as prerequisite to task 2
+    let mutation_file = dir.join("mutation.json");
+    fs::write(
+        &mutation_file,
+        r#"{"type":"insert_prerequisite","target_task_id":2,"new_tasks":[{"id":3,"description":"injected prerequisite","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let mutate_out = meshloop()
+        .current_dir(&dir)
+        .args([
+            "mutate-plan",
+            "--graph",
+            "g_mutate_prereq",
+            "--mutation-file",
+        ])
+        .arg(&mutation_file)
+        .args(["--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("mutate-plan");
+    let mutate_str = String::from_utf8_lossy(&mutate_out.stdout);
+    assert!(
+        mutate_out.status.success(),
+        "mutate-plan failed: stdout: {mutate_str}\nstderr: {}",
+        String::from_utf8_lossy(&mutate_out.stderr)
+    );
+    assert!(
+        mutate_str.contains("3 nodes"),
+        "expected 3 nodes, got: {mutate_str}"
+    );
+
+    // 4. Resume 1: integrates task 1, sees task 2 blocked on task 3, and runs task 3
+    let resume1 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 1");
+    let r1_out = String::from_utf8_lossy(&resume1.stdout);
+    assert!(resume1.status.success(), "resume 1 failed: {r1_out}");
+    assert!(
+        r1_out.contains("AwaitingReview") || r1_out.contains("await `meshloop accept`"),
+        "expected pause for task 3 review, got: {r1_out}"
+    );
+
+    // 5. Accept task 3
+    let accept3 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "3", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 3");
+    assert!(
+        accept3.status.success(),
+        "accept 3: {}",
+        String::from_utf8_lossy(&accept3.stderr)
+    );
+
+    // 6. Resume 2: integrates task 3, then task 2 (now unblocked) runs and pauses at AwaitingReview
+    let resume2 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 2");
+    let r2_out = String::from_utf8_lossy(&resume2.stdout);
+    assert!(resume2.status.success(), "resume 2 failed: {r2_out}");
+    assert!(
+        r2_out.contains("AwaitingReview") || r2_out.contains("await `meshloop accept`"),
+        "expected pause for task 2 review, got: {r2_out}"
+    );
+
+    // 7. Accept task 2
+    let accept2 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "2", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 2");
+    assert!(
+        accept2.status.success(),
+        "accept 2: {}",
+        String::from_utf8_lossy(&accept2.stderr)
+    );
+
+    // 8. Final resume: completes all tasks
+    let resume4 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 4");
+    let r4_out = String::from_utf8_lossy(&resume4.stdout);
+    assert!(resume4.status.success(), "resume 4 failed: {r4_out}");
+    assert!(
+        r4_out.contains("Integrated") || r4_out.contains("complete"),
+        "expected all tasks integrated, got: {r4_out}"
+    );
+
+    // 9. Verify status shows all 3 tasks
+    let status_out = meshloop()
+        .current_dir(&dir)
+        .args(["status", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("status");
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        status_str.contains("injected prerequisite")
+            || status_str.contains("task_id: 3")
+            || status_str.contains("3")
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn mutate_plan_with_require_review_gates_resume() {
+    let dir = disposable_repo("mutate_review");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g_mutate_rev","nodes":[{"id":1,"description":"root node","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    // 1. Run and accept task 1
+    let run_out = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run initial");
+    assert!(run_out.status.success());
+
+    let accept1 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "1", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 1");
+    assert!(accept1.status.success());
+
+    let resume1 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 1");
+    assert!(resume1.status.success());
+
+    // 2. Mutate with --require-review
+    let mutation_file = dir.join("mutation.json");
+    fs::write(
+        &mutation_file,
+        r#"{"type":"append_followup","source_task_id":1,"new_tasks":[{"id":2,"description":"review-gated followup","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let mutate_out = meshloop()
+        .current_dir(&dir)
+        .args(["mutate-plan", "--graph", "g_mutate_rev", "--mutation-file"])
+        .arg(&mutation_file)
+        .args(["--require-review", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("mutate-plan");
+    assert!(mutate_out.status.success());
+
+    // 3. Resume must be rejected while graph is in AwaitingPlanReview
+    let resume_blocked = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume blocked");
+    assert!(
+        !resume_blocked.status.success(),
+        "resume should fail when plan review is required"
+    );
+    let blocked_err = String::from_utf8_lossy(&resume_blocked.stderr);
+    assert!(
+        blocked_err.contains("not been accepted")
+            || blocked_err.contains("not accepted")
+            || blocked_err.contains("AwaitingPlanReview"),
+        "expected error regarding plan acceptance, got: {blocked_err}"
+    );
+
+    // 4. Accept updated plan via review-plan
+    let updated_plan_path = dir.join(".meshloop").join("plan.json");
+    let review_out = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&updated_plan_path)
+        .args(["--accept", "--as", "lead_reviewer", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("review-plan accept");
+    assert!(
+        review_out.status.success(),
+        "review-plan accept failed: {}",
+        String::from_utf8_lossy(&review_out.stderr)
+    );
+
+    // 5. Now resume succeeds and executes task 2
+    let resume2 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 2");
+    assert!(resume2.status.success());
+
+    let accept2 = meshloop()
+        .current_dir(&dir)
+        .args(["accept", "--task", "2", "--as", "tester", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("accept 2");
+    assert!(accept2.status.success());
+
+    let resume3 = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("resume 3");
+    assert!(resume3.status.success());
+
+    fs::remove_dir_all(&dir).ok();
+}

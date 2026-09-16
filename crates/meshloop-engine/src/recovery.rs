@@ -219,4 +219,35 @@ mod tests {
         )];
         assert!(replay_tasks(&records).is_err());
     }
+
+    #[test]
+    fn per_task_fold_replays_dynamically_mutated_tasks() {
+        let records = vec![
+            record(
+                1,
+                None,
+                TaskState::Pending,
+                TaskState::Ready,
+                E::DependencySatisfied,
+            ),
+            // Dynamic mutation: task 1 reverts from Ready to Pending, task 2 is inserted as Pending
+            record(
+                1,
+                None,
+                TaskState::Ready,
+                TaskState::Pending,
+                E::GraphMutated,
+            ),
+            record(
+                2,
+                None,
+                TaskState::Pending,
+                TaskState::Ready,
+                E::DependencySatisfied,
+            ),
+        ];
+        let tasks = replay_tasks(&records).expect("legal fold");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Pending);
+        assert_eq!(tasks[&TaskId(2)], TaskState::Ready);
+    }
 }

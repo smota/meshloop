@@ -13,7 +13,7 @@ use meshloop_domain::policy::CouplingPenalty;
 use meshloop_domain::state::{
     Event, PlanDecision, PlanState, TaskState, plan_transition, transition,
 };
-use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
+use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose};
@@ -444,6 +444,93 @@ impl<'a> RunLoop<'a> {
         self.store.save_run(&row)?;
         self.active_graph = Some(graph_id.into());
         Ok(next)
+    }
+
+    /// Dynamically mutates an in-flight plan graph (ADR 0028).
+    /// Enforces state immutability, petgraph acyclicity, and updates persistence.
+    /// If require_review is true, pauses the run by transitioning to AwaitingPlanReview.
+    pub fn mutate_plan(
+        &mut self,
+        graph_id: &str,
+        mutation: GraphMutation,
+        require_review: bool,
+    ) -> Result<TaskGraph, OrchestratorError> {
+        let mut row = self
+            .store
+            .load_run(graph_id)?
+            .ok_or_else(|| OrchestratorError::MissingGraph(graph_id.into()))?;
+
+        let mut graph = self.store.graph_from_run(graph_id)?;
+        let tasks = self.tasks(graph_id)?;
+
+        // Validate state immutability per ADR 0028
+        match &mutation {
+            GraphMutation::InsertPrerequisite { target_task, .. } => {
+                if let Some(st) = tasks.get(target_task)
+                    && matches!(
+                        st,
+                        TaskState::Running
+                            | TaskState::Verifying
+                            | TaskState::AwaitingReview
+                            | TaskState::Accepted
+                            | TaskState::Integrated
+                    )
+                {
+                    return Err(OrchestratorError::Illegal(format!(
+                        "cannot insert prerequisite for task {} in active state {:?}",
+                        target_task.0, st
+                    )));
+                }
+            }
+            GraphMutation::AppendFollowup { source_task, .. } => {
+                if !graph.nodes.iter().any(|n| n.id == *source_task) {
+                    return Err(OrchestratorError::Illegal(format!(
+                        "source task {} not found in graph",
+                        source_task.0
+                    )));
+                }
+            }
+        }
+
+        // Apply domain mutation (validates petgraph DAG acyclicity atomically)
+        graph
+            .apply_mutation(&mutation)
+            .map_err(|e| OrchestratorError::Illegal(format!("mutation rejected: {e:?}")))?;
+
+        // Assign tiers to any newly added nodes
+        assign_tiers(&mut graph, &DefaultTierAssigner);
+
+        // Revert target_task from Ready to Pending if prerequisites were added
+        if let GraphMutation::InsertPrerequisite { target_task, .. } = &mutation
+            && let Some(TaskState::Ready) = tasks.get(target_task)
+        {
+            let _ = self.append(
+                graph_id,
+                *target_task,
+                None,
+                TaskState::Ready,
+                Event::GraphMutated,
+                Some("prerequisite inserted; reverting to pending".into()),
+            )?;
+        }
+
+        // Persist updated graph JSON
+        let json = serde_json::to_string_pretty(&graph)
+            .map_err(|e| OrchestratorError::Illegal(e.to_string()))?;
+        row.plan_json = json.clone();
+        row.plan_sha256 = digest(&json);
+
+        if require_review {
+            row.plan_state = PlanState::AwaitingPlanReview;
+        }
+
+        self.store.save_run(&row)?;
+
+        let mesh = self.workspace.repo_root().join(".meshloop");
+        let _ = std::fs::create_dir_all(&mesh);
+        let _ = std::fs::write(mesh.join("plan.json"), &json);
+
+        Ok(graph)
     }
 
     pub fn tick(&mut self) -> Result<Tick, OrchestratorError> {

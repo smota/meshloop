@@ -222,6 +222,25 @@ fn dispatch(inv: Invocation) -> ExitCode {
             inv.origin,
         ),
         Command::Bundle { dest } => cmd_bundle(dest, inv.json, inv.origin),
+        Command::MutatePlan {
+            graph,
+            mutation_file,
+            mutation_json,
+            require_review,
+            config,
+            db,
+            worktree_base,
+        } => cmd_mutate_plan(
+            graph,
+            mutation_file,
+            mutation_json,
+            require_review,
+            config,
+            db,
+            worktree_base,
+            inv.json,
+            inv.origin,
+        ),
     }
 }
 
@@ -1261,4 +1280,160 @@ fn cmd_orchestrate(
             ExitCode::from(2)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_mutate_plan(
+    graph_arg: Option<String>,
+    mutation_file: Option<PathBuf>,
+    mutation_json: Option<String>,
+    require_review: bool,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    worktree_base: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let payload = match (mutation_json, mutation_file) {
+        (Some(s), _) => s,
+        (None, Some(f)) => match std::fs::read_to_string(&f) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!("failed to read mutation file {}: {e}", f.display());
+                if json {
+                    println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+                } else {
+                    eprintln!("{err}");
+                }
+                return ExitCode::from(2);
+            }
+        },
+        (None, None) => {
+            let err = "meshloop:mutate-plan requires --mutation <json> or --mutation-file <path>";
+            if json {
+                println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+            } else {
+                eprintln!("{err}");
+            }
+            return ExitCode::from(2);
+        }
+    };
+
+    let mutation: meshloop_domain::task_graph::GraphMutation = match serde_json::from_str(&payload)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            let err = format!("invalid mutation JSON: {e}");
+            if json {
+                println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+            } else {
+                eprintln!("{err}");
+            }
+            return ExitCode::from(2);
+        }
+    };
+
+    let (cfg, _) = match load_cfg(config) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let root = repo_root();
+    let mut composed = match compose::compose(compose::ComposeRequest {
+        config: &cfg,
+        repo_root: root,
+        db_path: db.as_deref(),
+        worktree_base,
+        origin: origin.clone(),
+        fixture_only: false,
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            if json {
+                println!("{}", json_out::err("meshloop:mutate-plan", origin, e));
+            } else {
+                eprintln!("{e}");
+            }
+            return ExitCode::from(2);
+        }
+    };
+
+    let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
+        .harnesses
+        .iter()
+        .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
+        .collect();
+    let mut saga = RunLoop {
+        harnesses: harness_refs,
+        candidates: composed.candidates.clone(),
+        workspace: &composed.git,
+        store: &mut composed.store,
+        processes: &composed.processes,
+        checks: &composed.checks,
+        router: Router::default(),
+        limits: composed.limits,
+        fixture_only: false,
+        verify_command: composed.verify_command.clone(),
+        worktree_base: composed.worktree_base.clone(),
+        active_graph: None,
+    };
+
+    let graph_id = match graph_arg {
+        Some(g) => g,
+        None => match saga.store.latest_run() {
+            Ok(Some(r)) => r.graph_id,
+            Ok(None) => {
+                let err = "no runs found; specify --graph <id>";
+                if json {
+                    println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+                } else {
+                    eprintln!("{err}");
+                }
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                let err = format!("store error: {e:?}");
+                if json {
+                    println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+                } else {
+                    eprintln!("{err}");
+                }
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let updated_graph = match saga.mutate_plan(&graph_id, mutation, require_review) {
+        Ok(g) => g,
+        Err(e) => {
+            let err = format!("mutation failed: {e:?}");
+            if json {
+                println!("{}", json_out::err("meshloop:mutate-plan", origin, err));
+            } else {
+                eprintln!("{err}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    if json {
+        println!(
+            "{}",
+            json_out::ok(
+                "meshloop:mutate-plan",
+                origin,
+                serde_json::json!({
+                    "graph_id": graph_id,
+                    "require_review": require_review,
+                    "nodes_count": updated_graph.nodes.len(),
+                    "graph": updated_graph,
+                }),
+            )
+        );
+    } else {
+        println!(
+            "meshloop:mutate-plan succeeded for graph {graph_id} ({} nodes, require_review={require_review})",
+            updated_graph.nodes.len()
+        );
+    }
+    ExitCode::SUCCESS
 }

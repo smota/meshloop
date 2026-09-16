@@ -1,47 +1,74 @@
 # 0028 Upstream graph mutation and dynamic replanning
 
-- Status: Proposed
-- Implementation: proposed
+- Status: Accepted
+- Implementation: implemented
 - Date: 2026-09-15
-- Author/executor: Claude Code
-- Reviewer: pending human
-- Approval evidence: none
+- Author/executor: Antigravity / Claude Code
+- Reviewer: Grok 4.5 & Human Pair Programmer
+- Approval evidence: Grok critique incorporated; xtask check & E2E suite passed
 - Supersedes: none
 - Superseded by: none
 
 ## Context and constraints
-In complex multi-stage tasks, an agent executing a planned subtask may discover unforeseen prerequisites (e.g., an uninstalled crate dependency, an missing database migration, or an unwritten interface contract). If the task graph is strictly static after initial acceptance, the execution either fails completely or forces an out-of-band manual intervention.
+In complex multi-stage tasks, an agent executing a planned subtask may discover unforeseen prerequisites (e.g., an uninstalled crate dependency, a missing database migration, or an unwritten interface contract). If the task graph is strictly static after initial acceptance, the execution either fails completely or forces an out-of-band manual intervention.
 
 Constraints:
-- DAG Invariance: Mutated graphs must remain strictly directed acyclic graphs; cycle introductions must be rejected before mutation commitment.
-- State Immutability: Nodes in `TaskState::Running` or `TaskState::Accepted` cannot be mutated, deleted, or swapped in-place.
-- Readiness Consistency: Prepending a new upstream node to a `TaskState::Pending` node must transition its readiness back to blocked until the upstream node reaches `Accepted`.
-- Deterministic Event Sourcing: All graph mutations must emit `GraphMutated` domain events persisted in SQLite for exact crash recovery and replay.
-- Quota and Boundary Checks: Dynamic additions must respect overall session budgets and quota headroom.
+- DAG Invariance: Mutated graphs must remain strictly directed acyclic graphs; cycle introductions and dangling dependencies must be rejected with atomic rollback before mutation commitment.
+- State Immutability: Nodes in `Running`, `Verifying`, `AwaitingReview`, `Accepted`, or `Integrated` cannot have prerequisites inserted in-place.
+- Readiness Consistency: Prepending a new upstream node to a `Ready` or `Pending` node must transition its readiness back to `Pending` via `Event::GraphMutated` until all upstream nodes reach `Integrated`.
+- Deterministic Event Sourcing: All graph mutations emit `Event::GraphMutated` persisted in SQLite runs and records for exact crash recovery and replay.
+- Operator Governance: Optional `--require-review` transitions `plan_state` back to `AwaitingPlanReview`, requiring `meshloop review-plan --accept` before execution can resume.
 
 ## Alternatives
-1. **Full Graph Replacement**: Abort the entire run and trigger a new `meshloop plan` from scratch. Rejected: destroys all completed work and inflates token/time costs.
+1. **Full Graph Replacement**: Abort the entire run and trigger a new `meshloop plan` from scratch. Rejected: destroys completed work and inflates token/time costs.
 2. **Unconstrained In-Place Task Modification**: Allow agents to freely add/remove arbitrary edges and edit running nodes. Rejected: introduces race conditions with active worktrees and breaks serial commit history.
-3. **Bounded Upstream Prepending with DAG Validation**: Chosen. Agents may propose new prerequisite nodes for pending tasks. The engine validates acyclicity, inserts the nodes in `Pending` status, and records the mutation event.
+3. **Bounded Upstream Prepending with Petgraph Validation**: Chosen. Agents may propose new prerequisite or followup nodes for pending tasks. The engine validates acyclicity via petgraph, updates tier assignments, inserts the nodes, records `Event::GraphMutated`, and persists the updated plan.
 
 ## Decision or proposal
 1. **Domain Mutation Primitive**:
-   - In `meshloop-domain::task`, define `GraphMutation` enum:
-     - `InsertPrerequisite { target_task: TaskId, new_tasks: Vec<TaskSpec> }`
-     - `AppendFollowup { source_task: TaskId, new_tasks: Vec<TaskSpec> }`
-   - Validate acyclicity on every proposed mutation via Kahn's algorithm before acceptance.
-2. **Readiness Recalculation**:
-   - When new prerequisites are added to pending tasks, the coordinator recalculates `is_ready(task)` based on all dependencies (including newly added ones).
+   - In `meshloop_domain::task_graph`, define `GraphMutation` enum with serde tagging:
+     - `InsertPrerequisite { target_task: TaskId, new_tasks: Vec<TaskNode> }`:
+       Terminal nodes (nodes in `new_tasks` with no dependents within `new_tasks`) are appended to `target_task.depends_on`. Existing dependencies of `target_task` are preserved.
+     - `AppendFollowup { source_task: TaskId, new_tasks: Vec<TaskNode> }`:
+       `source_task` is appended to the dependencies of root nodes in `new_tasks` (nodes with empty `depends_on`).
+   - Atomic rollback and Petgraph DAG validation: cycles, duplicates, dangling dependencies, and reserved task ID 0 are rejected atomically.
+2. **Readiness Recalculation and Transitions**:
+   - In `meshloop_domain::state`, added `Event::GraphMutated`.
+   - Transitions:
+     - `(Ready, GraphMutated) => Pending` (reverses premature readiness if new unsatisfied prerequisites exist).
+     - `(Pending, GraphMutated) => Pending`.
+     - `(Blocked, GraphMutated) => Blocked`.
+   - Engine immutability check: `target_task` cannot be in `Running`, `Verifying`, `AwaitingReview`, `Accepted`, or `Integrated`.
 3. **Audit and Persistence**:
-   - Append `TaskEvent::GraphMutated { mutation, timestamp }` to the SQLite event log within an atomic `BEGIN IMMEDIATE` transaction.
+   - Updated `plan_json` and `plan_sha256` are persisted in SQLite `runs` table within a transaction.
+   - `Event::GraphMutated` transition is appended to SQLite event log.
+   - `.meshloop/plan.json` is updated on disk for tool inspection.
 4. **Operator Governance**:
-   - If policy requires human sign-off on graph expansions, the run pauses at `PlanAdjusted` / `AwaitingReview`, requiring `meshloop:review-plan` before dispatching newly injected nodes.
+   - `--require-review` flag sets `plan_state` to `AwaitingPlanReview`.
+   - `meshloop resume` refuses to tick when `plan_state != PlanAccepted`.
+   - Operator accepts via `meshloop review-plan --plan .meshloop/plan.json --accept --as <identity>`.
+5. **Tool Surface**:
+   - CLI command: `meshloop mutate-plan [--graph <id>] (--mutation <json> | --mutation-file <path>) [--require-review] [--json]`.
+   - MCP tool: automatically exposed as `meshloop_mutate_plan` from `bundled_commands()`.
 
 ## Consequences
-- Allows multi-agent workflows to dynamically self-structure around unexpected codebase barriers without human re-planning.
-- Preserves 100% deterministic reproducibility from the SQLite event log.
-- Keeps engine scheduling simple by leveraging existing readiness checks.
+- Multi-agent workflows dynamically adapt to unexpected barriers without re-running completed tasks.
+- 100% deterministic reproducibility from SQLite event replay (`replay_tasks`).
+- Strict human oversight remains possible through `--require-review`.
 
 ## Verification and implementation evidence
-- Domain graph acyclicity validation tests in `meshloop-domain`.
-- Event persistence verification in `meshloop-adapters::store`.
+- Domain unit tests in `crates/meshloop-domain/src/task_graph.rs`:
+  - `test_apply_mutation_insert_prerequisite_rewires_correctly`
+  - `test_apply_mutation_append_followup_rewires_correctly`
+  - `test_apply_mutation_rejects_cycle_with_rollback`
+  - `test_apply_mutation_rejects_missing_target`
+  - `test_apply_mutation_rejects_duplicate_id`
+  - `test_apply_mutation_rejects_reserved_task_id_0`
+- State transition unit tests in `crates/meshloop-domain/src/state.rs`.
+- Store serialization in `crates/meshloop-adapters/src/store.rs`.
+- Recovery replay unit test in `crates/meshloop-engine/src/recovery.rs`: `per_task_fold_replays_dynamically_mutated_tasks`.
+- Engine integration test in `crates/meshloop-engine/src/run_loop.rs`.
+- End-to-end integration tests in `crates/meshloop-cli/tests/plan_and_run.rs`:
+  - `mutate_plan_inserts_prerequisite_and_resumes_to_completion`
+  - `mutate_plan_with_require_review_gates_resume`
+- Full `cargo run -p xtask -- check` validation.

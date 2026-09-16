@@ -37,6 +37,11 @@ fn main() {
             let path = args.get(1).expect("fixture requires a prompt file path");
             let prompt = fs::read_to_string(path).unwrap_or_default();
             let _ = fs::write("fixture-touched.txt", "fixture wrote this file\n");
+            let stem = Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "task".to_string());
+            let _ = fs::write(format!("fixture-{stem}.txt"), "fixture wrote this file\n");
             println!("FIXTURE_HANDLED:{prompt}");
         }
         Some("--grandchild-heartbeat") => {

@@ -14,7 +14,7 @@ pub enum Tier {
     Tier3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskNode {
     pub id: TaskId,
     pub description: String,
@@ -26,7 +26,7 @@ pub struct TaskNode {
     pub empty_diff_ok: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskGraph {
     pub graph_id: String,
     pub nodes: Vec<TaskNode>,
@@ -40,6 +40,37 @@ pub enum GraphError {
     Empty,
     IllegalGraphId(String),
     ReservedTaskId(TaskId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GraphMutation {
+    InsertPrerequisite {
+        #[serde(alias = "target_task_id")]
+        target_task: TaskId,
+        new_tasks: Vec<TaskNode>,
+    },
+    AppendFollowup {
+        #[serde(alias = "source_task_id")]
+        source_task: TaskId,
+        new_tasks: Vec<TaskNode>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphMutationError {
+    TargetNotFound(TaskId),
+    SourceNotFound(TaskId),
+    DuplicateTaskId(TaskId),
+    ReservedTaskId(TaskId),
+    EmptyNewTasks,
+    Graph(GraphError),
+}
+
+impl From<GraphError> for GraphMutationError {
+    fn from(e: GraphError) -> Self {
+        Self::Graph(e)
+    }
 }
 
 /// `graph_id` values that are safe as Git branch segments and directory names.
@@ -137,6 +168,97 @@ impl TaskGraph {
     /// A single valid dependency order. Cycle-safe: returns empty vector on cyclic graph.
     pub fn topological_order(&self) -> Vec<TaskId> {
         self.try_topological_order().unwrap_or_default()
+    }
+
+    /// Applies an upstream or follow-up mutation (ADR 0028).
+    /// Validates IDs, target/source existence, and petgraph acyclicity atomically:
+    /// if validation fails, the graph remains unchanged.
+    pub fn apply_mutation(&mut self, mutation: &GraphMutation) -> Result<(), GraphMutationError> {
+        let mut candidate = self.clone();
+        match mutation {
+            GraphMutation::InsertPrerequisite {
+                target_task,
+                new_tasks,
+            } => {
+                if new_tasks.is_empty() {
+                    return Err(GraphMutationError::EmptyNewTasks);
+                }
+                if !candidate.nodes.iter().any(|n| n.id == *target_task) {
+                    return Err(GraphMutationError::TargetNotFound(*target_task));
+                }
+
+                let existing_ids: HashSet<TaskId> = candidate.nodes.iter().map(|n| n.id).collect();
+                let mut new_ids = HashSet::new();
+                for task in new_tasks {
+                    if task.id.0 == 0 {
+                        return Err(GraphMutationError::ReservedTaskId(task.id));
+                    }
+                    if existing_ids.contains(&task.id) || !new_ids.insert(task.id) {
+                        return Err(GraphMutationError::DuplicateTaskId(task.id));
+                    }
+                }
+
+                let mut depended_upon_in_new = HashSet::new();
+                for task in new_tasks {
+                    for dep in &task.depends_on {
+                        if new_ids.contains(dep) {
+                            depended_upon_in_new.insert(*dep);
+                        }
+                    }
+                }
+                let terminals: Vec<TaskId> = new_tasks
+                    .iter()
+                    .filter(|t| !depended_upon_in_new.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect();
+
+                if let Some(target) = candidate.nodes.iter_mut().find(|n| n.id == *target_task) {
+                    for term in terminals {
+                        if !target.depends_on.contains(&term) {
+                            target.depends_on.push(term);
+                        }
+                    }
+                }
+
+                candidate.nodes.extend(new_tasks.clone());
+            }
+            GraphMutation::AppendFollowup {
+                source_task,
+                new_tasks,
+            } => {
+                if new_tasks.is_empty() {
+                    return Err(GraphMutationError::EmptyNewTasks);
+                }
+                if !candidate.nodes.iter().any(|n| n.id == *source_task) {
+                    return Err(GraphMutationError::SourceNotFound(*source_task));
+                }
+
+                let existing_ids: HashSet<TaskId> = candidate.nodes.iter().map(|n| n.id).collect();
+                let mut new_ids = HashSet::new();
+                for task in new_tasks {
+                    if task.id.0 == 0 {
+                        return Err(GraphMutationError::ReservedTaskId(task.id));
+                    }
+                    if existing_ids.contains(&task.id) || !new_ids.insert(task.id) {
+                        return Err(GraphMutationError::DuplicateTaskId(task.id));
+                    }
+                }
+
+                let mut cloned_new = new_tasks.clone();
+                for task in &mut cloned_new {
+                    let has_internal_dep = task.depends_on.iter().any(|d| new_ids.contains(d));
+                    if !has_internal_dep && !task.depends_on.contains(source_task) {
+                        task.depends_on.push(*source_task);
+                    }
+                }
+
+                candidate.nodes.extend(cloned_new);
+            }
+        }
+
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 }
 
@@ -291,5 +413,127 @@ mod tests {
             Err(GraphError::Cycle(_))
         ));
         assert_eq!(g.topological_order(), Vec::<TaskId>::new());
+    }
+
+    #[test]
+    fn insert_prerequisite_rewires_dependencies_and_preserves_order() {
+        let mut g = TaskGraph {
+            graph_id: "mut-test".into(),
+            nodes: vec![node(1, &[]), node(3, &[1])],
+        };
+        let mutation = GraphMutation::InsertPrerequisite {
+            target_task: TaskId(3),
+            new_tasks: vec![node(2, &[1])],
+        };
+        g.apply_mutation(&mutation).expect("valid mutation");
+        assert_eq!(g.nodes.len(), 3);
+        let node3 = g.nodes.iter().find(|n| n.id == TaskId(3)).unwrap();
+        assert!(node3.depends_on.contains(&TaskId(1)));
+        assert!(node3.depends_on.contains(&TaskId(2)));
+        let order = g.topological_order();
+        let pos1 = order.iter().position(|id| *id == TaskId(1)).unwrap();
+        let pos2 = order.iter().position(|id| *id == TaskId(2)).unwrap();
+        let pos3 = order.iter().position(|id| *id == TaskId(3)).unwrap();
+        assert!(pos1 < pos2);
+        assert!(pos2 < pos3);
+    }
+
+    #[test]
+    fn insert_prerequisite_chain_rewires_only_terminals() {
+        let mut g = TaskGraph {
+            graph_id: "chain-test".into(),
+            nodes: vec![node(1, &[]), node(4, &[1])],
+        };
+        // Insert chain: 2 -> 3
+        let mutation = GraphMutation::InsertPrerequisite {
+            target_task: TaskId(4),
+            new_tasks: vec![node(2, &[]), node(3, &[2])],
+        };
+        g.apply_mutation(&mutation).expect("valid mutation");
+        let node4 = g.nodes.iter().find(|n| n.id == TaskId(4)).unwrap();
+        // node 3 is terminal in new_tasks, node 2 is internal
+        assert!(node4.depends_on.contains(&TaskId(3)));
+        assert!(!node4.depends_on.contains(&TaskId(2)));
+    }
+
+    #[test]
+    fn append_followup_connects_roots() {
+        let mut g = TaskGraph {
+            graph_id: "followup-test".into(),
+            nodes: vec![node(1, &[])],
+        };
+        let mutation = GraphMutation::AppendFollowup {
+            source_task: TaskId(1),
+            new_tasks: vec![node(2, &[]), node(3, &[2])],
+        };
+        g.apply_mutation(&mutation).expect("valid mutation");
+        let node2 = g.nodes.iter().find(|n| n.id == TaskId(2)).unwrap();
+        let node3 = g.nodes.iter().find(|n| n.id == TaskId(3)).unwrap();
+        assert!(node2.depends_on.contains(&TaskId(1)));
+        assert!(!node3.depends_on.contains(&TaskId(1)));
+        assert!(node3.depends_on.contains(&TaskId(2)));
+    }
+
+    #[test]
+    fn mutation_rejects_missing_target_or_source() {
+        let mut g = TaskGraph {
+            graph_id: "missing-test".into(),
+            nodes: vec![node(1, &[])],
+        };
+        assert_eq!(
+            g.apply_mutation(&GraphMutation::InsertPrerequisite {
+                target_task: TaskId(99),
+                new_tasks: vec![node(2, &[])],
+            }),
+            Err(GraphMutationError::TargetNotFound(TaskId(99)))
+        );
+        assert_eq!(
+            g.apply_mutation(&GraphMutation::AppendFollowup {
+                source_task: TaskId(99),
+                new_tasks: vec![node(2, &[])],
+            }),
+            Err(GraphMutationError::SourceNotFound(TaskId(99)))
+        );
+    }
+
+    #[test]
+    fn mutation_rejects_duplicate_id_and_reserved_zero() {
+        let mut g = TaskGraph {
+            graph_id: "dup-test".into(),
+            nodes: vec![node(1, &[])],
+        };
+        assert_eq!(
+            g.apply_mutation(&GraphMutation::InsertPrerequisite {
+                target_task: TaskId(1),
+                new_tasks: vec![node(1, &[])],
+            }),
+            Err(GraphMutationError::DuplicateTaskId(TaskId(1)))
+        );
+        assert_eq!(
+            g.apply_mutation(&GraphMutation::InsertPrerequisite {
+                target_task: TaskId(1),
+                new_tasks: vec![node(0, &[])],
+            }),
+            Err(GraphMutationError::ReservedTaskId(TaskId(0)))
+        );
+    }
+
+    #[test]
+    fn mutation_rejects_cycle_creation() {
+        let mut g = TaskGraph {
+            graph_id: "cycle-test".into(),
+            nodes: vec![node(1, &[]), node(2, &[1])],
+        };
+        // Task 3 depends on Task 2, but we try to insert it as a prerequisite of Task 1 -> cycle!
+        let mutation = GraphMutation::InsertPrerequisite {
+            target_task: TaskId(1),
+            new_tasks: vec![node(3, &[2])],
+        };
+        assert!(matches!(
+            g.apply_mutation(&mutation),
+            Err(GraphMutationError::Graph(GraphError::Cycle(_)))
+        ));
+        // Verify graph was unchanged on error
+        assert_eq!(g.nodes.len(), 2);
     }
 }

@@ -49,6 +49,8 @@ pub enum Event {
     LiveWorkerSettled,
     /// Upstream is no longer Failed/Cancelled/Blocked; dependents may be pending again.
     DependencyCleared,
+    /// Dynamic graph mutation injected prerequisite; target reverts to Pending if Ready (ADR 0028).
+    GraphMutated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,9 @@ pub fn transition(from: TaskState, event: Event) -> Result<TaskState, IllegalTra
         (Failed, RetryAuthorized) => Ready,
         (Failed, LiveWorkerSettled) => Verifying,
         (Blocked, DependencyCleared) => Pending,
+        (Ready, GraphMutated) => Pending,
+        (Pending, GraphMutated) => Pending,
+        (Blocked, GraphMutated) => Blocked,
         (state, Cancel) if state != Integrated && state != Cancelled => Cancelled,
         _ => return Err(IllegalTransition { from, event }),
     };
@@ -133,6 +138,9 @@ mod tests {
         (Failed, RetryAuthorized, Ready),
         (Failed, LiveWorkerSettled, Verifying),
         (Blocked, DependencyCleared, Pending),
+        (Ready, GraphMutated, Pending),
+        (Pending, GraphMutated, Pending),
+        (Blocked, GraphMutated, Blocked),
     ];
 
     #[test]
@@ -173,6 +181,7 @@ mod tests {
             RetryAuthorized,
             LiveWorkerSettled,
             DependencyCleared,
+            GraphMutated,
         ];
         for &state in &all_states {
             for &event in &all_events {

@@ -50,9 +50,17 @@ impl GitWorktreeAdapter {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            Err(GitError::CommandFailed {
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stderr = if stderr.trim().is_empty() {
+                format!(
+                    "git {:?} failed (exit code {:?})",
+                    args,
+                    output.status.code()
+                )
+            } else {
+                stderr
+            };
+            Err(GitError::CommandFailed { stderr })
         }
     }
 
@@ -152,15 +160,21 @@ impl WorkspacePort for GitWorktreeAdapter {
     }
 
     fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError> {
+        self.run_in(worktree, &["add", "-A"])
+            .map_err(WorkspaceError::from)?;
         let porcelain = self.status_porcelain(worktree)?;
         if porcelain.trim().is_empty() {
             return self.head(worktree);
         }
-        self.run_in(worktree, &["add", "-A"])
-            .map_err(WorkspaceError::from)?;
-        self.run_in(worktree, &["commit", "-q", "-m", message])
-            .map_err(WorkspaceError::from)?;
-        self.head(worktree)
+        match self.run_in(worktree, &["commit", "-q", "-m", message]) {
+            Ok(_) => self.head(worktree),
+            Err(GitError::CommandFailed { ref stderr })
+                if stderr.contains("nothing to commit") || stderr.contains("clean") =>
+            {
+                self.head(worktree)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError> {

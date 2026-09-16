@@ -104,6 +104,15 @@ pub enum Command {
     Bundle {
         dest: PathBuf,
     },
+    MutatePlan {
+        graph: Option<String>,
+        mutation_file: Option<PathBuf>,
+        mutation_json: Option<String>,
+        require_review: bool,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+        worktree_base: Option<PathBuf>,
+    },
 }
 
 pub fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -321,6 +330,18 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                     .unwrap_or_else(|| PathBuf::from("dist/meshloop-session-bundle")),
             })
         }
+        Some(v) if v == "mutate-plan" => {
+            let rest = &args[1..];
+            Ok(Command::MutatePlan {
+                graph: flag_value(rest, "--graph"),
+                mutation_file: flag_value(rest, "--mutation-file").map(PathBuf::from),
+                mutation_json: flag_value(rest, "--mutation"),
+                require_review: has_flag(rest, "--require-review"),
+                config: flag_value(rest, "--config").map(PathBuf::from),
+                db: flag_value(rest, "--db").map(PathBuf::from),
+                worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
+            })
+        }
         Some(v)
             if matches!(
                 v.as_str(),
@@ -339,7 +360,7 @@ pub fn help_text() -> &'static str {
     "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
-     \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mcp | meshloop:bundle\n\
+     \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -351,6 +372,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
+     \x20 meshloop mutate-plan [--graph <id>] (--mutation <json> | --mutation-file <path>) [--require-review] [--json]\n\
      \x20 meshloop mcp\n\
      \x20 meshloop bundle [--dest <dir>]\n\
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
