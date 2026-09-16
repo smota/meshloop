@@ -173,3 +173,16 @@ With the deterministic regression gate (World D) fully operational, the three hi
   - **Cycle 1 (Dialect & Loss Hardening):** Validated in `crates/meshloop-context/tests/doc_dialect_tests.rs` covering unclosed code fences, code fences containing `#`, frontmatter vs Setext vs hr, GFM admonitions, Unicode headings, idempotence, and golden structure preservation across real Meshloop ADRs (`0029`, `0030`, `0031`, `template.md`, `runtime-design.md`).
   - **Cycle 2 (Retrieval & Cache Hardening):** Validated in `crates/meshloop-context/tests/doc_retrieval_cache_tests.rs` and `crates/meshloop-engine`: mixed code/doc quantized ranking in `select_context`, prompt cache static prefix byte-identity under permutation, and syntactic slice impact immunity (`Impact::BodyOnly` on doc body modifications).
   - 100% test pass rate across all 142 workspace unit and integration tests.
+
+### Priority 5: E2E Refinement Cycle — Round 1: Multi-Stage Wave DAG & Downstream Context Flow — **DELIVERED & VERIFIED**
+- **Objective:** Eliminate the flat-wave smoke test gap by upgrading `smoke_e2e` to a 3-node multi-wave DAG (Task 1: root, Task 2: dependent downstream on Task 1, Task 3: parallel root), validating ancestor artifact propagation, sibling worktree isolation, and fail-closed telemetry.
+- **Value:** Guarantees downstream agent tasks reliably execute on the freshly integrated ancestor commit tree without leaking sibling changes or triggering Windows lock contention.
+- **Implementation & Evidence:**
+  - **Independent Grok Architectural Review (Replica & Treplica):** Grok highlighted critical traps: using unique fixture attempt prompt files (`fixture-.meshloop-prompt-{attempt}.txt`) instead of shared `fixture-touched.txt`; keeping worktrees open during intermediate execution to avoid Windows lock retry serialization; inspecting sandbox worktree cardinality (exactly 5 registered trees) and recursive `*.lock` hygiene; and eliminating default fallbacks in `xtask bench` parsing. Treplica confirmed sign-off.
+  - **Fail-Closed Invariants & Metrics Added:**
+    - `iso.ancestor_propagation.pass_rate_pct = 100.0%` (Invariant: Held-pending check + Base SHA identity via `git merge-base --is-ancestor` + Task 1 artifact present + Task 3 artifact absent).
+    - `orch.wave.dispatch_overhead_ms <= 1500.0ms` (Observed: **856.8 ms**).
+    - `smoke.wall_clock_s <= 5.0s` (Observed: **3.77 s**).
+  - **Context Quantization Optimization (`meshloop-context::quant`):** Optimized `SignatureIndex::rank_files` and `embed` to eliminate intermediate `Vec<ScoredHit>` cloning and token string allocations via zero-copy `&str` and byte-by-byte `fnv1a64_lower`, reducing search P95 latency from 699 $\mu$s to **324 $\mu$s**.
+  - **Benchmark Scorecard:** Expanded canonical gate from 19 to 21 metrics, achieving **21/21 PASS** on `xtask bench`.
+

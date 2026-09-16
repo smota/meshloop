@@ -7,6 +7,7 @@ schema_version = "1.0.0"
 "iso.redact.pass_rate_pct" = { op = "eq", value = 100 }
 "iso.gate.bypass_count" = { op = "eq", value = 0 }
 "iso.crash.recovery_fidelity" = { op = "eq", value = 1.0 }
+"iso.ancestor_propagation.pass_rate_pct" = { op = "eq", value = 100 }
 "conc.orphan_process_count" = { op = "eq", value = 0 }
 "ctx.cache.stale_hit_rate_pct" = { op = "eq", value = 0 }
 
@@ -18,6 +19,7 @@ schema_version = "1.0.0"
 "quant.index.compression_ratio" = { op = "gte", value = 4.0 }
 "quant.recall_at_k" = { op = "gte", value = 95.0 }
 "orch.txn.wal_commit_ms.p95" = { op = "lte", value = 10.0 }
+"orch.wave.dispatch_overhead_ms" = { op = "lte", value = 1500.0 }
 "conc.wal.write_contention_ms" = { op = "lte", value = 15.0 }
 "conc.git_admin.lock_contention_ms" = { op = "lte", value = 200.0 }
 "conc.throughput_gain" = { op = "gte", value = 1.0 }

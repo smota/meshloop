@@ -182,18 +182,23 @@ impl SignatureIndex {
 
     /// Best score per file path, descending. Ties broken by path for determinism.
     pub fn rank_files(&self, query: &str, k: usize) -> Vec<(String, f32)> {
-        let hits = self.search(query, self.entries.len().max(1));
-        let mut best: HashMap<String, f32> = HashMap::new();
-        for hit in hits {
-            best.entry(hit.path)
+        if k == 0 || self.entries.is_empty() {
+            return Vec::new();
+        }
+        let q = rotate_unit(query, self.seed);
+        let mut best: HashMap<&str, f32> = HashMap::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let score = score_query(&q, &entry.code, self.bit_width);
+            best.entry(entry.path.as_str())
                 .and_modify(|s| {
-                    if hit.score > *s {
-                        *s = hit.score;
+                    if score > *s {
+                        *s = score;
                     }
                 })
-                .or_insert(hit.score);
+                .or_insert(score);
         }
-        let mut files: Vec<(String, f32)> = best.into_iter().collect();
+        let mut files: Vec<(String, f32)> =
+            best.into_iter().map(|(p, s)| (p.to_string(), s)).collect();
         files.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -287,10 +292,21 @@ pub fn encode(text: &str, seed: u64, bit_width: BitWidth) -> PackedCode {
     quantize(&unit, bit_width)
 }
 
+fn fnv1a64_lower(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 fn embed(text: &str, seed: u64) -> [f32; DIM] {
     let mut v = [0.0f32; DIM];
     for tok in tokenize(text) {
-        let mixed = splitmix64(seed ^ fnv1a64(tok.as_bytes()));
+        let mixed = splitmix64(seed ^ fnv1a64_lower(tok.as_bytes()));
         let dim = (mixed as usize) % DIM;
         let sign = if mixed & 1 == 0 { 1.0 } else { -1.0 };
         v[dim] += sign;
@@ -298,10 +314,9 @@ fn embed(text: &str, seed: u64) -> [f32; DIM] {
     v
 }
 
-fn tokenize(text: &str) -> impl Iterator<Item = String> {
+fn tokenize(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|t| t.len() >= 2)
-        .map(|t| t.to_ascii_lowercase())
 }
 
 fn fwht(a: &mut [f32; DIM]) {

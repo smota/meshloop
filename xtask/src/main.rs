@@ -268,7 +268,7 @@ model_tier = "top"
 
     fs::write(
         &plan_path,
-        r#"{"graph_id":"smoke-graph","nodes":[{"id":1,"description":"parallel task 1","depends_on":[],"tier":null},{"id":2,"description":"parallel task 2","depends_on":[],"tier":null}]}"#,
+        r#"{"graph_id":"smoke-graph","nodes":[{"id":1,"description":"wave-1 task 1","depends_on":[],"tier":null},{"id":2,"description":"depends on task 1","depends_on":[1],"tier":null},{"id":3,"description":"wave-1 sibling of task 1","depends_on":[],"tier":null}]}"#,
     )
     .map_err(|e| e.to_string())?;
     let t_sandbox_ms = t_sandbox_start.elapsed().as_secs_f64() * 1000.0;
@@ -323,7 +323,33 @@ model_tier = "top"
     }
     let t_run_ms = t_run_start.elapsed().as_secs_f64() * 1000.0;
 
-    let t_accept_start = std::time::Instant::now();
+    // Check 1: Held-pending invariant (Task 2 must be Pending, zero attempts started)
+    let chk1_held_pending = {
+        use meshloop_engine::ports::EventLog;
+        let store = meshloop_adapters::store::SqliteStore::open(&db_path)
+            .map_err(|e| format!("failed to open sqlite for check 1: {e:?}"))?;
+        let records = store
+            .records_for_graph("smoke-graph")
+            .map_err(|e| format!("failed to load records: {e:?}"))?;
+        let task2_started = records
+            .iter()
+            .any(|r| r.task_id.0 == 2 && r.event == meshloop_domain::state::Event::AttemptStarted);
+        let fold = meshloop_engine::recovery::replay_tasks(&records)
+            .map_err(|e| format!("failed to replay tasks: {e:?}"))?;
+        !task2_started
+            && fold
+                .get(&meshloop_domain::task_graph::TaskId(2))
+                .is_none_or(|&s| s == meshloop_domain::state::TaskState::Pending)
+    };
+    if !chk1_held_pending {
+        return Err(
+            "Check 1 failed: Task 2 was dispatched or promoted prematurely before Task 1 was integrated"
+                .to_string(),
+        );
+    }
+
+    // Accept Task 1 only (leaves Task 3 in AwaitingReview to test live sibling worktree during wave-2)
+    let t_accept1_start = std::time::Instant::now();
     let _ = run_cmd(
         Command::new(bin)
             .args(["accept", "--task", "1", "--as", "smoke-tester", "--config"])
@@ -335,7 +361,126 @@ model_tier = "top"
             .current_dir(&temp_repo),
         "meshloop accept 1",
     )?;
+    let t_accept1_ms = t_accept1_start.elapsed().as_secs_f64() * 1000.0;
 
+    // Wave 2 Resume: integrates Task 1, unblocks Task 2, and dispatches Task 2
+    let t_wave2_start = std::time::Instant::now();
+    let wave2_out = run_cmd(
+        Command::new(bin)
+            .args(["resume", "--config"])
+            .arg(&cfg_path)
+            .args(["--worktree-base"])
+            .arg(&worktree_base)
+            .args(["--db"])
+            .arg(&db_path)
+            .current_dir(&temp_repo),
+        "meshloop resume (wave 2)",
+    )?;
+    let t_wave2_ms = t_wave2_start.elapsed().as_secs_f64() * 1000.0;
+    let wave_dispatch_overhead_ms = t_wave2_ms;
+    if !wave2_out.contains("AwaitingReview") && !wave2_out.contains("await `meshloop accept`") {
+        return Err(format!(
+            "expected pause for task 2 review, got:\n{wave2_out}"
+        ));
+    }
+
+    // Check 2 (Base SHA identity) & Check 3 (Artifact present + sibling absent)
+    let mut chk2_base_sha_ok = false;
+    let mut chk3_artifact_propagation_ok = false;
+    {
+        use meshloop_engine::ports::RunStore;
+        let store = meshloop_adapters::store::SqliteStore::open(&db_path)
+            .map_err(|e| format!("failed to open sqlite for checks 2 & 3: {e:?}"))?;
+        let attempts = store
+            .attempts_for_graph("smoke-graph")
+            .map_err(|e| format!("failed to load attempts: {e:?}"))?;
+        let a1 = attempts
+            .iter()
+            .find(|a| a.task_id.0 == 1)
+            .ok_or("missing attempt for task 1")?;
+        let a2 = attempts
+            .iter()
+            .find(|a| a.task_id.0 == 2)
+            .ok_or("missing attempt for task 2")?;
+        let a3 = attempts
+            .iter()
+            .find(|a| a.task_id.0 == 3)
+            .ok_or("missing attempt for task 3")?;
+
+        let integrate_wt = worktree_base.join("smoke-graph").join("integrate");
+        let integrate_head = run_cmd(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&integrate_wt),
+            "git rev-parse integrate HEAD",
+        )?
+        .trim()
+        .to_string();
+
+        if let Some(outcome) = &a2.outcome
+            && outcome.starts_with("base:")
+            && outcome.contains(&integrate_head)
+        {
+            chk2_base_sha_ok = true;
+        }
+
+        let task1_wt = worktree_base
+            .join("smoke-graph")
+            .join(format!("task-1-attempt-{}", a1.attempt_id.0));
+        let task2_wt = worktree_base
+            .join("smoke-graph")
+            .join(format!("task-2-attempt-{}", a2.attempt_id.0));
+        let task3_wt = worktree_base
+            .join("smoke-graph")
+            .join(format!("task-3-attempt-{}", a3.attempt_id.0));
+
+        let task1_head = run_cmd(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&task1_wt),
+            "git rev-parse task 1 HEAD",
+        )?
+        .trim()
+        .to_string();
+
+        let is_ancestor_status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", &task1_head, "HEAD"])
+            .current_dir(&task2_wt)
+            .status();
+        if let Ok(st) = is_ancestor_status {
+            if !st.success() {
+                chk2_base_sha_ok = false;
+            }
+        } else {
+            chk2_base_sha_ok = false;
+        }
+
+        let f1_name = format!("fixture-.meshloop-prompt-{}.txt", a1.attempt_id.0);
+        let f3_name = format!("fixture-.meshloop-prompt-{}.txt", a3.attempt_id.0);
+
+        let t2_has_f1 = task2_wt.join(&f1_name).exists();
+        let t2_has_f3 = task2_wt.join(&f3_name).exists();
+        let t3_has_f1 = task3_wt.join(&f1_name).exists();
+
+        if t2_has_f1 && !t2_has_f3 && !t3_has_f1 {
+            chk3_artifact_propagation_ok = true;
+        }
+    }
+
+    let ancestor_propagation_pass_rate_pct =
+        if chk1_held_pending && chk2_base_sha_ok && chk3_artifact_propagation_ok {
+            100.0
+        } else {
+            0.0
+        };
+    if ancestor_propagation_pass_rate_pct < 100.0 {
+        return Err(format!(
+            "smoke: ancestor propagation invariant failed: held={chk1_held_pending}, base_sha={chk2_base_sha_ok}, artifacts={chk3_artifact_propagation_ok}"
+        ));
+    }
+
+    // Accept Tasks 2 and 3
+    let t_accept2_start = std::time::Instant::now();
     let _ = run_cmd(
         Command::new(bin)
             .args(["accept", "--task", "2", "--as", "smoke-tester", "--config"])
@@ -347,10 +492,24 @@ model_tier = "top"
             .current_dir(&temp_repo),
         "meshloop accept 2",
     )?;
-    let t_accept_ms = t_accept_start.elapsed().as_secs_f64() * 1000.0;
 
-    let t_res_start = std::time::Instant::now();
-    let resume_out = run_cmd(
+    let _ = run_cmd(
+        Command::new(bin)
+            .args(["accept", "--task", "3", "--as", "smoke-tester", "--config"])
+            .arg(&cfg_path)
+            .args(["--worktree-base"])
+            .arg(&worktree_base)
+            .args(["--db"])
+            .arg(&db_path)
+            .current_dir(&temp_repo),
+        "meshloop accept 3",
+    )?;
+    let t_accept2_ms = t_accept2_start.elapsed().as_secs_f64() * 1000.0;
+    let t_accept_ms = t_accept1_ms + t_accept2_ms;
+
+    // Final Resume: integrates Tasks 2 and 3, asserting completion
+    let t_final_res_start = std::time::Instant::now();
+    let final_res_out = run_cmd(
         Command::new(bin)
             .args(["resume", "--config"])
             .arg(&cfg_path)
@@ -359,20 +518,46 @@ model_tier = "top"
             .args(["--db"])
             .arg(&db_path)
             .current_dir(&temp_repo),
-        "meshloop resume",
+        "meshloop resume (final)",
     )?;
-    if !resume_out.contains("Integrated") && !resume_out.contains("complete") {
-        return Err("expected Integrated status after resume".to_string());
+    let t_final_res_ms = t_final_res_start.elapsed().as_secs_f64() * 1000.0;
+    let t_resume_ms = t_wave2_ms + t_final_res_ms;
+    if !final_res_out.contains("Integrated") && !final_res_out.contains("complete") {
+        return Err("expected Integrated status after final resume".to_string());
     }
-    let t_resume_ms = t_res_start.elapsed().as_secs_f64() * 1000.0;
 
     let t_audit_start = std::time::Instant::now();
-    // Verify sandbox & parent isolation (zero leaks/locks)
-    if temp_repo.join(".git/index.lock").exists() {
-        return Err("sandbox repository has orphaned .git/index.lock".to_string());
+
+    fn has_git_locks(dir: &Path) -> bool {
+        let git_dir = dir.join(".git");
+        if !git_dir.exists() {
+            return false;
+        }
+        let mut stack = vec![git_dir];
+        while let Some(current) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&current) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().ends_with(".lock"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
-    if root.join(".git/index.lock").exists() {
-        return Err("parent repository has orphaned .git/index.lock".to_string());
+
+    // Verify sandbox & parent isolation (recursive zero locks)
+    if has_git_locks(&temp_repo) {
+        return Err("sandbox repository has residual .git/**/*.lock file(s)".to_string());
+    }
+    if has_git_locks(root) {
+        return Err("parent repository has residual .git/**/*.lock file(s)".to_string());
     }
 
     if !db_path.exists() {
@@ -392,7 +577,26 @@ model_tier = "top"
         }
     }
 
-    // Dynamic observation of worktree and working copy leaks
+    // Dynamic observation of worktree cardinality in sandbox (expected 5: root + integrate + 3 attempts)
+    let sb_wt_list = run_cmd(
+        Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&temp_repo),
+        "git worktree list sandbox",
+    )?;
+    let sb_worktrees: Vec<&str> = sb_wt_list
+        .lines()
+        .filter(|l| l.starts_with("worktree "))
+        .collect();
+    if sb_worktrees.len() != 5 {
+        return Err(format!(
+            "expected exactly 5 registered worktrees in sandbox, got {}: {:?}",
+            sb_worktrees.len(),
+            sb_worktrees
+        ));
+    }
+
+    // Dynamic observation of worktree leaks in host repository
     let host_wt_list = run_cmd(
         Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -401,15 +605,24 @@ model_tier = "top"
     )?;
     let leaked_host_worktrees = host_wt_list
         .lines()
-        .filter(|l| l.starts_with("worktree ") && l.contains("worktrees/task-"))
+        .filter(|l| {
+            l.starts_with("worktree ")
+                && (l.contains("worktrees/task-") || l.contains("worktrees/smoke-graph"))
+        })
         .count();
     let worktree_leak_count = leaked_host_worktrees;
     let t_audit_ms = t_audit_start.elapsed().as_secs_f64() * 1000.0;
 
     let elapsed = e2e_start.elapsed();
-    let wall_clock_s =
-        (t_doctor_ms + t_review_plan_ms + t_run_ms + t_accept_ms + t_resume_ms + t_audit_ms)
-            / 1000.0;
+    let wall_clock_s = (t_doctor_ms
+        + t_review_plan_ms
+        + t_run_ms
+        + t_accept1_ms
+        + t_wave2_ms
+        + t_accept2_ms
+        + t_final_res_ms
+        + t_audit_ms)
+        / 1000.0;
 
     // Persist smoke phases telemetry
     let bench_dir = root.join("artifacts").join("bench");
@@ -422,6 +635,12 @@ model_tier = "top"
         "accept_ms": t_accept_ms,
         "resume_ms": t_resume_ms,
         "audit_ms": t_audit_ms,
+        "wave1_accept_ms": t_accept1_ms,
+        "wave2_resume_ms": t_wave2_ms,
+        "wave2_accept_ms": t_accept2_ms,
+        "final_resume_ms": t_final_res_ms,
+        "wave_dispatch_overhead_ms": wave_dispatch_overhead_ms,
+        "ancestor_propagation_pass_rate_pct": ancestor_propagation_pass_rate_pct,
         "wall_clock_s": wall_clock_s,
         "worktree_leak_count": worktree_leak_count
     });
@@ -438,13 +657,17 @@ model_tier = "top"
         "smoke: phase breakdown -> doctor: {:.1}ms, review: {:.1}ms, run: {:.1}ms, accept: {:.1}ms, resume: {:.1}ms, audit: {:.1}ms",
         t_doctor_ms, t_review_plan_ms, t_run_ms, t_accept_ms, t_resume_ms, t_audit_ms
     );
+    println!(
+        "smoke: multi-wave breakdown -> wave1_accept: {:.1}ms, wave2_resume (dispatch overhead): {:.1}ms, wave2_accept: {:.1}ms, final_resume: {:.1}ms",
+        t_accept1_ms, wave_dispatch_overhead_ms, t_accept2_ms, t_final_res_ms
+    );
     if worktree_leak_count > 0 {
         return Err(format!(
             "smoke: isolation invariant violated: {worktree_leak_count} worktree leak(s) detected"
         ));
     }
     println!(
-        "smoke: all isolation invariants passed (PRAGMA integrity_check ok, leaks: 0, index locks clean)"
+        "smoke: all isolation invariants passed (PRAGMA integrity_check ok, ancestor propagation: 100%, sandbox wt: 5, host leaks: 0, locks clean)"
     );
 
     Ok(())
@@ -1076,8 +1299,37 @@ fn bench(root: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let smoke_wall_clock_s = smoke_phases["wall_clock_s"].as_f64().unwrap_or(2.0);
-    let worktree_leak_count = smoke_phases["worktree_leak_count"].as_u64().unwrap_or(0) as usize;
+    let smoke_wall_clock_s = match smoke_phases["wall_clock_s"].as_f64() {
+        Some(v) => v,
+        None => {
+            eprintln!("bench: missing or invalid 'wall_clock_s' in smoke-phases.json");
+            return ExitCode::FAILURE;
+        }
+    };
+    let worktree_leak_count = match smoke_phases["worktree_leak_count"].as_u64() {
+        Some(v) => v as usize,
+        None => {
+            eprintln!("bench: missing or invalid 'worktree_leak_count' in smoke-phases.json");
+            return ExitCode::FAILURE;
+        }
+    };
+    let wave_dispatch_overhead_ms = match smoke_phases["wave_dispatch_overhead_ms"].as_f64() {
+        Some(v) => v,
+        None => {
+            eprintln!("bench: missing or invalid 'wave_dispatch_overhead_ms' in smoke-phases.json");
+            return ExitCode::FAILURE;
+        }
+    };
+    let ancestor_propagation_pass_rate_pct =
+        match smoke_phases["ancestor_propagation_pass_rate_pct"].as_f64() {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "bench: missing or invalid 'ancestor_propagation_pass_rate_pct' in smoke-phases.json"
+                );
+                return ExitCode::FAILURE;
+            }
+        };
 
     // 1. AST Multi-Language Extraction & Token Reduction Benchmark (ctx.*)
     let polyglot_samples: &[(&str, Language, &str)] = &[
@@ -1336,7 +1588,7 @@ fn bench(root: &Path) -> ExitCode {
     let _ = fs::remove_file(format!("{}-shm", tmp_db_conc.display()));
 
     // Parallel multi-worker task execution throughput speedup (conc.throughput_gain)
-    let work_items: Vec<(&str, Language)> = (0..60)
+    let work_items: Vec<(&str, Language)> = (0..200)
         .map(|i| {
             let (_name, lang, src) = polyglot_samples[i % polyglot_samples.len()];
             (src, lang)
@@ -1747,6 +1999,18 @@ fn bench(root: &Path) -> ExitCode {
             format!("{orphan_count}"),
         ),
         (
+            "iso.ancestor_propagation.pass_rate_pct",
+            ancestor_propagation_pass_rate_pct,
+            "%",
+            format!("{ancestor_propagation_pass_rate_pct:.1}%"),
+        ),
+        (
+            "orch.wave.dispatch_overhead_ms",
+            wave_dispatch_overhead_ms,
+            "ms",
+            format!("{wave_dispatch_overhead_ms:.1} ms"),
+        ),
+        (
             "smoke.wall_clock_s",
             smoke_wall_clock_s,
             "s",
@@ -1941,6 +2205,12 @@ fn bench(root: &Path) -> ExitCode {
             "accept_ms": smoke_phases["accept_ms"].as_f64().unwrap_or(0.0),
             "resume_ms": smoke_phases["resume_ms"].as_f64().unwrap_or(0.0),
             "audit_ms": smoke_phases["audit_ms"].as_f64().unwrap_or(0.0),
+            "wave1_accept_ms": smoke_phases["wave1_accept_ms"].as_f64().unwrap_or(0.0),
+            "wave2_resume_ms": smoke_phases["wave2_resume_ms"].as_f64().unwrap_or(0.0),
+            "wave2_accept_ms": smoke_phases["wave2_accept_ms"].as_f64().unwrap_or(0.0),
+            "final_resume_ms": smoke_phases["final_resume_ms"].as_f64().unwrap_or(0.0),
+            "wave_dispatch_overhead_ms": wave_dispatch_overhead_ms,
+            "ancestor_propagation_pass_rate_pct": ancestor_propagation_pass_rate_pct,
             "wall_clock_s": smoke_wall_clock_s
         },
         "metrics": metrics_json,
