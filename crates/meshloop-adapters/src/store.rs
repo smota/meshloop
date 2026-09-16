@@ -537,6 +537,61 @@ impl RunStore for SqliteStore {
         Ok(())
     }
 
+    fn save_run_and_events(
+        &mut self,
+        row: &RunRow,
+        events: &[TransitionRecord],
+    ) -> Result<(), StoreError> {
+        let plan_state = match row.plan_state {
+            PlanState::AwaitingPlanReview => "AwaitingPlanReview",
+            PlanState::PlanAccepted => "PlanAccepted",
+            PlanState::PlanDeclined => "PlanDeclined",
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO runs (graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at, review_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(graph_id) DO UPDATE SET
+                plan_state=?2, run_base=?3, integrate_ref=?4, plan_json=?5, plan_sha256=?6, review_note=?8",
+            params![
+                row.graph_id,
+                plan_state,
+                row.run_base,
+                row.integrate_ref,
+                row.plan_json,
+                row.plan_sha256,
+                row.created_at,
+                row.review_note,
+            ],
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+
+        for record in events {
+            tx.execute(
+                "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    record.graph_id,
+                    record.task_id.0,
+                    record.attempt_id.map(|a| a.0),
+                    format!("{:?}", record.from),
+                    format!("{:?}", record.to),
+                    format!("{:?}", record.event),
+                    record.reason,
+                    record.executor,
+                    record.occurred_at,
+                ],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        }
+
+        tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError> {
         self.conn
             .query_row(
@@ -774,6 +829,14 @@ impl RunStore for SqliteStore {
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
         Ok(())
+    }
+
+    fn integrity_check(&self) -> Result<bool, StoreError> {
+        Self::integrity_check(self)
+    }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        Self::event_count(self)
     }
 }
 

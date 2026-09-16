@@ -501,17 +501,24 @@ impl<'a> RunLoop<'a> {
         assign_tiers(&mut graph, &DefaultTierAssigner);
 
         // Revert target_task from Ready to Pending if prerequisites were added
+        let mut mutation_events = Vec::new();
         if let GraphMutation::InsertPrerequisite { target_task, .. } = &mutation
             && let Some(TaskState::Ready) = tasks.get(target_task)
         {
-            let _ = self.append(
-                graph_id,
-                *target_task,
-                None,
-                TaskState::Ready,
-                Event::GraphMutated,
-                Some("prerequisite inserted; reverting to pending".into()),
-            )?;
+            let to = transition(TaskState::Ready, Event::GraphMutated).map_err(|_| {
+                OrchestratorError::Illegal("Ready + GraphMutated is illegal".into())
+            })?;
+            mutation_events.push(TransitionRecord {
+                graph_id: graph_id.into(),
+                task_id: *target_task,
+                attempt_id: None,
+                from: TaskState::Ready,
+                to,
+                event: Event::GraphMutated,
+                reason: Some("prerequisite inserted; reverting to pending".into()),
+                executor: "meshloop".into(),
+                occurred_at: stamp(),
+            });
         }
 
         // Persist updated graph JSON
@@ -524,7 +531,7 @@ impl<'a> RunLoop<'a> {
             row.plan_state = PlanState::AwaitingPlanReview;
         }
 
-        self.store.save_run(&row)?;
+        self.store.save_run_and_events(&row, &mutation_events)?;
 
         let mesh = self.workspace.repo_root().join(".meshloop");
         let _ = std::fs::create_dir_all(&mesh);

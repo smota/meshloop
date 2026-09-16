@@ -1415,6 +1415,14 @@ fn cmd_mutate_plan(
         }
     };
 
+    let topo_order = updated_graph
+        .try_topological_order()
+        .map(|order| order.into_iter().map(|t| t.0).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let row = saga.store.load_run(&graph_id).ok().flatten();
+    let plan_state = row.as_ref().map(|r| format!("{:?}", r.plan_state));
+    let plan_sha256 = row.as_ref().map(|r| r.plan_sha256.clone());
+
     if json {
         println!(
             "{}",
@@ -1425,6 +1433,9 @@ fn cmd_mutate_plan(
                     "graph_id": graph_id,
                     "require_review": require_review,
                     "nodes_count": updated_graph.nodes.len(),
+                    "topological_order": topo_order,
+                    "plan_state": plan_state,
+                    "plan_sha256": plan_sha256,
                     "graph": updated_graph,
                 }),
             )

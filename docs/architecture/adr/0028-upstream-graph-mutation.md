@@ -40,9 +40,8 @@ Constraints:
      - `(Blocked, GraphMutated) => Blocked`.
    - Engine immutability check: `target_task` cannot be in `Running`, `Verifying`, `AwaitingReview`, `Accepted`, or `Integrated`.
 3. **Audit and Persistence**:
-   - Updated `plan_json` and `plan_sha256` are persisted in SQLite `runs` table within a transaction.
-   - `Event::GraphMutated` transition is appended to SQLite event log.
-   - `.meshloop/plan.json` is updated on disk for tool inspection.
+   - Updated `plan_json`, `plan_sha256`, and `Event::GraphMutated` records are persisted atomically via `RunStore::save_run_and_events(&row, &mutation_events)` within a single `BEGIN IMMEDIATE` transaction in SQLite.
+   - `.meshloop/plan.json` derived cache is updated on disk only after successful transaction commitment.
 4. **Operator Governance**:
    - `--require-review` flag sets `plan_state` to `AwaitingPlanReview`.
    - `meshloop resume` refuses to tick when `plan_state != PlanAccepted`.
@@ -65,10 +64,12 @@ Constraints:
   - `test_apply_mutation_rejects_duplicate_id`
   - `test_apply_mutation_rejects_reserved_task_id_0`
 - State transition unit tests in `crates/meshloop-domain/src/state.rs`.
-- Store serialization in `crates/meshloop-adapters/src/store.rs`.
+- Store atomic persistence in `crates/meshloop-adapters/src/store.rs` (`save_run_and_events`).
 - Recovery replay unit test in `crates/meshloop-engine/src/recovery.rs`: `per_task_fold_replays_dynamically_mutated_tasks`.
 - Engine integration test in `crates/meshloop-engine/src/run_loop.rs`.
 - End-to-end integration tests in `crates/meshloop-cli/tests/plan_and_run.rs`:
   - `mutate_plan_inserts_prerequisite_and_resumes_to_completion`
   - `mutate_plan_with_require_review_gates_resume`
-- Full `cargo run -p xtask -- check` validation.
+- Algorithmic benchmark: `orch.mutation.overhead_ms.p95 <= 15.0ms` across 6 canonical manifests evaluated in `xtask bench-mutation`.
+- Rollback invariant: `iso.mutation_rollback.fidelity = 1.0` (100% snapshot equality across 7 negative control injections).
+- Full `cargo run -p xtask -- check` and `smoke` validation.

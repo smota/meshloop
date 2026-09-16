@@ -48,6 +48,7 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 - `orch.route.accuracy_pct`: Percentage of tasks routed to the policy-dictated model tier.
 - `orch.schedule.overhead_ms`: Scheduler overhead from node readiness to process dispatch.
 - `orch.schedule.overhead_ms.p95`: 95th percentile scheduling overhead across 7 canonical manifests using `HdrHistogram` (**Target: $\le 25.0\text{ms}$**).
+- `orch.mutation.overhead_ms.p95`: 95th percentile dynamic graph mutation and transactional persistence latency across 6 canonical manifests using `HdrHistogram` (**Target: $\le 15.0\text{ms}$**).
 - `orch.cooldown.violation_count`: Invocations attempted against harnesses under active cooldown (**Invariant: 0**).
 - `orch.txn.wal_commit_ms`: RunLoop transaction persistence latency in SQLite WAL.
 - `orch.wave.dispatch_overhead_ms`: Scheduler overhead to integrate ancestor tasks, evaluate dependency satisfaction, and dispatch dependent downstream tasks (**Target: $\le 1500.0\text{ms}$**).
@@ -55,6 +56,7 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 ### 3.3 Isolation and Security Metrics (`iso.*`)
 - `iso.worktree.leak_count`: Untracked files, uncommitted changes, or dangling locks left in the host repo (**CI Gate: 0**).
 - `iso.ancestor_propagation.pass_rate_pct`: Fidelity of ancestor artifact inheritance and sibling isolation across multi-wave execution (**CI Gate: 100%**).
+- `iso.mutation_rollback.fidelity`: State snapshot equality ($S' == S$) across negative control mutation rejections (**CI Gate: 1.0 / 100%**).
 - `iso.crash.recovery_fidelity`: Recovery success rate following crash injection across WAL barriers (**CI Gate: 1.0 / 100%**).
 - `iso.redact.pass_rate_pct`: Scrubber pass rate for sensitive tokens across logs, stdout, and diffs (**CI Gate: 100%**).
 - `iso.gate.obedience_rate_pct`: Adherence to mandatory human approval gates (`review-plan`, `accept`, `integrate`) (**CI Gate: 100%**).

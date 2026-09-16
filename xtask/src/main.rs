@@ -22,10 +22,11 @@ fn main() -> ExitCode {
         Some("publish-dry") => publish_dry(root),
         Some("bench") => bench(root),
         Some("bench-dag") => bench_dag(root),
+        Some("bench-mutation") => bench_mutation(root),
         Some("bench-world-s") => bench_world_s(root, &args[1..]),
         _ => {
             eprintln!(
-                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-dag|bench-world-s"
+                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-dag|bench-mutation|bench-world-s"
             );
             ExitCode::from(2)
         }
@@ -990,6 +991,466 @@ fn bench_dag(root: &Path) -> ExitCode {
     }
 }
 
+fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), String> {
+    use hdrhistogram::Histogram;
+    use meshloop_adapters::store::SqliteStore;
+    use meshloop_domain::state::PlanState;
+    use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, TaskNode};
+    use meshloop_engine::ports::{RunRow, RunStore};
+    use std::time::Instant;
+
+    let manifest_dir = root.join("benches").join("manifests");
+    let valid_manifests = [
+        "chain.json",
+        "diamond.json",
+        "wide-fanout.json",
+        "wide-fanin.json",
+        "forest.json",
+        "nested-diamond.json",
+    ];
+
+    let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3)
+        .map_err(|e| format!("failed to initialize hdrhistogram: {e}"))?;
+
+    for file_name in valid_manifests {
+        let path = manifest_dir.join(file_name);
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let graph: TaskGraph = serde_json::from_str(&content)
+            .map_err(|e| format!("parse JSON {}: {e}", path.display()))?;
+
+        let tmp_bench = std::env::temp_dir().join(format!(
+            "bench_mut_{}_{}",
+            file_name.replace('.', "_"),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp_bench);
+        let mesh = tmp_bench.join(".meshloop");
+        fs::create_dir_all(&mesh).map_err(|e| format!("create mesh dir: {e}"))?;
+        let db_path = mesh.join("state.sqlite");
+        let mut store = SqliteStore::open(&db_path).map_err(|e| format!("open sqlite: {e:?}"))?;
+
+        let initial_json =
+            serde_json::to_string_pretty(&graph).map_err(|e| format!("serialize graph: {e}"))?;
+        let row = RunRow {
+            graph_id: graph.graph_id.clone(),
+            plan_state: PlanState::PlanAccepted,
+            run_base: "main".into(),
+            integrate_ref: "meshloop/integrate".into(),
+            plan_json: initial_json.clone(),
+            plan_sha256: "init_sha".into(),
+            created_at: "0".into(),
+            review_note: None,
+        };
+        store
+            .save_run(&row)
+            .map_err(|e| format!("save initial run: {e:?}"))?;
+        let _ = fs::write(mesh.join("plan.json"), &initial_json);
+
+        let target_task = graph
+            .nodes
+            .first()
+            .map(|n| n.id)
+            .ok_or_else(|| format!("manifest {file_name} has no nodes"))?;
+
+        let mut row = row;
+
+        // Warmup: 20 iterations
+        for i in 0..20 {
+            let mut g = graph.clone();
+            let warmup_task = TaskNode {
+                id: TaskId(50_000 + i),
+                description: format!("warmup-{i}"),
+                depends_on: vec![],
+                tier: None,
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+            };
+            let mutation = GraphMutation::InsertPrerequisite {
+                target_task,
+                new_tasks: vec![warmup_task],
+            };
+            let _ = g.apply_mutation(&mutation);
+            meshloop_engine::planner::assign_tiers(
+                &mut g,
+                &meshloop_engine::planner::DefaultTierAssigner,
+            );
+            if let Ok(json) = serde_json::to_string(&g) {
+                row.plan_json = json;
+                let _ = store.save_run_and_events(&row, &[]);
+            }
+        }
+
+        // Benchmark: 500 samples
+        for i in 0..500 {
+            let new_task = TaskNode {
+                id: TaskId(100_000 + i),
+                description: format!("bench-{i}"),
+                depends_on: vec![],
+                tier: None,
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+            };
+            let mutation = GraphMutation::InsertPrerequisite {
+                target_task,
+                new_tasks: vec![new_task],
+            };
+
+            let start = Instant::now();
+            let mut g = graph.clone();
+            g.apply_mutation(&mutation)
+                .map_err(|e| format!("apply_mutation failed in {file_name}: {e:?}"))?;
+            meshloop_engine::planner::assign_tiers(
+                &mut g,
+                &meshloop_engine::planner::DefaultTierAssigner,
+            );
+            let json = serde_json::to_string(&g)
+                .map_err(|e| format!("serialize failed in {file_name}: {e:?}"))?;
+            row.plan_json = json;
+            store
+                .save_run_and_events(&row, &[])
+                .map_err(|e| format!("save_run_and_events failed in {file_name}: {e:?}"))?;
+            let elapsed_us = start.elapsed().as_micros().max(1) as u64;
+            hist.record(elapsed_us)
+                .map_err(|e| format!("record latency: {e}"))?;
+        }
+
+        drop(store);
+        let _ = fs::remove_dir_all(&tmp_bench);
+
+        if verbose {
+            println!("  [PASS] mutation manifest {file_name}");
+        }
+    }
+
+    let p95_us = hist.value_at_quantile(0.95);
+    let p95_ms = p95_us as f64 / 1000.0;
+    Ok((p95_ms, p95_ms <= 15.0))
+}
+
+fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
+    let _ = root;
+    use meshloop_adapters::check::CommandCheckRunner;
+    use meshloop_adapters::git::GitWorktreeAdapter;
+    use meshloop_adapters::process::NullPidIsDead;
+    use meshloop_adapters::store::SqliteStore;
+    use meshloop_domain::evidence::AttemptId;
+    use meshloop_domain::state::{Event, PlanState, TaskState};
+    use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, TaskNode};
+    use meshloop_engine::ports::{RunRow, RunStore, TransitionRecord};
+    use meshloop_engine::router::Router;
+    use meshloop_engine::run_loop::{RunLimits, RunLoop};
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    let tmp_repo = std::env::temp_dir().join(format!("bench_rollback_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp_repo);
+    let mesh = tmp_repo.join(".meshloop");
+    fs::create_dir_all(&mesh).map_err(|e| format!("create mesh dir: {e}"))?;
+    let db_path = mesh.join("state.sqlite");
+    let mut store = SqliteStore::open(&db_path).map_err(|e| format!("open sqlite: {e:?}"))?;
+
+    let graph_id = "g_rollback_test";
+    let base_graph = TaskGraph {
+        graph_id: graph_id.into(),
+        nodes: vec![
+            TaskNode {
+                id: TaskId(1),
+                description: "root".into(),
+                depends_on: vec![],
+                tier: None,
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+            },
+            TaskNode {
+                id: TaskId(2),
+                description: "leaf".into(),
+                depends_on: vec![TaskId(1)],
+                tier: None,
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+            },
+        ],
+    };
+
+    let base_json =
+        serde_json::to_string_pretty(&base_graph).map_err(|e| format!("serialize graph: {e}"))?;
+    let base_sha = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        base_json.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
+
+    let row = RunRow {
+        graph_id: graph_id.into(),
+        plan_state: PlanState::PlanAccepted,
+        run_base: "main".into(),
+        integrate_ref: "meshloop/integrate".into(),
+        plan_json: base_json.clone(),
+        plan_sha256: base_sha,
+        created_at: "1000".into(),
+        review_note: None,
+    };
+    store
+        .save_run(&row)
+        .map_err(|e| format!("save initial run: {e:?}"))?;
+    fs::write(mesh.join("plan.json"), &base_json).map_err(|e| format!("write plan.json: {e}"))?;
+
+    let processes = NullPidIsDead;
+    let checks = CommandCheckRunner;
+    let git = GitWorktreeAdapter::new(tmp_repo.clone());
+    let limits = RunLimits {
+        max_retries: 3,
+        task_timeout: Duration::from_secs(30),
+        max_concurrent_workers: 2,
+    };
+
+    let mut saga = RunLoop {
+        harnesses: HashMap::new(),
+        candidates: vec![],
+        workspace: &git,
+        store: &mut store,
+        processes: &processes,
+        checks: &checks,
+        router: Router::default(),
+        limits,
+        fixture_only: true,
+        verify_command: vec![],
+        worktree_base: tmp_repo.join("worktrees"),
+        active_graph: None,
+    };
+
+    #[derive(PartialEq, Eq, Debug)]
+    struct StateSnapshot {
+        plan_json: String,
+        plan_sha256: String,
+        plan_state: PlanState,
+        event_count: usize,
+        integrity_ok: bool,
+        plan_file: String,
+    }
+
+    let take_snapshot = |s: &mut RunLoop| -> Result<StateSnapshot, String> {
+        let r = s
+            .store
+            .load_run(graph_id)
+            .map_err(|e| format!("load_run: {e:?}"))?
+            .ok_or_else(|| "run row missing".to_string())?;
+        let ec = s
+            .store
+            .event_count()
+            .map_err(|e| format!("event_count: {e:?}"))?;
+        let ok = s
+            .store
+            .integrity_check()
+            .map_err(|e| format!("integrity: {e:?}"))?;
+        let content =
+            fs::read_to_string(s.workspace.repo_root().join(".meshloop").join("plan.json"))
+                .map_err(|e| format!("read plan.json: {e}"))?;
+        Ok(StateSnapshot {
+            plan_json: r.plan_json,
+            plan_sha256: r.plan_sha256,
+            plan_state: r.plan_state,
+            event_count: ec,
+            integrity_ok: ok,
+            plan_file: content,
+        })
+    };
+
+    let negative_injections: [(&str, GraphMutation); 6] = [
+        // 1. Cycle injection (1 -> 3 -> 2 -> 1)
+        (
+            "cycle injection",
+            GraphMutation::InsertPrerequisite {
+                target_task: TaskId(1),
+                new_tasks: vec![TaskNode {
+                    id: TaskId(3),
+                    description: "cycle".into(),
+                    depends_on: vec![TaskId(2)],
+                    tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
+                }],
+            },
+        ),
+        // 2. Dangling prerequisite / target not found
+        (
+            "target not found",
+            GraphMutation::InsertPrerequisite {
+                target_task: TaskId(999),
+                new_tasks: vec![TaskNode {
+                    id: TaskId(4),
+                    description: "dangling".into(),
+                    depends_on: vec![],
+                    tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
+                }],
+            },
+        ),
+        // 3. Duplicate task id
+        (
+            "duplicate task id",
+            GraphMutation::InsertPrerequisite {
+                target_task: TaskId(2),
+                new_tasks: vec![TaskNode {
+                    id: TaskId(1),
+                    description: "duplicate".into(),
+                    depends_on: vec![],
+                    tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
+                }],
+            },
+        ),
+        // 4. Reserved task id (TaskId(0))
+        (
+            "reserved task id",
+            GraphMutation::InsertPrerequisite {
+                target_task: TaskId(2),
+                new_tasks: vec![TaskNode {
+                    id: TaskId(0),
+                    description: "reserved".into(),
+                    depends_on: vec![],
+                    tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
+                }],
+            },
+        ),
+        // 5. Source task not found in AppendFollowup
+        (
+            "source task not found",
+            GraphMutation::AppendFollowup {
+                source_task: TaskId(888),
+                new_tasks: vec![TaskNode {
+                    id: TaskId(5),
+                    description: "missing source".into(),
+                    depends_on: vec![],
+                    tier: None,
+                    allowed_paths: vec![],
+                    empty_diff_ok: false,
+                }],
+            },
+        ),
+        // 6. Empty new tasks list
+        (
+            "empty new tasks",
+            GraphMutation::InsertPrerequisite {
+                target_task: TaskId(1),
+                new_tasks: vec![],
+            },
+        ),
+    ];
+
+    let mut passed_rejections = 0;
+    for (name, mutation) in negative_injections {
+        let before = take_snapshot(&mut saga)?;
+        let res = saga.mutate_plan(graph_id, mutation, false);
+        if res.is_ok() {
+            return Err(format!("negative control '{name}' unexpectedly succeeded"));
+        }
+        let after = take_snapshot(&mut saga)?;
+        if before != after {
+            return Err(format!(
+                "negative control '{name}' mutated state: before={before:?}, after={after:?}"
+            ));
+        }
+        passed_rejections += 1;
+    }
+
+    // 7. Active state violation: Task 2 transitioning to Running
+    let rec = TransitionRecord {
+        graph_id: graph_id.into(),
+        task_id: TaskId(2),
+        attempt_id: Some(AttemptId(1)),
+        from: TaskState::Pending,
+        to: TaskState::Running,
+        event: Event::AttemptStarted,
+        reason: Some("active test".into()),
+        executor: "test".into(),
+        occurred_at: "1001".into(),
+    };
+    saga.store
+        .append(rec)
+        .map_err(|e| format!("append running: {e:?}"))?;
+
+    let before = take_snapshot(&mut saga)?;
+    let active_mutation = GraphMutation::InsertPrerequisite {
+        target_task: TaskId(2),
+        new_tasks: vec![TaskNode {
+            id: TaskId(7),
+            description: "prereq on running task".into(),
+            depends_on: vec![],
+            tier: None,
+            allowed_paths: vec![],
+            empty_diff_ok: false,
+        }],
+    };
+    let res = saga.mutate_plan(graph_id, active_mutation, false);
+    if res.is_ok() {
+        return Err("active task prerequisite mutation unexpectedly succeeded".into());
+    }
+    let after = take_snapshot(&mut saga)?;
+    if before != after {
+        return Err(format!(
+            "active task mutation altered state: before={before:?}, after={after:?}"
+        ));
+    }
+    passed_rejections += 1;
+
+    drop(saga);
+    drop(store);
+    let _ = fs::remove_dir_all(&tmp_repo);
+
+    Ok(passed_rejections as f64 / 7.0)
+}
+
+fn bench_mutation(root: &Path) -> ExitCode {
+    println!("=== MESHLOOP TIER B: DYNAMIC GRAPH MUTATION BENCHMARK ===");
+    let rollback_res = run_mutation_rollback_tests(root);
+    match rollback_res {
+        Ok(fidelity) => {
+            println!(
+                "  Mutation Rollback Fidelity: {:.1} (7/7 negative controls rolled back)",
+                fidelity
+            );
+            if (fidelity - 1.0).abs() > 1e-4 {
+                eprintln!("Result: FAIL (Rollback fidelity must be 1.0)");
+                return ExitCode::FAILURE;
+            }
+        }
+        Err(e) => {
+            eprintln!("Mutation rollback test failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    match run_mutation_benchmarks(root, true) {
+        Ok((p95_ms, pass)) => {
+            println!("Summary:");
+            println!("  Manifests evaluated: 6 canonical DAGs");
+            println!(
+                "  Mutation overhead P95: {:.3} ms (threshold <= 15.0 ms)",
+                p95_ms
+            );
+            if pass {
+                println!("Result: PASS");
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("Result: FAIL (P95 exceeds 15.0 ms)");
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("Mutation benchmark failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WilsonInterval {
     pub proportion: f64,
@@ -1888,6 +2349,9 @@ fn bench(root: &Path) -> ExitCode {
     }
 
     let (dag_schedule_p95_ms, _) = run_dag_benchmarks(root, false).unwrap_or((999.0, false));
+    let (mutation_overhead_p95_ms, _) =
+        run_mutation_benchmarks(root, false).unwrap_or((999.0, false));
+    let mutation_rollback_fidelity = run_mutation_rollback_tests(root).unwrap_or(0.0);
 
     let raw_metrics: Vec<(&'static str, f64, &'static str, String)> = vec![
         (
@@ -2009,6 +2473,18 @@ fn bench(root: &Path) -> ExitCode {
             wave_dispatch_overhead_ms,
             "ms",
             format!("{wave_dispatch_overhead_ms:.1} ms"),
+        ),
+        (
+            "iso.mutation_rollback.fidelity",
+            mutation_rollback_fidelity,
+            "ratio",
+            format!("{mutation_rollback_fidelity:.1} (7/7 negative controls rolled back)"),
+        ),
+        (
+            "orch.mutation.overhead_ms.p95",
+            mutation_overhead_p95_ms,
+            "ms",
+            format!("{mutation_overhead_p95_ms:.3} ms (6 manifests)"),
         ),
         (
             "smoke.wall_clock_s",
@@ -2211,6 +2687,8 @@ fn bench(root: &Path) -> ExitCode {
             "final_resume_ms": smoke_phases["final_resume_ms"].as_f64().unwrap_or(0.0),
             "wave_dispatch_overhead_ms": wave_dispatch_overhead_ms,
             "ancestor_propagation_pass_rate_pct": ancestor_propagation_pass_rate_pct,
+            "mutation_overhead_ms": mutation_overhead_p95_ms,
+            "mutation_rollback_fidelity": mutation_rollback_fidelity,
             "wall_clock_s": smoke_wall_clock_s
         },
         "metrics": metrics_json,

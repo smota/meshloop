@@ -186,3 +186,14 @@ With the deterministic regression gate (World D) fully operational, the three hi
   - **Context Quantization Optimization (`meshloop-context::quant`):** Optimized `SignatureIndex::rank_files` and `embed` to eliminate intermediate `Vec<ScoredHit>` cloning and token string allocations via zero-copy `&str` and byte-by-byte `fnv1a64_lower`, reducing search P95 latency from 699 $\mu$s to **324 $\mu$s**.
   - **Benchmark Scorecard:** Expanded canonical gate from 19 to 21 metrics, achieving **21/21 PASS** on `xtask bench`.
 
+### Priority 6: E2E Refinement Cycle — Round 2: Dynamic Upstream Graph Mutation & Atomic Replanning — **DELIVERED & VERIFIED**
+- **Objective:** Close the dynamic graph mutation and replanning verification gap by unifying transaction persistence, enforcing atomic rollback across negative control injections, and evaluating parametric mutation performance across the canonical manifests.
+- **Value:** Enables live runtime task insertion and prerequisite rewiring during agent execution without risk of database corruption, partial commit leaks, or DAG cycle introduction.
+- **Implementation & Evidence:**
+  - **Independent Grok Architectural Review (Replica & Treplica):** Grok identified critical failure modes: replacing separated auto-commits with a single `BEGIN IMMEDIATE` transaction unifying `runs` and `events`; ensuring `.meshloop/plan.json` derived cache writes happen only after transaction commit; isolating algorithmic and transactional latency in `orch.mutation.overhead_ms.p95` across canonical DAG manifests; and testing full state equality $S = (\text{plan\_json}, \text{plan\_sha256}, \text{plan\_state}, \text{event\_count}, \text{integrity} == \text{"ok"})$ across 7 negative control injections.
+  - **Unified Atomic Persistence:** Added `save_run_and_events(&mut self, row: &RunRow, events: &[TransitionRecord])` to `RunStore` and implemented it with a single `BEGIN IMMEDIATE` transaction in `SqliteStore`. Updated `RunLoop::mutate_plan` to persist row and mutation records atomically before touching disk caches.
+  - **Enhanced CLI Output:** Enriched `cmd_mutate_plan` JSON response with `nodes_count`, `topological_order`, `plan_state`, and `plan_sha256`.
+  - **Metrics & Invariants Added:**
+    - `iso.mutation_rollback.fidelity = 1.0` (Invariant: 100% snapshot equality across 7 negative controls: cycle injection, dangling target, duplicate ID, reserved task 0, active state violation, missing source in followup, empty new tasks).
+    - `orch.mutation.overhead_ms.p95 <= 15.0ms` (Observed: **1.75 ms** across 6 canonical manifests: chain, diamond, wide-fanout, wide-fanin, forest, nested-diamond).
+  - **Benchmark Scorecard:** Expanded canonical gate from 21 to 23 metrics, achieving **23/23 PASS** on `xtask bench`.

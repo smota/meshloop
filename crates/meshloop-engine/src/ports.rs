@@ -269,6 +269,11 @@ pub trait QuotaStore {
 
 pub trait RunStore: EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore {
     fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
+    fn save_run_and_events(
+        &mut self,
+        row: &RunRow,
+        events: &[TransitionRecord],
+    ) -> Result<(), StoreError>;
     fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError>;
     fn latest_run(&self) -> Result<Option<RunRow>, StoreError>;
     fn list_runs(&self) -> Result<Vec<RunRow>, StoreError>;
@@ -303,6 +308,12 @@ pub trait RunStore: EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore
             .load_run(graph_id)?
             .ok_or_else(|| StoreError::Corrupt(format!("no run {graph_id}")))?;
         serde_json::from_str(&row.plan_json).map_err(|e| StoreError::Corrupt(e.to_string()))
+    }
+    fn integrity_check(&self) -> Result<bool, StoreError> {
+        Ok(true)
+    }
+    fn event_count(&self) -> Result<usize, StoreError> {
+        Ok(0)
     }
 }
 

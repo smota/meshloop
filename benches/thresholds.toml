@@ -10,6 +10,7 @@ schema_version = "1.0.0"
 "iso.ancestor_propagation.pass_rate_pct" = { op = "eq", value = 100 }
 "conc.orphan_process_count" = { op = "eq", value = 0 }
 "ctx.cache.stale_hit_rate_pct" = { op = "eq", value = 0 }
+"iso.mutation_rollback.fidelity" = { op = "eq", value = 1.0 }
 
 # Performance and Efficiency Targets
 [performance.targets]
@@ -26,6 +27,7 @@ schema_version = "1.0.0"
 "conv.self_repair.success_rate" = { op = "gte", value = 80.0 }
 "slice.build_avoidance_rate" = { op = "gte", value = 50.0 }
 "orch.schedule.overhead_ms.p95" = { op = "lte", value = 25.0 }
+"orch.mutation.overhead_ms.p95" = { op = "lte", value = 15.0 }
 "smoke.wall_clock_s" = { op = "lte", value = 5.0 }
 
 
