@@ -220,6 +220,9 @@ fn parse_rustc_error(line: &str, lines: &[&str], i: usize) -> Option<DiagnosticA
         (sev, code.to_string(), message)
     } else if let Some(rest) = line.strip_prefix("error:") {
         let message = rest.trim();
+        if is_rustc_trailer(message) {
+            return None;
+        }
         let sev = if is_syntax_message(message) {
             DiagnosticSeverity::Syntax
         } else {
@@ -338,12 +341,22 @@ fn parse_cargo_test_fail(line: &str) -> Option<DiagnosticAtom> {
     })
 }
 
+fn is_rustc_trailer(message: &str) -> bool {
+    let m = message.trim().to_ascii_lowercase();
+    m.contains("aborting due to")
+        || m.contains("detailed explanations")
+        || m.contains("for more information about an error")
+}
+
 fn parse_generic_error(line: &str) -> Option<DiagnosticAtom> {
     let lower = line.to_ascii_lowercase();
     if !(lower.contains("error:") || lower.contains("error ")) {
         return None;
     }
     if lower.contains("warning") {
+        return None;
+    }
+    if is_rustc_trailer(line) {
         return None;
     }
     Some(DiagnosticAtom {
@@ -545,6 +558,19 @@ error[E0308]: mismatched types
             }
         );
         assert_eq!(empty.blocking(), 0);
+    }
+
+    #[test]
+    fn rustc_aborting_trailer_is_not_an_atom() {
+        let lat = parse_diagnostics(
+            "error[E0308]: mismatched types\n --> src/main.rs:2:5\n\
+             error: aborting due to 1 previous error\n\
+             Some errors have detailed explanations: E0308.\n\
+             For more information about an error, try `rustc --explain E0308`.\n",
+        );
+        assert_eq!(lat.len(), 1);
+        assert_eq!(lat.atoms().next().unwrap().code, "E0308");
+        assert_eq!(lat.blocking(), 1);
     }
 
     #[test]

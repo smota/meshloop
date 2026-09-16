@@ -27,6 +27,11 @@ pub struct RoundRecord {
     pub fingerprint: u64,
     pub snapshot_rev: String,
     pub lattice: DiagnosticLattice,
+    /// Redacted check output that produced this lattice. Restored on Rollback
+    /// so the next prompt sees the pre-regression diagnostics, not the syntax
+    /// failure that triggered `reset_hard`.
+    pub diag: String,
+    pub action: RepairAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,17 +85,73 @@ impl RepairSession {
         self.rounds.len() as u32
     }
 
+    pub fn record_at(&self, round: u32) -> Option<&RoundRecord> {
+        self.rounds.iter().find(|r| r.round == round)
+    }
+
+    pub fn last_action(&self) -> Option<&RepairAction> {
+        self.rounds.last().map(|r| &r.action)
+    }
+
+    /// Compact, secret-free trajectory for a `DeterministicEvidence` row.
+    pub fn trajectory_redacted(&self) -> String {
+        let mut lines = Vec::with_capacity(self.rounds.len() + 1);
+        lines.push(format!("repair-session rounds={}", self.rounds.len()));
+        for r in &self.rounds {
+            let p = r.lattice.progress();
+            lines.push(format!(
+                "round={} rev={} fingerprint={:016x} phi={} syntax={} type={} test={} blocking={} action={}",
+                r.round,
+                r.snapshot_rev,
+                r.fingerprint,
+                r.lattice.blocking(),
+                p.syntax,
+                p.type_errors,
+                p.tests,
+                r.lattice.blocking(),
+                r.action.summary(),
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// Observe the lattice produced by this check. `snapshot_rev` is the worktree
     /// HEAD the caller can pass to `WorkspacePort::reset_hard` on Rollback.
-    pub fn observe(&mut self, lattice: DiagnosticLattice, snapshot_rev: String) -> RepairAction {
+    ///
+    /// The caller must not observe a worktree restored by Rollback: that snapshot
+    /// is already in `rounds` and a second observe would be classified as
+    /// `Stop { Oscillation }`.
+    pub fn observe(
+        &mut self,
+        lattice: DiagnosticLattice,
+        snapshot_rev: impl Into<String>,
+        diag: impl Into<String>,
+    ) -> RepairAction {
         let action = decide(&self.rounds, self.budget, &lattice);
         self.rounds.push(RoundRecord {
             round: self.rounds.len() as u32,
             fingerprint: lattice.fingerprint(),
-            snapshot_rev,
+            snapshot_rev: snapshot_rev.into(),
             lattice,
+            diag: diag.into(),
+            action: action.clone(),
         });
         action
+    }
+}
+
+impl RepairAction {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Accept => "Accept".into(),
+            Self::Continue { round, .. } => format!("Continue:{round}"),
+            Self::Rollback {
+                to_round, to_rev, ..
+            } => {
+                format!("Rollback:{to_round}:{to_rev}")
+            }
+            Self::Stop { reason } => format!("Stop:{reason:?}"),
+        }
     }
 }
 
@@ -207,17 +268,18 @@ mod tests {
     #[test]
     fn empty_diagnostics_accept() {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
-        let action = s.observe(DiagnosticLattice::empty(), "rev0".into());
+        let action = s.observe(DiagnosticLattice::empty(), "rev0", "");
         assert_eq!(action, RepairAction::Accept);
+        assert_eq!(s.rounds().len(), 1);
+        assert_eq!(s.rounds()[0].lattice.blocking(), 0);
+        assert!(matches!(s.rounds()[0].action, RepairAction::Accept));
     }
 
     #[test]
     fn first_errors_continue_with_constraint() {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
-        let action = s.observe(
-            lat("error[E0308]: mismatched types\n --> src/main.rs:2:5\n"),
-            "rev1".into(),
-        );
+        let diag = "error[E0308]: mismatched types\n --> src/main.rs:2:5\n";
+        let action = s.observe(lat(diag), "rev1", diag);
         match action {
             RepairAction::Continue {
                 round,
@@ -228,18 +290,18 @@ mod tests {
             }
             other => panic!("expected Continue, got {other:?}"),
         }
+        assert_eq!(s.rounds()[0].diag, diag);
     }
 
     #[test]
     fn syntax_regression_rolls_back_to_previous_rev() {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
-        let _ = s.observe(
-            lat("error[E0308]: mismatched types\n --> src/main.rs:2:5\n"),
-            "rev-type".into(),
-        );
+        let type_diag = "error[E0308]: mismatched types\n --> src/main.rs:2:5\n";
+        let _ = s.observe(lat(type_diag), "rev-type", type_diag);
         let action = s.observe(
             lat("error: this file contains an unclosed delimiter\n --> src/lib.rs:1:1\n"),
-            "rev-syntax".into(),
+            "rev-syntax",
+            "syntax-diag",
         );
         match action {
             RepairAction::Rollback {
@@ -250,6 +312,9 @@ mod tests {
                 assert_eq!(to_round, 0);
                 assert_eq!(to_rev, "rev-type");
                 assert!(negative_constraint.contains("syntax"));
+                let restored = s.record_at(to_round).expect("restored round");
+                assert_eq!(restored.diag, type_diag);
+                assert_eq!(restored.snapshot_rev, "rev-type");
             }
             other => panic!("expected Rollback, got {other:?}"),
         }
@@ -259,8 +324,8 @@ mod tests {
     fn repeated_fingerprint_is_oscillation() {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 5 });
         let d = lat("error[E0308]: mismatched types\n --> src/main.rs:2:5\n");
-        let _ = s.observe(d.clone(), "r0".into());
-        let action = s.observe(d, "r1".into());
+        let _ = s.observe(d.clone(), "r0", "d0");
+        let action = s.observe(d, "r1", "d1");
         match action {
             RepairAction::Stop {
                 reason: StopReason::Oscillation { cycle_at },
@@ -274,7 +339,8 @@ mod tests {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 1 });
         let action = s.observe(
             lat("error[E0308]: mismatched types\n --> src/main.rs:2:5\n"),
-            "r0".into(),
+            "r0",
+            "",
         );
         assert_eq!(
             action,
@@ -287,15 +353,48 @@ mod tests {
     #[test]
     fn progress_on_fewer_type_errors_continues() {
         let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
-        let _ = s.observe(
-            lat("error[E0308]: mismatched types\n --> a.rs:1:1\n\
-                 error[E0425]: cannot find value `x` in this scope\n --> b.rs:1:1\n"),
-            "r0".into(),
-        );
-        let action = s.observe(
-            lat("error[E0308]: mismatched types\n --> a.rs:1:1\n"),
-            "r1".into(),
-        );
+        let two = "error[E0308]: mismatched types\n --> a.rs:1:1\n\
+                 error[E0425]: cannot find value `x` in this scope\n --> b.rs:1:1\n";
+        let one = "error[E0308]: mismatched types\n --> a.rs:1:1\n";
+        let _ = s.observe(lat(two), "r0", two);
+        let action = s.observe(lat(one), "r1", one);
         assert!(matches!(action, RepairAction::Continue { round: 2, .. }));
+    }
+
+    #[test]
+    fn third_observation_at_phi_zero_is_recorded_as_accept() {
+        let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
+        let two = "error[E0308]: mismatched types\n --> a.rs:1:1\n\
+                 error[E0425]: cannot find value `x` in this scope\n --> b.rs:1:1\n";
+        let one = "error[E0308]: mismatched types\n --> a.rs:1:1\n";
+        let _ = s.observe(lat(two), "r0", two);
+        let _ = s.observe(lat(one), "r1", one);
+        let action = s.observe(DiagnosticLattice::empty(), "r2", "");
+        assert_eq!(action, RepairAction::Accept);
+        assert_eq!(s.rounds().len(), 3);
+        assert_eq!(s.rounds()[2].lattice.blocking(), 0);
+        assert!(matches!(s.rounds()[2].action, RepairAction::Accept));
+        let traj = s.trajectory_redacted();
+        assert!(traj.contains("action=Accept"));
+        assert!(traj.contains("phi=0"));
+    }
+
+    #[test]
+    fn third_blocking_observation_exhausts_three_round_budget() {
+        let mut s = RepairSession::new(RepairBudget { max_rounds: 3 });
+        let two = "error[E0308]: mismatched types\n --> a.rs:1:1\n\
+                 error[E0425]: cannot find value `x` in this scope\n --> b.rs:1:1\n";
+        let one = "error[E0308]: mismatched types\n --> a.rs:1:1\n";
+        let other = "error[E0412]: cannot find type `T` in this scope\n --> a.rs:1:1\n";
+        let _ = s.observe(lat(two), "r0", two);
+        let _ = s.observe(lat(one), "r1", one);
+        let action = s.observe(lat(other), "r2", other);
+        assert_eq!(
+            action,
+            RepairAction::Stop {
+                reason: StopReason::BudgetExhausted
+            }
+        );
+        assert_eq!(s.round_count(), 3);
     }
 }

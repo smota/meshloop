@@ -114,6 +114,24 @@ impl SqliteStore {
         Ok(count as usize)
     }
 
+    pub fn all_evidence(&self) -> Result<Vec<Evidence>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM evidence ORDER BY rowid")
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let json = row.map_err(|e| StoreError::Io(e.to_string()))?;
+            let ev: Evidence =
+                serde_json::from_str(&json).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     pub fn simulate_uncommitted_abort(
         &mut self,
         graph_id: &str,

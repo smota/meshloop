@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use meshloop_domain::capability::HarnessError;
+use meshloop_domain::diagnostic::DiagnosticLattice;
 use meshloop_domain::evidence::{
     AttemptId, CandidateRef, DeterministicEvidence, Evidence, HumanAcceptanceEvidence,
 };
@@ -16,6 +17,7 @@ use meshloop_domain::state::{
 use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
+use crate::converge::{RepairAction, RepairBudget, RepairSession};
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose};
 use crate::ports::{
     AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, LiveCheck,
@@ -152,6 +154,13 @@ fn digest(json: &str) -> String {
 
 fn is_fixture(name: &str) -> bool {
     name == "fixture"
+}
+
+struct RepairTick {
+    rows: Vec<Evidence>,
+    lattice: Option<DiagnosticLattice>,
+    diag: String,
+    revision: String,
 }
 
 fn terminal(state: TaskState) -> bool {
@@ -1296,6 +1305,130 @@ impl<'a> RunLoop<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn dispatch_repair_round(
+        &mut self,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        wt: &Path,
+        base: &str,
+        candidate: &Candidate,
+        prompt: &str,
+        commit_message: &str,
+        diagnostics: &str,
+        negative_constraint: &str,
+    ) -> Result<Option<RepairTick>, OrchestratorError> {
+        let repair_spec = crate::agent::build_repair_spec(
+            node,
+            attempt_id,
+            &candidate.harness,
+            &candidate.model_ref,
+            wt.to_path_buf(),
+            self.limits.task_timeout,
+            diagnostics,
+            negative_constraint,
+        );
+        let harness = match self.harnesses.get(&candidate.harness) {
+            Some(h) => *h,
+            None => return Ok(None),
+        };
+        let handle = match harness.invoke(&repair_spec) {
+            Ok(h) => h,
+            Err(_) => return Ok(None),
+        };
+        if harness.collect(&handle).is_err() {
+            return Ok(None);
+        }
+        let _ = self.workspace.remove_file(wt, prompt);
+        let revision = match self.workspace.commit_all(wt, commit_message) {
+            Ok(rev) => rev,
+            Err(_) => return Ok(None),
+        };
+        let (rows, lattice, diag) =
+            match self.run_deterministic_checks(node, attempt_id, wt, base, &revision) {
+                Ok(res) => res,
+                Err(_) => return Ok(None),
+            };
+        for row in &rows {
+            let _ = self.store.record(row.clone());
+        }
+        Ok(Some(RepairTick {
+            rows,
+            lattice,
+            diag,
+            revision,
+        }))
+    }
+
+    fn persist_repair_session(
+        &mut self,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        revision: &str,
+        session: &RepairSession,
+        passed: bool,
+        elapsed_ms: f64,
+    ) {
+        if session.round_count() == 0 {
+            return;
+        }
+        let last = session.last_action();
+        let accepted = matches!(last, Some(RepairAction::Accept)) && passed;
+        let stop = last
+            .map(RepairAction::summary)
+            .unwrap_or_else(|| "none".into());
+        let output_redacted = format!(
+            "stop={stop} passed={passed} elapsed_ms={elapsed_ms:.1}\n{}",
+            session.trajectory_redacted()
+        );
+        let _ = self
+            .store
+            .record(Evidence::Deterministic(DeterministicEvidence {
+                candidate: CandidateRef {
+                    task_id: node.id,
+                    attempt_id,
+                    revision: revision.to_string(),
+                },
+                tool: "repair-session".into(),
+                tool_version: "n/a".into(),
+                exit_code: if accepted { 0 } else { 1 },
+                output_redacted,
+            }));
+    }
+
+    fn persist_rollback_fidelity(
+        &mut self,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        wt: &Path,
+        to_rev: &str,
+    ) {
+        let head = self.workspace.head(wt).unwrap_or_default();
+        let porcelain = self.workspace.status_porcelain(wt).unwrap_or_default();
+        let sha_match = !head.is_empty()
+            && (head == to_rev || head.starts_with(to_rev) || to_rev.starts_with(&head));
+        let porcelain_clean = porcelain.trim().is_empty();
+        let fidelity_ok = sha_match && porcelain_clean;
+        let _ = self
+            .store
+            .record(Evidence::Deterministic(DeterministicEvidence {
+                candidate: CandidateRef {
+                    task_id: node.id,
+                    attempt_id,
+                    revision: to_rev.to_string(),
+                },
+                tool: "repair-rollback".into(),
+                tool_version: "n/a".into(),
+                exit_code: if fidelity_ok { 0 } else { 1 },
+                output_redacted: format!(
+                    "to_rev={to_rev} head={head} sha_match={} porcelain_clean={} fidelity={}",
+                    u8::from(sha_match),
+                    u8::from(porcelain_clean),
+                    u8::from(fidelity_ok)
+                ),
+            }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn verify_attempt(
         &mut self,
         graph_id: &str,
@@ -1323,134 +1456,102 @@ impl<'a> RunLoop<'a> {
 
         let mut passed = verification_passed(&rows);
 
-        // ADR 0026: Inner-loop self-repair via RepairSession when checks fail and lattice is present.
+        // ADR 0026: observe after every check. Accept records the terminal Φ=0 round.
+        // Rollback restores the prior round's diagnostics and must not re-observe the
+        // reset tree (that fingerprint is already in history → false Oscillation).
         if !passed && let Some(initial_lat) = current_lattice {
-            let mut session =
-                crate::converge::RepairSession::new(crate::converge::RepairBudget::default());
+            let mut session = RepairSession::new(RepairBudget::default());
             let mut lat = initial_lat;
+            let repair_started = std::time::Instant::now();
 
-            while !passed {
-                let action = session.observe(lat.clone(), current_revision.clone());
+            loop {
+                let action =
+                    session.observe(lat.clone(), current_revision.clone(), current_diag.clone());
                 match action {
-                    crate::converge::RepairAction::Accept => {
-                        passed = true;
+                    RepairAction::Accept => {
+                        passed = verification_passed(&rows);
                         break;
                     }
-                    crate::converge::RepairAction::Continue {
+                    RepairAction::Continue {
                         round,
                         negative_constraint,
                     } => {
-                        let repair_spec = crate::agent::build_repair_spec(
-                            node,
-                            attempt_id,
-                            &candidate.harness,
-                            &candidate.model_ref,
-                            wt.to_path_buf(),
-                            self.limits.task_timeout,
-                            &current_diag,
-                            &negative_constraint,
-                        );
-                        let harness = match self.harnesses.get(&candidate.harness) {
-                            Some(h) => *h,
-                            None => break,
-                        };
-                        let handle = match harness.invoke(&repair_spec) {
-                            Ok(h) => h,
-                            Err(_) => break,
-                        };
-                        if harness.collect(&handle).is_err() {
-                            break;
-                        }
-                        let _ = self.workspace.remove_file(wt, &prompt);
-                        current_revision = match self.workspace.commit_all(
-                            wt,
-                            &format!("meshloop: repair round {} for task {}", round, node.id.0),
-                        ) {
-                            Ok(rev) => rev,
-                            Err(_) => break,
-                        };
-                        let (new_rows, new_lattice, new_diag) = match self.run_deterministic_checks(
+                        let commit_msg =
+                            format!("meshloop: repair round {} for task {}", round, node.id.0);
+                        match self.dispatch_repair_round(
                             node,
                             attempt_id,
                             wt,
                             base,
-                            &current_revision,
-                        ) {
-                            Ok(res) => res,
-                            Err(_) => break,
-                        };
-                        rows = new_rows;
-                        for row in &rows {
-                            let _ = self.store.record(row.clone());
+                            candidate,
+                            &prompt,
+                            &commit_msg,
+                            &current_diag,
+                            &negative_constraint,
+                        )? {
+                            Some(tick) => {
+                                rows = tick.rows;
+                                current_diag = tick.diag;
+                                current_revision = tick.revision;
+                                match tick.lattice {
+                                    Some(l) => lat = l,
+                                    None => break,
+                                }
+                            }
+                            None => break,
                         }
-                        current_diag = new_diag;
-                        if let Some(l) = new_lattice {
-                            lat = l;
-                        }
-                        passed = verification_passed(&rows);
                     }
-                    crate::converge::RepairAction::Rollback {
+                    RepairAction::Rollback {
+                        to_round,
                         to_rev,
                         negative_constraint,
-                        ..
                     } => {
                         if self.workspace.reset_hard(wt, &to_rev).is_err() {
                             break;
                         }
-                        let repair_spec = crate::agent::build_repair_spec(
-                            node,
-                            attempt_id,
-                            &candidate.harness,
-                            &candidate.model_ref,
-                            wt.to_path_buf(),
-                            self.limits.task_timeout,
-                            &current_diag,
-                            &negative_constraint,
-                        );
-                        let harness = match self.harnesses.get(&candidate.harness) {
-                            Some(h) => *h,
-                            None => break,
-                        };
-                        let handle = match harness.invoke(&repair_spec) {
-                            Ok(h) => h,
-                            Err(_) => break,
-                        };
-                        if harness.collect(&handle).is_err() {
-                            break;
-                        }
-                        let _ = self.workspace.remove_file(wt, &prompt);
-                        current_revision = match self.workspace.commit_all(
-                            wt,
-                            &format!("meshloop: repair rollback retry for task {}", node.id.0),
-                        ) {
-                            Ok(rev) => rev,
-                            Err(_) => break,
-                        };
-                        let (new_rows, new_lattice, new_diag) = match self.run_deterministic_checks(
+                        self.persist_rollback_fidelity(node, attempt_id, wt, &to_rev);
+                        current_diag = session
+                            .record_at(to_round)
+                            .map(|r| r.diag.clone())
+                            .unwrap_or(current_diag);
+                        current_revision = to_rev;
+                        let commit_msg =
+                            format!("meshloop: repair rollback retry for task {}", node.id.0);
+                        match self.dispatch_repair_round(
                             node,
                             attempt_id,
                             wt,
                             base,
-                            &current_revision,
-                        ) {
-                            Ok(res) => res,
-                            Err(_) => break,
-                        };
-                        rows = new_rows;
-                        for row in &rows {
-                            let _ = self.store.record(row.clone());
+                            candidate,
+                            &prompt,
+                            &commit_msg,
+                            &current_diag,
+                            &negative_constraint,
+                        )? {
+                            Some(tick) => {
+                                rows = tick.rows;
+                                current_diag = tick.diag;
+                                current_revision = tick.revision;
+                                match tick.lattice {
+                                    Some(l) => lat = l,
+                                    None => break,
+                                }
+                            }
+                            None => break,
                         }
-                        current_diag = new_diag;
-                        if let Some(l) = new_lattice {
-                            lat = l;
-                        }
-                        passed = verification_passed(&rows);
                     }
-                    crate::converge::RepairAction::Stop { .. } => {
-                        break;
-                    }
+                    RepairAction::Stop { .. } => break,
                 }
             }
+            let elapsed_ms = repair_started.elapsed().as_secs_f64() * 1000.0;
+            self.persist_repair_session(
+                node,
+                attempt_id,
+                &current_revision,
+                &session,
+                passed,
+                elapsed_ms,
+            );
         }
 
         let key = FeedbackKey {

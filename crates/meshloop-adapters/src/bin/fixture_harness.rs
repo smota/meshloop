@@ -33,6 +33,20 @@ fn main() {
             let _ = fs::write(Path::new("meshloop-plan.json"), &json);
             println!("{json}");
         }
+        Some("--repair-scenario") => {
+            let scenario = args.get(1).map(String::as_str).unwrap_or("");
+            let prompt = prompt_from_args(&args);
+            apply_repair_scenario(scenario, &prompt);
+        }
+        Some("--fill-stderr") => {
+            let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8192);
+            let chunk = "error[E0308]: mismatched types\n --> src/lib.rs:1:1\n";
+            let mut out = String::with_capacity(n + chunk.len());
+            while out.len() < n {
+                out.push_str(chunk);
+            }
+            eprint!("{out}");
+        }
         Some("--prompt-file") => {
             let path = args.get(1).expect("fixture requires a prompt file path");
             let prompt = fs::read_to_string(path).unwrap_or_default();
@@ -86,4 +100,68 @@ fn main() {
         }
         _ => eprintln!("unknown fixture-harness invocation: {args:?}"),
     }
+}
+
+fn prompt_from_args(args: &[String]) -> String {
+    args.windows(2)
+        .find(|w| w[0] == "--prompt-file")
+        .and_then(|w| fs::read_to_string(&w[1]).ok())
+        .unwrap_or_default()
+}
+
+const SRC_TWO_ERRORS: &str = "pub fn f() {\n    let x: &str = 1;\n    let _ = (x, y);\n}\n";
+const SRC_ONE_ERROR: &str = "pub fn f() {\n    let x: &str = 1;\n    let _ = x;\n}\n";
+const SRC_CLEAN: &str = "pub fn f() {\n    let x: &str = \"ok\";\n    let _ = x;\n}\n";
+const SRC_UNCLOSED: &str = "pub fn f() {\n    let x: &str = 1;\n    let _ = (x, y);\n";
+
+fn apply_repair_scenario(scenario: &str, prompt: &str) {
+    let is_repair = prompt.contains("PREVIOUS ATTEMPT FAILED CHECKS")
+        || prompt.contains("NEGATIVE CONSTRAINT")
+        || prompt.contains("REMAINING DIAGNOSTICS");
+    let syntax_ban = prompt
+        .to_ascii_lowercase()
+        .contains("do not introduce new syntax")
+        || prompt.contains("unclosed delimiter");
+    let has_e0308 = prompt.contains("E0308");
+    let has_e0425 = prompt.contains("E0425");
+
+    let src = match scenario {
+        "monotonic" => {
+            if !is_repair {
+                SRC_TWO_ERRORS
+            } else if has_e0425 && has_e0308 {
+                SRC_ONE_ERROR
+            } else {
+                SRC_CLEAN
+            }
+        }
+        "rollback" => {
+            if !is_repair {
+                SRC_TWO_ERRORS
+            } else if syntax_ban {
+                SRC_CLEAN
+            } else {
+                SRC_UNCLOSED
+            }
+        }
+        "oscillate" => SRC_TWO_ERRORS,
+        other => {
+            eprintln!("unknown repair scenario: {other}");
+            std::process::exit(2);
+        }
+    };
+
+    let _ = fs::create_dir_all("src");
+    let _ = fs::write("src/lib.rs", src);
+    let _ = fs::write(".gitignore", "check.rmeta\n*.rmeta\n/target/\n");
+    let round = if !is_repair {
+        0
+    } else if syntax_ban {
+        2
+    } else if has_e0425 && has_e0308 {
+        1
+    } else {
+        2
+    };
+    println!("REPAIR_SCENARIO:{scenario}:round{round}");
 }

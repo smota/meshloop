@@ -29,14 +29,17 @@ impl CheckRunner for CommandCheckRunner {
             .stderr(Stdio::piped());
         let mut child =
             crate::process::spawn_owned(cmd).map_err(|e| CheckError::Io(e.to_string()))?;
+        // Drain both pipes concurrently. Waiting for exit before reading deadlocks
+        // on Windows once either pipe exceeds the ~4 KiB buffer (rustc/cargo stderr).
+        let stdout_handle = spawn_drain(child.stdout.take());
+        let stderr_handle = spawn_drain(child.stderr.take());
         let start = Instant::now();
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let mut stdout = String::new();
-                    if let Some(mut out) = child.stdout.take() {
-                        let _ = out.read_to_string(&mut stdout);
-                    }
+                    let stdout = stdout_handle.join().unwrap_or_default();
+                    let stderr = stderr_handle.join().unwrap_or_default();
+                    let combined = combine_stdio(&stdout, &stderr);
                     let code = status.code().unwrap_or(-1);
                     return Ok(DeterministicEvidence {
                         candidate: CandidateRef {
@@ -47,18 +50,71 @@ impl CheckRunner for CommandCheckRunner {
                         tool: argv[0].clone(),
                         tool_version: "n/a".into(),
                         exit_code: code,
-                        output_redacted: crate::redact::redact(&stdout),
+                        output_redacted: crate::redact::redact(&combined),
                     });
                 }
                 Ok(None) => {
                     if start.elapsed() >= timeout {
                         child.kill_tree();
+                        let _ = stdout_handle.join();
+                        let _ = stderr_handle.join();
                         return Err(CheckError::Timeout);
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(e) => return Err(CheckError::Io(e.to_string())),
+                Err(e) => {
+                    child.kill_tree();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(CheckError::Io(e.to_string()));
+                }
             }
         }
+    }
+}
+
+fn spawn_drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut out) = pipe {
+            let _ = out.read_to_string(&mut buf);
+        }
+        buf
+    })
+}
+
+fn combine_stdio(stdout: &str, stderr: &str) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (false, false) => {
+            let mut out = String::with_capacity(stdout.len() + stderr.len() + 1);
+            out.push_str(stdout);
+            if !stdout.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(stderr);
+            out
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combine_stdio_keeps_stderr_when_stdout_empty() {
+        assert_eq!(
+            combine_stdio("", "error[E0308]: mismatched types\n"),
+            "error[E0308]: mismatched types\n"
+        );
+    }
+
+    #[test]
+    fn combine_stdio_joins_both_streams() {
+        assert_eq!(combine_stdio("out\n", "err\n"), "out\nerr\n");
+        assert_eq!(combine_stdio("out", "err"), "out\nerr");
     }
 }

@@ -197,3 +197,27 @@ With the deterministic regression gate (World D) fully operational, the three hi
     - `iso.mutation_rollback.fidelity = 1.0` (Invariant: 100% snapshot equality across 7 negative controls: cycle injection, dangling target, duplicate ID, reserved task 0, active state violation, missing source in followup, empty new tasks).
     - `orch.mutation.overhead_ms.p95 <= 15.0ms` (Observed: **1.75 ms** across 6 canonical manifests: chain, diamond, wide-fanout, wide-fanin, forest, nested-diamond).
   - **Benchmark Scorecard:** Expanded canonical gate from 21 to 23 metrics, achieving **23/23 PASS** on `xtask bench`.
+
+### Priority 7: E2E Refinement Cycle — Round 3: Closed-Loop Self-Repair with Lyapunov Verification (ADR 0026) — **DELIVERED & VERIFIED**
+- **Objective:** Establish an end-to-end, compiler-driven closed-loop self-repair harness with real failure injection, Lyapunov convergence verification ($\Delta\Phi < 0$), syntax regression rollback protection (`reset_hard` fidelity = 1.0), and oscillation detection.
+- **Value:** Guarantees agent self-repair autonomously converges on valid compiler output, strictly bounds repair cycles, and rolls back destructive regressions without state desynchronization or deadlock.
+- **Implementation & Evidence:**
+  - **Independent Grok Architectural Review (Replica & Treplica):** Grok highlighted key execution hazards: avoiding simulated checks by executing real `rustc` compiler invocations; ensuring concurrent pipe draining on Windows to prevent `Stdio::piped` buffer deadlock (>4 KiB rustc error output); preserving diagnostic synchronization on rollback (restoring previous round diagnostics without re-observing the restored tree to avoid false oscillation); and ensuring smoke test wall-clock isolation ($\le 5.0\text{s}$) by running multi-round repair cases in `xtask bench`. Treplica signed off on full implementation details.
+  - **Windows Pipe Concurrency Fix (`meshloop-adapters::check`):** Resolved pipe deadlocks in `check.rs` by spawning concurrent drain threads for `stdout` and `stderr` using `std::thread::spawn`, correctly capturing rustc stderr diagnostics into `output_redacted` without blocking on full OS buffers. Added regression integration test in `crates/meshloop-adapters/tests/check_runner.rs`.
+  - **Diagnostic Refinement (`meshloop-domain::diagnostic`):** Added `is_rustc_trailer` filter to `parse_rustc_diagnostic` to exclude summary trailer lines (`aborting due to N previous errors`) from becoming spurious blocking atoms, ensuring accurate potential function $\Phi$ calculation.
+  - **Lyapunov Observation Driver & Rollback Fidelity (`meshloop-engine::run_loop` & `converge`):**
+    - Enhanced `RepairSession` and `RoundRecord` to store both `diag` and `action` per round, providing `trajectory_redacted()` and explicit `record_at(round)`.
+    - Fixed rollback diagnostic drift: upon `reset_hard(&to_rev)` after a syntax regression, restored the target round's diagnostic and prompt constraint without re-observing the SHA, preventing spurious oscillation triggers.
+    - Emitted structured `repair-session` and `repair-rollback` evidence into run audit trails.
+    - Ensured terminal state $\Phi=0$ records `RepairAction::Accept` so trajectories reflect complete monotonic convergence ($\Phi_0 \to \Phi_1 \to \Phi_k = 0$).
+  - **Fixture Harness Failure Injection (`fixture_harness`):**
+    - Implemented `--repair-scenario` with three deterministic profiles: `monotonic` (injected type error $\to$ syntax error $\to$ clean build), `rollback` (clean baseline $\to$ broken syntax $\to$ reverted $\to$ clean build), and `oscillate` (alternating between two invalid states).
+  - **Metrics & Invariants Added (Scorecard expanded to 28 metrics):**
+    - `iso.repair_rollback.fidelity = 1.0` (PASS: 1.0)
+    - `conv.lyapunov.monotonic_reduction_pct = 100` (PASS: 100%)
+    - `conv.self_repair.success_rate >= 80.0%` (PASS: 100%)
+    - `conv.oscillation.detected_count >= 1` (PASS: 1)
+    - `conv.rollback.count >= 1` (PASS: 1)
+    - `conv.self_repair.convergence_ms.p95 <= 1500.0ms` (PASS: ~1233ms)
+  - **Benchmark Scorecard:** Expanded canonical gate from 23 to 28 metrics, achieving **28/28 PASS** on `xtask bench`.
+

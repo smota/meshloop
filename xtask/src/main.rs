@@ -149,6 +149,11 @@ fn smoke(root: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Err(e) = smoke_repair_e2e(root, &bin) {
+        eprintln!("smoke: 1-node repair check failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
     ExitCode::SUCCESS
 }
 
@@ -672,6 +677,375 @@ model_tier = "top"
     );
 
     Ok(())
+}
+
+fn rustc_verify_command_toml() -> &'static str {
+    r#"["rustc", "--edition", "2021", "--crate-type", "lib", "--emit=metadata", "-o", "check.rmeta", "src/lib.rs"]"#
+}
+
+struct RepairCaseResult {
+    scenario: &'static str,
+    converged: bool,
+    oscillation: bool,
+    rollback: bool,
+    rollback_fidelity: f64,
+    reduce_ok: u32,
+    reduce_total: u32,
+    inner_loop_ms: f64,
+    trajectory: String,
+}
+
+fn warmup_rustc_metadata() {
+    let dir = std::env::temp_dir().join("meshloop-rustc-warmup");
+    let _ = fs::create_dir_all(dir.join("src"));
+    let _ = fs::write(
+        dir.join("src/lib.rs"),
+        "pub fn f() {\n    let x: &str = \"ok\";\n    let _ = x;\n}\n",
+    );
+    let _ = Command::new("rustc")
+        .args([
+            "--edition",
+            "2021",
+            "--crate-type",
+            "lib",
+            "--emit=metadata",
+            "-o",
+            "check.rmeta",
+            "src/lib.rs",
+        ])
+        .current_dir(&dir)
+        .output();
+}
+
+fn smoke_repair_e2e(root: &Path, bin: &Path) -> Result<(), String> {
+    let fixture = fixture_bin(root);
+    if !fixture.exists() {
+        return Err(format!(
+            "fixture harness not found at {}",
+            fixture.display()
+        ));
+    }
+    warmup_rustc_metadata();
+    let result = run_repair_scenario(root, bin, &fixture, "monotonic")?;
+    if !result.converged {
+        return Err(format!(
+            "monotonic 1-node repair did not converge. trajectory:\n{}",
+            result.trajectory
+        ));
+    }
+    if result.reduce_total == 0 || result.reduce_ok != result.reduce_total {
+        return Err(format!(
+            "monotonic Lyapunov pairs {}/{} were not strictly decreasing. trajectory:\n{}",
+            result.reduce_ok, result.reduce_total, result.trajectory
+        ));
+    }
+    println!(
+        "smoke: 1-node repair (monotonic) converged in {:.1}ms (Φ strictly decreasing, independent of 3-node wave)",
+        result.inner_loop_ms
+    );
+    Ok(())
+}
+
+fn run_repair_scenario(
+    _root: &Path,
+    bin: &Path,
+    fixture: &Path,
+    scenario: &'static str,
+) -> Result<RepairCaseResult, String> {
+    let temp_repo = std::env::temp_dir().join(format!(
+        "meshloop-repair-{}-{}",
+        scenario,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_repo);
+    fs::create_dir_all(&temp_repo).map_err(|e| e.to_string())?;
+
+    struct TempDirGuard<'a>(&'a Path);
+    impl<'a> Drop for TempDirGuard<'a> {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.0);
+        }
+    }
+    let _guard = TempDirGuard(&temp_repo);
+
+    let run_ok = |cmd: &mut Command, desc: &str| -> Result<String, String> {
+        let out = cmd
+            .output()
+            .map_err(|e| format!("{desc} spawn failed: {e}"))?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !out.status.success() {
+            return Err(format!(
+                "{desc} failed (status={:?}):\n{combined}",
+                out.status.code()
+            ));
+        }
+        Ok(combined)
+    };
+
+    let _ = run_ok(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&temp_repo),
+        "git init",
+    )?;
+    let _ = run_ok(
+        Command::new("git")
+            .args(["config", "user.email", "repair@test"])
+            .current_dir(&temp_repo),
+        "git config email",
+    )?;
+    let _ = run_ok(
+        Command::new("git")
+            .args(["config", "user.name", "repair"])
+            .current_dir(&temp_repo),
+        "git config name",
+    )?;
+    fs::write(temp_repo.join("README.md"), "# Repair scenario\n").map_err(|e| e.to_string())?;
+    let _ = run_ok(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&temp_repo),
+        "git add",
+    )?;
+    let _ = run_ok(
+        Command::new("git")
+            .args(["commit", "-q", "-m", "initial"])
+            .current_dir(&temp_repo),
+        "git commit",
+    )?;
+
+    let fixture_escaped = fixture.to_string_lossy().replace('\\', "\\\\");
+    let verify = rustc_verify_command_toml();
+    let cfg_content = format!(
+        r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 1
+task_timeout_seconds = 30
+
+[verify]
+verify_command = {verify}
+
+[harnesses.fixture]
+executable = "{fixture_escaped}"
+version_args = ["--version"]
+invoke_args_template = ["--repair-scenario", "{scenario}", "--prompt-file", "{{prompt_file}}"]
+model_ref = "fixture-model"
+model_tier = "top"
+"#
+    );
+    let cfg_path = temp_repo.join("meshloop.toml");
+    fs::write(&cfg_path, cfg_content).map_err(|e| e.to_string())?;
+
+    let plan_path = temp_repo.join("plan.json");
+    let db_path = temp_repo.join(".meshloop").join("state.sqlite");
+    let worktree_base = temp_repo.join("worktrees");
+    fs::create_dir_all(temp_repo.join(".meshloop")).map_err(|e| e.to_string())?;
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"repair-{scenario}","nodes":[{{"id":1,"description":"fix the library so it compiles","depends_on":[],"tier":null}}]}}"#
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let _ = run_ok(
+        Command::new(bin)
+            .args(["review-plan", "--plan"])
+            .arg(&plan_path)
+            .args(["--accept", "--as", "repair-tester", "--json", "--config"])
+            .arg(&cfg_path)
+            .args(["--db"])
+            .arg(&db_path)
+            .current_dir(&temp_repo),
+        "meshloop review-plan",
+    )?;
+
+    let t0 = std::time::Instant::now();
+    let run_out = Command::new(bin)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--config"])
+        .arg(&cfg_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .current_dir(&temp_repo)
+        .output()
+        .map_err(|e| format!("meshloop run spawn failed: {e}"))?;
+    let inner_loop_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run_out.stdout),
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+
+    let store = meshloop_adapters::store::SqliteStore::open(&db_path)
+        .map_err(|e| format!("open repair sqlite: {e:?}"))?;
+    let evidence = store
+        .all_evidence()
+        .map_err(|e| format!("load evidence: {e:?}"))?;
+
+    let mut trajectory = String::new();
+    let mut rollback_fidelity = 0.0;
+    let mut rollback = false;
+    for ev in &evidence {
+        if let meshloop_domain::evidence::Evidence::Deterministic(d) = ev {
+            if d.tool == "repair-session" {
+                trajectory = d.output_redacted.clone();
+            }
+            if d.tool == "repair-rollback" {
+                rollback = true;
+                if d.output_redacted.contains("fidelity=1") && d.exit_code == 0 {
+                    rollback_fidelity = 1.0;
+                }
+            }
+        }
+    }
+    if trajectory.is_empty() {
+        trajectory = format!("(no repair-session evidence)\n{combined}");
+    }
+
+    let oscillation = trajectory.contains("Oscillation");
+    let converged = (trajectory.contains("stop=Accept") && trajectory.contains("passed=true"))
+        || (combined.contains("AwaitingReview") && trajectory.contains("action=Accept"));
+
+    let (reduce_ok, reduce_total) = lyapunov_reduction_pairs(&trajectory);
+    let inner_loop_ms = parse_elapsed_ms(&trajectory).unwrap_or(inner_loop_ms);
+
+    if scenario == "oscillate" && !oscillation {
+        return Err(format!(
+            "oscillate scenario did not record Oscillation. run:\n{combined}\ntrajectory:\n{trajectory}"
+        ));
+    }
+    if scenario == "rollback" && !rollback {
+        return Err(format!(
+            "rollback scenario did not record repair-rollback evidence. run:\n{combined}\ntrajectory:\n{trajectory}"
+        ));
+    }
+    if (scenario == "monotonic" || scenario == "rollback") && !converged {
+        return Err(format!(
+            "{scenario} did not converge. run:\n{combined}\ntrajectory:\n{trajectory}"
+        ));
+    }
+
+    Ok(RepairCaseResult {
+        scenario,
+        converged,
+        oscillation,
+        rollback,
+        rollback_fidelity,
+        reduce_ok,
+        reduce_total,
+        inner_loop_ms,
+        trajectory,
+    })
+}
+
+fn parse_elapsed_ms(trajectory: &str) -> Option<f64> {
+    trajectory
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("elapsed_ms=")?.parse().ok())
+}
+
+fn lyapunov_reduction_pairs(trajectory: &str) -> (u32, u32) {
+    struct RoundPhi {
+        phi: u32,
+        kind: char,
+    }
+    let mut rounds = Vec::new();
+    for line in trajectory.lines() {
+        if !line.starts_with("round=") {
+            continue;
+        }
+        let mut phi = None;
+        let mut kind = '?';
+        for tok in line.split_whitespace() {
+            if let Some(rest) = tok.strip_prefix("phi=") {
+                phi = rest.parse().ok();
+            }
+            if let Some(rest) = tok.strip_prefix("action=") {
+                kind = if rest.starts_with("Continue") {
+                    'C'
+                } else if rest.starts_with("Accept") {
+                    'A'
+                } else if rest.starts_with("Rollback") {
+                    'R'
+                } else {
+                    'S'
+                };
+            }
+        }
+        if let Some(phi) = phi {
+            rounds.push(RoundPhi { phi, kind });
+        }
+    }
+    let mut ok = 0;
+    let mut total = 0;
+    for pair in rounds.windows(2) {
+        let prev = &pair[0];
+        let next = &pair[1];
+        if next.kind == 'R' || next.kind == 'S' || prev.kind == 'R' {
+            continue;
+        }
+        if next.kind == 'C' || next.kind == 'A' {
+            total += 1;
+            if next.phi < prev.phi {
+                ok += 1;
+            }
+        }
+    }
+    (ok, total)
+}
+
+fn run_live_repair_cases(root: &Path) -> Result<Vec<RepairCaseResult>, String> {
+    if !cargo(
+        root,
+        &["build", "-p", "meshloop-cli", "--locked", "--offline"],
+    ) {
+        return Err("failed to build meshloop-cli for repair cases".into());
+    }
+    if !cargo(
+        root,
+        &[
+            "build",
+            "-p",
+            "meshloop-adapters",
+            "--bin",
+            "fixture_harness",
+            "--locked",
+            "--offline",
+        ],
+    ) {
+        return Err("failed to build fixture_harness for repair cases".into());
+    }
+    let bin = meshloop_bin(root);
+    let fixture = fixture_bin(root);
+    warmup_rustc_metadata();
+    let mut out = Vec::new();
+    for scenario in ["monotonic", "rollback", "oscillate"] {
+        println!("  live repair case: {scenario}");
+        let result = run_repair_scenario(root, &bin, &fixture, scenario)?;
+        println!(
+            "    inner-loop {:.1}ms converged={} oscillation={} rollback={} fidelity={:.1} lyapunov={}/{}",
+            result.inner_loop_ms,
+            result.converged,
+            result.oscillation,
+            result.rollback,
+            result.rollback_fidelity,
+            result.reduce_ok,
+            result.reduce_total
+        );
+        out.push(result);
+    }
+    Ok(out)
 }
 
 fn bundle(root: &Path) -> ExitCode {
@@ -1669,12 +2043,10 @@ fn bench(root: &Path) -> ExitCode {
     use meshloop_adapters::store::SqliteStore;
     use meshloop_context::quant::SignatureIndex;
     use meshloop_context::{BitWidth, Language, SkeletonCache, extract_skeleton};
-    use meshloop_domain::diagnostic::parse_diagnostics;
     use meshloop_domain::digest::splitmix64;
     use meshloop_domain::evidence::AttemptId;
     use meshloop_domain::state::{Event, TaskState, transition};
     use meshloop_domain::task_graph::TaskId;
-    use meshloop_engine::converge::{RepairAction, RepairBudget, RepairSession, StopReason};
     use meshloop_engine::ports::{EventLog, TransitionRecord};
     use meshloop_engine::recovery::replay_tasks;
     use meshloop_engine::slice::{Impact, SignatureSnapshot, impact};
@@ -2221,51 +2593,50 @@ fn bench(root: &Path) -> ExitCode {
     }
     let redact_pass_rate = (redacted_count as f64 / test_secrets.len() as f64) * 100.0;
 
-    // 9. Convergence Micro-benchmark (conv.*)
-    let mut session = RepairSession::new(RepairBudget { max_rounds: 3 });
-    let err1 = parse_diagnostics(
-        "error[E0308]: mismatched types\n --> src/main.rs:1:1\nerror[E0425]: cannot find value `x`\n --> src/main.rs:5:1\n",
-    );
-    let err2 = parse_diagnostics("error[E0308]: mismatched types\n --> src/main.rs:1:1\n");
-    let err0 = parse_diagnostics("");
-
-    let act1 = session.observe(err1.clone(), "rev1".into());
-    let act2 = session.observe(err2.clone(), "rev2".into());
-    let act3 = session.observe(err0.clone(), "rev3".into());
-
-    let conv_success = matches!(act1, RepairAction::Continue { .. })
-        && matches!(act2, RepairAction::Continue { .. })
-        && matches!(act3, RepairAction::Accept);
-
-    let phi1 = err1.blocking() as f64;
-    let phi2 = err2.blocking() as f64;
-    let phi0 = err0.blocking() as f64;
-    let lattice_reduction_rate = ((phi1 - phi2) + (phi2 - phi0)) / 2.0;
-    let repair_success_rate = if conv_success { 100.0 } else { 0.0 };
-
-    // Oscillation test
-    let mut osc_session = RepairSession::new(RepairBudget { max_rounds: 5 });
-    let osc_err = parse_diagnostics("error[E0308]: mismatched types\n --> src/main.rs:1:1\n");
-    let _ = osc_session.observe(osc_err.clone(), "r1".into());
-    let osc_act = osc_session.observe(osc_err, "r2".into());
-    let osc_detected = matches!(
-        osc_act,
-        RepairAction::Stop {
-            reason: StopReason::Oscillation { .. }
+    // 9. Live inner-loop self-repair (conv.*) — isolated 1-node rustc injection cases
+    let live_repair = match run_live_repair_cases(root) {
+        Ok(cases) => cases,
+        Err(e) => {
+            eprintln!("bench: live repair cases failed: {e}");
+            return ExitCode::FAILURE;
         }
-    );
-
-    // Rollback test
-    let mut rb_session = RepairSession::new(RepairBudget { max_rounds: 3 });
-    let _ = rb_session.observe(
-        parse_diagnostics("error[E0308]: mismatched types\n --> a.rs:1:1\n"),
-        "rev_ok".into(),
-    );
-    let rb_act = rb_session.observe(
-        parse_diagnostics("error: this file contains an unclosed delimiter\n --> a.rs:1:1\n"),
-        "rev_syntax".into(),
-    );
-    let rollback_detected = matches!(rb_act, RepairAction::Rollback { .. });
+    };
+    let converge_cases: Vec<&RepairCaseResult> = live_repair
+        .iter()
+        .filter(|c| c.scenario == "monotonic" || c.scenario == "rollback")
+        .collect();
+    let repair_success_rate = if converge_cases.is_empty() {
+        0.0
+    } else {
+        let ok = converge_cases.iter().filter(|c| c.converged).count() as f64;
+        100.0 * ok / converge_cases.len() as f64
+    };
+    let reduce_ok: u32 = live_repair.iter().map(|c| c.reduce_ok).sum();
+    let reduce_total: u32 = live_repair.iter().map(|c| c.reduce_total).sum();
+    let lyapunov_monotonic_reduction_pct = if reduce_total == 0 {
+        0.0
+    } else {
+        100.0 * f64::from(reduce_ok) / f64::from(reduce_total)
+    };
+    let lattice_reduction_rate = if reduce_total == 0 {
+        0.0
+    } else {
+        f64::from(reduce_ok) / f64::from(reduce_total)
+    };
+    let osc_detected_count = live_repair.iter().filter(|c| c.oscillation).count() as f64;
+    let rollback_count = live_repair.iter().filter(|c| c.rollback).count() as f64;
+    let repair_rollback_fidelity = live_repair
+        .iter()
+        .find(|c| c.scenario == "rollback")
+        .map(|c| c.rollback_fidelity)
+        .unwrap_or(0.0);
+    let mut repair_latencies: Vec<f64> = live_repair.iter().map(|c| c.inner_loop_ms).collect();
+    repair_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let repair_p95_idx = ((repair_latencies.len() as f64) * 0.95) as usize;
+    let repair_convergence_ms_p95 = repair_latencies
+        .get(repair_p95_idx.min(repair_latencies.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(9999.0);
 
     // 10. Syntactic Impact Slicing (slice.*)
     let snap_before = SignatureSnapshot::from_sources([
@@ -2445,6 +2816,36 @@ fn bench(root: &Path) -> ExitCode {
             format!("{repair_success_rate:.1}%"),
         ),
         (
+            "conv.lyapunov.monotonic_reduction_pct",
+            lyapunov_monotonic_reduction_pct,
+            "%",
+            format!("{lyapunov_monotonic_reduction_pct:.1}% ({reduce_ok}/{reduce_total} pairs)"),
+        ),
+        (
+            "conv.oscillation.detected_count",
+            osc_detected_count,
+            "count",
+            format!("{} cycle(s) detected", osc_detected_count as u64),
+        ),
+        (
+            "conv.rollback.count",
+            rollback_count,
+            "count",
+            format!("{} rollback(s) triggered", rollback_count as u64),
+        ),
+        (
+            "conv.self_repair.convergence_ms.p95",
+            repair_convergence_ms_p95,
+            "ms",
+            format!("{repair_convergence_ms_p95:.1} ms"),
+        ),
+        (
+            "iso.repair_rollback.fidelity",
+            repair_rollback_fidelity,
+            "ratio",
+            format!("{repair_rollback_fidelity:.1} (SHA match + clean tree after reset_hard)"),
+        ),
+        (
             "slice.build_avoidance_rate",
             build_avoidance_rate,
             "%",
@@ -2560,19 +2961,20 @@ fn bench(root: &Path) -> ExitCode {
         ));
     }
 
+    let lattice_row_status = if lattice_reduction_rate > 0.0 {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     let scorecard = format!(
         r#"# Executive Benchmark Scorecard (SPEC-ML-BENCH-001)
 
 | Metric | Target | Observed | Status |
 |---|---|---|---|
-{scorecard_rows}| `conv.lattice.reduction_rate` | > 0 | {lattice_reduction_rate:.1} Delta Phi/round | **PASS** |
-| `conv.oscillation.detected_count` | > 0 | {} cycle(s) detected | **PASS** |
-| `conv.rollback.count` | > 0 | {} rollback(s) triggered | **PASS** |
+{scorecard_rows}| `conv.lattice.reduction_rate` | > 0 | {lattice_reduction_rate:.1} Delta Phi/round | **{lattice_row_status}** |
 
 **Overall Gate Status:** {} ({}/{} metrics within canonical thresholds)
 "#,
-        if osc_detected { 1 } else { 0 },
-        if rollback_detected { 1 } else { 0 },
         if all_pass { "PASS" } else { "FAIL" },
         evaluated_list.iter().filter(|m| m.status == "pass").count(),
         evaluated_list.len()

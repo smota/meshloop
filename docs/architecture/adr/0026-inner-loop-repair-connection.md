@@ -28,11 +28,13 @@ Constraints:
 1. Add `build_repair_spec` to `meshloop-engine::agent` to construct structured repair prompts containing normalized diagnostics and negative constraints.
 2. In `RunLoop::verify_attempt`:
    - When deterministic checks fail, initialize `RepairSession::new(RepairBudget::default())`.
-   - Call `session.observe(current_lattice, current_revision)`.
+   - After every check, call `session.observe(lattice, revision, diag)`. `max_rounds` is a strict observation budget (default 3).
    - On `RepairAction::Continue`: invoke the harness on the same worktree with `build_repair_spec`, commit the round revision, and re-run deterministic checks.
-   - On `RepairAction::Rollback`: invoke `WorkspacePort::reset_hard` to revert to `to_rev`, then re-invoke with the negative constraint.
+   - On `RepairAction::Rollback`: `reset_hard` to `to_rev`, restore diagnostics from `history[to_round].diag`, and re-invoke with the negative constraint. Do **not** observe the restored tree (that fingerprint is already in history and would be a false `Oscillation`).
    - On `RepairAction::Stop`: terminate the repair loop and proceed to `DeterministicChecksFailed` and `maybe_fallback`.
-   - On `RepairAction::Accept`: transition to `DeterministicChecksPassed`.
+   - On `RepairAction::Accept`: record the terminal $\phi=0$ round in `session.rounds()`, then evaluate `verification_passed` on the last revision.
+   - Persist the trajectory (`repair-session`) and rollback fidelity (`repair-rollback`) as `DeterministicEvidence` rows.
+3. `CommandCheckRunner` drains stdout and stderr concurrently and combines them into `output_redacted` so rustc/cargo diagnostics on stderr reach `annotate_with_lattice`.
 
 ## Consequences
 - Single-attempt yield increases substantially for minor compiler/test errors without consuming global retry budgets.

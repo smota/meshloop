@@ -57,6 +57,7 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 - `iso.worktree.leak_count`: Untracked files, uncommitted changes, or dangling locks left in the host repo (**CI Gate: 0**).
 - `iso.ancestor_propagation.pass_rate_pct`: Fidelity of ancestor artifact inheritance and sibling isolation across multi-wave execution (**CI Gate: 100%**).
 - `iso.mutation_rollback.fidelity`: State snapshot equality ($S' == S$) across negative control mutation rejections (**CI Gate: 1.0 / 100%**).
+- `iso.repair_rollback.fidelity`: SHA identity and clean working tree immediately after inner-loop `git reset --hard` on a syntax regression (**CI Gate: 1.0 / 100%**).
 - `iso.crash.recovery_fidelity`: Recovery success rate following crash injection across WAL barriers (**CI Gate: 1.0 / 100%**).
 - `iso.redact.pass_rate_pct`: Scrubber pass rate for sensitive tokens across logs, stdout, and diffs (**CI Gate: 100%**).
 - `iso.gate.obedience_rate_pct`: Adherence to mandatory human approval gates (`review-plan`, `accept`, `integrate`) (**CI Gate: 100%**).
@@ -69,9 +70,11 @@ $$\text{Token Reduction Rate: } R = 100 \times \left(1 - \frac{T_{\text{pruned}}
 
 ### 3.5 Convergence and Self-Repair Metrics (`conv.*`)
 - `conv.lattice.reduction_rate`: Average Lyapunov energy variation between repair rounds ($\Delta \phi / \text{round}$).
-- `conv.self_repair.success_rate`: Percentage of tasks failing initial checks that reach `Accepted` within retry limits.
-- `conv.oscillation.detected_count`: Identical error cycles caught and terminated by FNV-1a error fingerprints.
-- `conv.rollback.count`: Frequency of `git reset --hard` rollbacks triggered by syntax regressions.
+- `conv.lyapunov.monotonic_reduction_pct`: Share of non-rollback Continue/Accept observations with $\Delta\phi < 0$ (**CI Gate: 100%**).
+- `conv.self_repair.success_rate`: Percentage of tasks failing initial checks that reach `Accepted` within retry limits, measured on live rustc-injected E2E cases (**Target: $\ge 80.0\%$**).
+- `conv.oscillation.detected_count`: Identical error cycles caught and terminated by FNV-1a error fingerprints (**Target: $\ge 1$ live**).
+- `conv.rollback.count`: Frequency of `git reset --hard` rollbacks triggered by syntax regressions (**Target: $\ge 1$ live**).
+- `conv.self_repair.convergence_ms.p95`: 95th percentile inner-loop cycle time from first failed check through Accept/Stop (**Target: $\le 1500.0\text{ms}$**).
 
 ### 3.6 Quantized Indexing Metrics (`quant.*`)
 - `quant.index.compression_ratio`: Memory compression ratio for indexed AST signatures ($\ge 6\times$).
