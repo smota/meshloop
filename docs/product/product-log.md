@@ -221,3 +221,19 @@ With the deterministic regression gate (World D) fully operational, the three hi
     - `conv.self_repair.convergence_ms.p95 <= 1500.0ms` (PASS: ~1233ms)
   - **Benchmark Scorecard:** Expanded canonical gate from 23 to 28 metrics, achieving **28/28 PASS** on `xtask bench`.
 
+### Priority 8: Post-R1 Orchestration Optimization — System 1 Machine-Native Decision Engine & Predictive Success Oracle (EPIC-ML-016 / ADR 0032) — **REGISTERED IN ACTIVE BACKLOG**
+- **Objective:** Eliminate control-plane decision latency ($10\text{s} \to 120\text{ms}$), flat-rate subscription exhaustion, crude structural tier heuristics, and prompt clutter by integrating TypeSafe AI's Jev ("System 1" non-autoregressive decision model) across all supported polyglot target codebases (TypeScript, Python, Go, Rust, C++, etc.).
+- **Value:** Slashes control-plane decision latency by $\approx 100\times$, eliminates schema drift with 100% typed structs (`Choice`, `Noul`, `Score`), preserves scarce System 2 subscription quotas (Claude Code, Codex, Grok) by resolving mechanical errors in fast micro-actuations, and replaces the unvalidated dependency-count heuristic with an RLCD-calibrated risk ratchet.
+- **Specification & Backlog Deliverables:**
+  - **Epic Specification:** [`docs/engineering/epic-system1-jev-orchestration.md`](../engineering/epic-system1-jev-orchestration.md) (`EPIC-ML-016`).
+  - **Benchmark & Validation Specification:** [`docs/architecture/system1-benchmark-and-validation-spec.md`](../architecture/system1-benchmark-and-validation-spec.md) (`SPEC-ML-BENCH-002`).
+  - **Proposed ADR:** ADR 0032: System 1 Decision Port, Predictive Success Oracle, and Jev Adapter (`docs/architecture/adr/0032-system1-decision-port.md`).
+  - **Formal Multi-Agent Review:** Two-round consensus review conducted directly with Codex (Lead Systems Architect) and Grok (Loop Algorithmist), establishing conditional approval under strict boundary and convergence invariants:
+    - *Raise-Only Planning Ratchet:* One-shot Bernoulli union $q = P(\text{arch} \lor \text{sec} \lor \text{native} \lor \text{migration}) \ge 0.90$ over $\max(\text{declared}, \text{ratchet})$; never lowers a tier.
+    - *Dual-Threshold Review Gate:* $p \ge 0.95 \implies \text{Pass}$; $p \le 0.05 \implies \text{Fail}$; $(0.05, 0.95) \implies \text{Abstain}$ (task remains in `AwaitingReview` for human review). Tier 3 unconditionally human-gated.
+    - *Purity of Self-Repair:* `RepairSession::observe()` remains pure. Micro-edits run only on an Atom Allowlist with $P(\text{Mech}) \ge 0.70$ and zero syntax errors, costing exactly 1 observation before standard Lyapunov rollback.
+    - *QACR Oracle Prior:* Jev acts as an oracle fusing a Beta prior $\mu_h = \text{clip}((s_h + 4\pi_h)/(n_h + 4))$ with $|\mu_h - \mu_{\text{local}}| \le 0.25$; exploration bonus operates on real pulls only.
+    - *Context Suffix Reranker:* Single batched 24-Noul query over unpinned FWHT suffix; zero files dropped; bit-identical fallback to pure FWHT order on error.
+    - *Offline CI Invariant:* Canned transport fakes and `ScriptedDecisionPort` ensure `cargo test --workspace --locked --offline` runs with zero network sockets.
+- **Milestone Target:** Meshloop 0.2.0 (Phased WBS: WP-1 through WP-9).
+

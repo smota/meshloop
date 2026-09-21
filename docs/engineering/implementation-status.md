@@ -64,8 +64,26 @@ Live tests execute direct CLI processes in isolated worktrees with zero backgrou
 - WSL2 / prebuilt GitHub Release binaries
 - Further crates.io versions still maintainer-gated (0.1.0 is uploaded)
 - Vendor quota numbers not queried
-- Tier assignment = dependency-count heuristic
+- Tier assignment = dependency-count heuristic (slated for replacement by EPIC-ML-016 / JevTierAssigner)
 - `integrate --into` is explicit, not the default of `run`
+
+## Active Backlog & Next Milestone: 0.2.0 (EPIC-ML-016)
+
+Post-R1 Orchestration Optimization & System 1 Decision Engine (TypeSafe Jev Integration):
+- **Epic:** [EPIC-ML-016: System 1 Machine-Native Decision Engine & Predictive Success Oracle](epic-system1-jev-orchestration.md)
+- **Specification:** [SPEC-ML-BENCH-002: System 1 End-to-End Benchmark & Validation Framework](../architecture/system1-benchmark-and-validation-spec.md)
+- **Proposed ADR:** ADR 0032 (`docs/architecture/adr/0032-system1-decision-port.md`)
+- **Review Status:** Formally reviewed and conditionally approved across two rounds with Codex and Grok.
+- **Work Breakdown Structure:**
+  - WP-1: ADR 0032 & Domain Value Types (`DecisionOutcome`, `Confidence`, `RiskFloor`)
+  - WP-2: Engine Ports (`DecisionPort`, `PredictiveSuccessOracle`) & `ScriptedDecisionPort` test doubles
+  - WP-3: Adapter Implementation (`meshloop-adapters::jev` via `ureq` + pinned `rustls`) & transport fakes
+  - WP-4: Planning Risk Ratchet (`JevTierAssigner`, raise-only at $q \ge 0.90$)
+  - WP-5: Candidate Verification Gating (`ModelReviewEvidence` with $0.95 / 0.05$ dual thresholds)
+  - WP-6: Attempt-Scoped Self-Repair Bifurcation (`RunLoop` micro-actuator on allowlisted atoms)
+  - WP-7: QACR Prior Fusion ($\mu_h = \text{clip}((s_h + 4\pi_h)/(n_h + 4))$) & integer spend ledger
+  - WP-8: Context Suffix Reranker (1 batched 24-Noul query over unpinned FWHT suffix)
+  - WP-9: End-to-End Orchestration & Benchmarks (`xtask bench-system1`, SPEC-ML-BENCH-002)
 
 ## Commit
 
