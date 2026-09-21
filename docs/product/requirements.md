@@ -30,5 +30,9 @@ Public map: [docs/README.md](../README.md). R1 is a named subset — see
 - ML-015: Support dynamic upstream task graph mutation and replanning for pending nodes,
   preserving DAG acyclicity, active-state immutability, deterministic event sourcing, and
   operator review gating (ADR 0028).
+- ML-016: Provide a machine-native System 1 decision engine and predictive success oracle
+  (TypeSafe Jev integration) to accelerate planning risk tiering, candidate diff reviews,
+  compiler repair triage, and context reranking under strict Lyapunov convergence and
+  Bayesian safety gating (ADR 0032, EPIC-ML-016).
 
 Each implementation task must add concrete scenarios and link applicable ADRs before coding.
