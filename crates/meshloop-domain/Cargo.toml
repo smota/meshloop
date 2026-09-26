@@ -20,3 +20,4 @@ workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 petgraph = { version = "0.8", default-features = false, features = ["std", "graphmap"] }
+sha2 = { workspace = true }

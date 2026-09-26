@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use meshloop_domain::capability::HarnessError;
 use meshloop_domain::diagnostic::DiagnosticLattice;
+use meshloop_domain::digest::compute_plan_id;
 use meshloop_domain::evidence::{
     AttemptId, CandidateRef, DeterministicEvidence, Evidence, HumanAcceptanceEvidence,
 };
@@ -142,14 +143,6 @@ fn stamp() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "0".into())
-}
-
-fn digest(json: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    json.hash(&mut h);
-    format!("{:016x}", h.finish())
 }
 
 fn is_fixture(name: &str) -> bool {
@@ -349,7 +342,7 @@ impl<'a> RunLoop<'a> {
             run_base,
             integrate_ref: ibranch,
             plan_json: json.clone(),
-            plan_sha256: digest(&json),
+            plan_id: compute_plan_id(&json).to_string(),
             created_at: stamp(),
             review_note: None,
         };
@@ -405,7 +398,7 @@ impl<'a> RunLoop<'a> {
                 }
                 PlanState::AwaitingPlanReview | PlanState::PlanDeclined => {
                     existing.plan_json = json.clone();
-                    existing.plan_sha256 = digest(&json);
+                    existing.plan_id = compute_plan_id(&json).to_string();
                     existing.plan_state = PlanState::AwaitingPlanReview;
                     existing.run_base = run_base;
                     self.store.save_run(&existing)?;
@@ -418,7 +411,7 @@ impl<'a> RunLoop<'a> {
                 run_base,
                 integrate_ref: ibranch,
                 plan_json: json.clone(),
-                plan_sha256: digest(&json),
+                plan_id: compute_plan_id(&json).to_string(),
                 created_at: stamp(),
                 review_note: None,
             })?;
@@ -534,7 +527,7 @@ impl<'a> RunLoop<'a> {
         let json = serde_json::to_string_pretty(&graph)
             .map_err(|e| OrchestratorError::Illegal(e.to_string()))?;
         row.plan_json = json.clone();
-        row.plan_sha256 = digest(&json);
+        row.plan_id = compute_plan_id(&json).to_string();
 
         if require_review {
             row.plan_state = PlanState::AwaitingPlanReview;

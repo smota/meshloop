@@ -546,7 +546,7 @@ impl RunStore for SqliteStore {
                     row.run_base,
                     row.integrate_ref,
                     row.plan_json,
-                    row.plan_sha256,
+                    row.plan_id,
                     row.created_at,
                     row.review_note,
                 ],
@@ -580,7 +580,7 @@ impl RunStore for SqliteStore {
                 row.run_base,
                 row.integrate_ref,
                 row.plan_json,
-                row.plan_sha256,
+                row.plan_id,
                 row.created_at,
                 row.review_note,
             ],
@@ -638,7 +638,7 @@ impl RunStore for SqliteStore {
                     run_base: rb,
                     integrate_ref: ir,
                     plan_json: pj,
-                    plan_sha256: ph,
+                    plan_id: ph,
                     created_at: ca,
                     review_note: note,
                 })
@@ -867,11 +867,7 @@ pub fn now_stamp() -> String {
 }
 
 pub fn plan_digest(json: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    json.hash(&mut h);
-    format!("{:016x}", h.finish())
+    meshloop_domain::digest::compute_plan_id(json).to_string()
 }
 
 #[cfg(test)]
@@ -924,7 +920,7 @@ mod tests {
                 run_base: "abc".into(),
                 integrate_ref: "meshloop/g/integrate".into(),
                 plan_json: "{}".into(),
-                plan_sha256: "x".into(),
+                plan_id: "x".into(),
                 created_at: "0".into(),
                 review_note: None,
             })

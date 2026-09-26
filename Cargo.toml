@@ -24,6 +24,7 @@ meshloop-domain = { path = "crates/meshloop-domain", version = "0.1.0" }
 meshloop-context = { path = "crates/meshloop-context", version = "0.1.0" }
 meshloop-engine = { path = "crates/meshloop-engine", version = "0.1.0" }
 meshloop-adapters = { path = "crates/meshloop-adapters", version = "0.1.0" }
+sha2 = { version = "0.10", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
