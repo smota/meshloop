@@ -1229,17 +1229,9 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
 
     let run = meshloop()
         .current_dir(&dir)
-        .args([
-            "run",
-            "--plan",
-        ])
+        .args(["run", "--plan"])
         .arg(&plan_path)
-        .args([
-            "--accept-plan",
-            "--fixture-only",
-            "--json",
-            "--config",
-        ])
+        .args(["--accept-plan", "--fixture-only", "--json", "--config"])
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
@@ -1263,8 +1255,14 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
 
     // Issue #3: stdout must start with '{' and end with '}'
     let trimmed = stdout_str.trim();
-    assert!(trimmed.starts_with('{'), "stdout must start with '{{': {trimmed}");
-    assert!(trimmed.ends_with('}'), "stdout must end with '}}': {trimmed}");
+    assert!(
+        trimmed.starts_with('{'),
+        "stdout must start with '{{': {trimmed}"
+    );
+    assert!(
+        trimmed.ends_with('}'),
+        "stdout must end with '}}': {trimmed}"
+    );
 
     // Issue #3: stdout must parse cleanly as RFC-8259 JSON
     let parsed: serde_json::Value = serde_json::from_str(trimmed)
@@ -1282,7 +1280,10 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
     let digest = artifact["digest"].as_str().expect("digest string present");
     assert_eq!(digest.len(), 64);
     let persisted_bytes = fs::read(dir.join(".meshloop").join("plan.json")).unwrap();
-    assert_eq!(digest, meshloop_domain::digest::sha256_hex(&persisted_bytes));
+    assert_eq!(
+        digest,
+        meshloop_domain::digest::sha256_hex(&persisted_bytes)
+    );
 
     // Must NOT have legacy plan_sha256 key in data
     assert!(parsed["data"].get("plan_sha256").is_none());

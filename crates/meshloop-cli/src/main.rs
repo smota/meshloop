@@ -1436,9 +1436,9 @@ fn cmd_mutate_plan(
     let row = saga.store.load_run(&graph_id).ok().flatten();
     let plan_state = row.as_ref().map(|r| format!("{:?}", r.plan_state));
     let plan_id = row.as_ref().map(|r| r.plan_id.clone());
-    let artifact_digest = row.as_ref().map(|r| {
-        meshloop_domain::digest::ArtifactDigest::sha256(r.plan_json.as_bytes())
-    });
+    let artifact_digest = row
+        .as_ref()
+        .map(|r| meshloop_domain::digest::ArtifactDigest::sha256(r.plan_json.as_bytes()));
 
     if json {
         println!(
