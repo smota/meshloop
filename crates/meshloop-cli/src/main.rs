@@ -664,10 +664,17 @@ fn cmd_run(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
     };
-    println!(
-        "Note: worktrees are kept. `run` does not merge onto your current branch.\n\
-         Use `meshloop accept` then `meshloop resume`, and `meshloop integrate --into` to land.\n"
-    );
+    if json {
+        eprintln!(
+            "Note: worktrees are kept. `run` does not merge onto your current branch.\n\
+             Use `meshloop accept` then `meshloop resume`, and `meshloop integrate --into` to land."
+        );
+    } else {
+        println!(
+            "Note: worktrees are kept. `run` does not merge onto your current branch.\n\
+             Use `meshloop accept` then `meshloop resume`, and `meshloop integrate --into` to land.\n"
+        );
+    }
     let graph_id = graph.graph_id.clone();
     let existing_state = saga
         .store

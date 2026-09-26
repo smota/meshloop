@@ -1215,3 +1215,77 @@ fn mutate_plan_with_require_review_gates_resume() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
+    let dir = disposable_repo("json-clean");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let plan_text = r#"{"graph_id":"g_clean_json","nodes":[{"id":1,"description":"first task","depends_on":[],"tier":null}]}"#;
+    fs::write(&plan_path, plan_text).unwrap();
+
+    let db_path = dir.join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args([
+            "run",
+            "--plan",
+        ])
+        .arg(&plan_path)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("run CLI");
+
+    let stdout_str = String::from_utf8_lossy(&run.stdout);
+    let stderr_str = String::from_utf8_lossy(&run.stderr);
+
+    // Issue #3: Notice must be routed to stderr, NOT stdout
+    assert!(
+        stderr_str.contains("Note: worktrees are kept."),
+        "stderr should contain the human notice, got: {stderr_str}"
+    );
+    assert!(
+        !stdout_str.contains("Note: worktrees are kept."),
+        "stdout must NOT contain non-JSON preambles, got: {stdout_str}"
+    );
+
+    // Issue #3: stdout must start with '{' and end with '}'
+    let trimmed = stdout_str.trim();
+    assert!(trimmed.starts_with('{'), "stdout must start with '{{': {trimmed}");
+    assert!(trimmed.ends_with('}'), "stdout must end with '}}': {trimmed}");
+
+    // Issue #3: stdout must parse cleanly as RFC-8259 JSON
+    let parsed: serde_json::Value = serde_json::from_str(trimmed)
+        .expect("stdout must be valid RFC-8259 JSON without preprocessing");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "meshloop:run");
+
+    // Issue #4: plan_id must be present as opaque correlation token (16-hex)
+    let plan_id = parsed["data"]["plan_id"].as_str().expect("plan_id present");
+    assert_eq!(plan_id.len(), 16);
+
+    // Issue #4: artifact_digest must contain algorithm-tagged authentic sha256
+    let artifact = &parsed["data"]["artifact_digest"];
+    assert_eq!(artifact["digest_algo"], "sha256");
+    let digest = artifact["digest"].as_str().expect("digest string present");
+    assert_eq!(digest.len(), 64);
+    let persisted_bytes = fs::read(dir.join(".meshloop").join("plan.json")).unwrap();
+    assert_eq!(digest, meshloop_domain::digest::sha256_hex(&persisted_bytes));
+
+    // Must NOT have legacy plan_sha256 key in data
+    assert!(parsed["data"].get("plan_sha256").is_none());
+
+    fs::remove_dir_all(&dir).ok();
+}
