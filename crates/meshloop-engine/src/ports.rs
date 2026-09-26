@@ -192,7 +192,7 @@ pub struct RunRow {
     pub run_base: String,
     pub integrate_ref: String,
     pub plan_json: String,
-    pub plan_sha256: String,
+    pub plan_id: String,
     pub created_at: String,
     pub review_note: Option<String>,
 }

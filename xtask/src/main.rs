@@ -1412,7 +1412,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
             run_base: "main".into(),
             integrate_ref: "meshloop/integrate".into(),
             plan_json: initial_json.clone(),
-            plan_sha256: "init_sha".into(),
+            plan_id: "init_sha".into(),
             created_at: "0".into(),
             review_note: None,
         };
@@ -1563,7 +1563,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         run_base: "main".into(),
         integrate_ref: "meshloop/integrate".into(),
         plan_json: base_json.clone(),
-        plan_sha256: base_sha,
+        plan_id: base_sha,
         created_at: "1000".into(),
         review_note: None,
     };
@@ -1599,7 +1599,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
     #[derive(PartialEq, Eq, Debug)]
     struct StateSnapshot {
         plan_json: String,
-        plan_sha256: String,
+        plan_id: String,
         plan_state: PlanState,
         event_count: usize,
         integrity_ok: bool,
@@ -1625,7 +1625,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 .map_err(|e| format!("read plan.json: {e}"))?;
         Ok(StateSnapshot {
             plan_json: r.plan_json,
-            plan_sha256: r.plan_sha256,
+            plan_id: r.plan_id,
             plan_state: r.plan_state,
             event_count: ec,
             integrity_ok: ok,

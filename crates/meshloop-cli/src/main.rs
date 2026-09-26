@@ -734,6 +734,11 @@ fn cmd_run(
         Ok(reason) => {
             let status = saga.status(&gid).ok();
             if json {
+                let row = saga.store.load_run(&gid).ok().flatten();
+                let plan_id = row.as_ref().map(|r| r.plan_id.clone());
+                let artifact_digest = row.as_ref().map(|r| {
+                    meshloop_domain::digest::ArtifactDigest::sha256(r.plan_json.as_bytes())
+                });
                 println!(
                     "{}",
                     json_out::ok(
@@ -742,6 +747,8 @@ fn cmd_run(
                         serde_json::json!({
                             "idle": format!("{reason:?}"),
                             "graph_id": gid,
+                            "plan_id": plan_id,
+                            "artifact_digest": artifact_digest,
                         }),
                     )
                 );
@@ -1421,7 +1428,10 @@ fn cmd_mutate_plan(
         .unwrap_or_default();
     let row = saga.store.load_run(&graph_id).ok().flatten();
     let plan_state = row.as_ref().map(|r| format!("{:?}", r.plan_state));
-    let plan_sha256 = row.as_ref().map(|r| r.plan_sha256.clone());
+    let plan_id = row.as_ref().map(|r| r.plan_id.clone());
+    let artifact_digest = row.as_ref().map(|r| {
+        meshloop_domain::digest::ArtifactDigest::sha256(r.plan_json.as_bytes())
+    });
 
     if json {
         println!(
@@ -1435,7 +1445,8 @@ fn cmd_mutate_plan(
                     "nodes_count": updated_graph.nodes.len(),
                     "topological_order": topo_order,
                     "plan_state": plan_state,
-                    "plan_sha256": plan_sha256,
+                    "plan_id": plan_id,
+                    "artifact_digest": artifact_digest,
                     "graph": updated_graph,
                 }),
             )
