@@ -12,7 +12,7 @@ fn cli_reports_help_version_and_rejects_bad_invocations() {
         .expect("workspace root");
     for (args, success, marker) in [
         (vec!["--help"], true, "meshloop plan --objective"),
-        (vec!["--version"], true, "meshloop 0.1.0"),
+        (vec!["--version"], true, "meshloop 0.2.0"),
         (vec!["plan"], false, "meshloop:plan requires --objective"),
         (vec!["run"], false, "meshloop:run requires --plan"),
         (vec!["reviewer"], false, "unprefixed"),

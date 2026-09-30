@@ -216,7 +216,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meshloop-adapters"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "meshloop-domain",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "meshloop-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "meshloop-adapters",
  "meshloop-context",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "meshloop-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "meshloop-domain",
  "serde",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "meshloop-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "petgraph",
  "serde",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "meshloop-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "meshloop-context",
  "meshloop-domain",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hdrhistogram",
  "meshloop-adapters",

@@ -11,7 +11,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/meshloop-cli.svg?style=flat-square)](https://crates.io/crates/meshloop-cli)
-[![Version](https://img.shields.io/badge/version-0.1.0-informational?style=flat-square)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-informational?style=flat-square)](Cargo.toml)
 [![Rust: 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 [![Regression Gate: 28/28 PASS](https://img.shields.io/badge/regression--gate-28%2F28%20PASS-brightgreen?style=flat-square)](benches/thresholds.toml)
 [![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D6?style=flat-square&logo=windows&logoColor=white)](#quickstart-up-and-running-in-2-minutes)
