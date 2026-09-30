@@ -52,6 +52,7 @@ pub enum Command {
         worktree_base: Option<PathBuf>,
         db: Option<PathBuf>,
         fixture_only: bool,
+        detach: bool,
     },
     Resume {
         graph: Option<String>,
@@ -65,13 +66,15 @@ pub enum Command {
     Cancel {
         graph: Option<String>,
         task: Option<u32>,
+        session_id: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
     },
     Inspect {
-        task: u32,
+        task: Option<u32>,
         graph: Option<String>,
+        session_id: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
     },
@@ -231,6 +234,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 fixture_only: has_flag(rest, "--fixture-only"),
+                detach: has_flag(rest, "--detach"),
             })
         }
         Some(v) if v == "status" => Ok(Command::Status {
@@ -255,9 +259,12 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }
         Some(v) if v == "cancel" => {
             let rest = &args[1..];
+            let session_id = flag_value(rest, "--session-id");
+            let graph = flag_value(rest, "--graph").or_else(|| session_id.clone());
             Ok(Command::Cancel {
-                graph: flag_value(rest, "--graph"),
+                graph,
                 task: flag_value(rest, "--task").and_then(|s| s.parse().ok()),
+                session_id,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
@@ -265,12 +272,13 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }
         Some(v) if v == "inspect" => {
             let rest = &args[1..];
-            let task = flag_value(rest, "--task")
-                .and_then(|s| s.parse().ok())
-                .ok_or_else(|| "meshloop:inspect requires --task <id>".to_string())?;
+            let session_id = flag_value(rest, "--session-id");
+            let graph = flag_value(rest, "--graph").or_else(|| session_id.clone());
+            let task = flag_value(rest, "--task").and_then(|s| s.parse().ok());
             Ok(Command::Inspect {
                 task,
-                graph: flag_value(rest, "--graph"),
+                graph,
+                session_id,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
             })

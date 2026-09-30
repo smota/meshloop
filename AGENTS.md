@@ -62,6 +62,11 @@ Record actual executors and review roles honestly.
 - Feedback may recommend routing changes but cannot silently change policy or approval.
 
 ## Verification and completion
+When changing `skills/meshloop-*`, follow the Skills Manager development-copy
+maintenance procedure in `docs/install.md#skills-manager-development-copies`.
+Completion reports must distinguish source validation from library refresh and
+verification of existing deployments; report pending refreshes explicitly.
+
 Run checks appropriate to changed behavior, per docs/engineering/testing.md. Add
 meaningful regression tests for bugs when practical; otherwise record the limitation.
 Record passed, failed, and not-run checks with reasons. Do not claim unused adapters,
