@@ -1288,5 +1288,137 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
     // Must NOT have legacy plan_sha256 key in data
     assert!(parsed["data"].get("plan_sha256").is_none());
 
+    // Issue #6: git_export must be present in completion receipt
+    let git_export = &parsed["data"]["git_export"];
+    assert!(git_export.is_object(), "git_export must be an object");
+    let commit_sha = git_export["commit_sha"]
+        .as_str()
+        .expect("commit_sha present");
+    assert_eq!(commit_sha.len(), 40, "commit_sha must be 40 chars hex");
+    let branch_ref = git_export["branch_ref"]
+        .as_str()
+        .expect("branch_ref present");
+    assert!(
+        branch_ref.starts_with("refs/heads/"),
+        "branch_ref must start with refs/heads/"
+    );
+    let patch_sha = git_export["patch_sha256"]
+        .as_str()
+        .expect("patch_sha256 present");
+    assert_eq!(patch_sha.len(), 64, "patch_sha256 must be 64 chars hex");
+
+    // Verify commit exists in repository via git cat-file -e <sha>
+    let probe = std::process::Command::new("git")
+        .args(["cat-file", "-e", commit_sha])
+        .current_dir(&dir)
+        .output()
+        .expect("git probe");
+    assert!(
+        probe.status.success(),
+        "commit_sha must exist in git repository"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn detached_run_and_session_inspect_and_cancel_lifecycle() {
+    let dir = disposable_repo("detach-lifecycle");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let plan_text = r#"{"graph_id":"g_detach","nodes":[{"id":1,"description":"detached task","depends_on":[],"tier":null}]}"#;
+    fs::write(&plan_path, plan_text).unwrap();
+
+    let db_path = dir.join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+
+    // 1. Run with --detach --json
+    let start = std::time::Instant::now();
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--detach",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("run detached CLI");
+    let elapsed = start.elapsed();
+
+    assert!(
+        run.status.success(),
+        "run --detach failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        elapsed.as_millis() < 5000,
+        "detached run should return promptly (<5s, got {:?})",
+        elapsed
+    );
+
+    let stdout_str = String::from_utf8_lossy(&run.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout_str.trim()).expect("valid json");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "meshloop:run");
+    assert_eq!(parsed["data"]["detached"], true);
+    let session_id = parsed["data"]["session_id"]
+        .as_str()
+        .expect("session_id string");
+    assert_eq!(session_id, "g_detach");
+
+    // 2. Inspect session non-blockingly
+    let inspect = meshloop()
+        .current_dir(&dir)
+        .args(["inspect", "--session-id", session_id, "--json", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("inspect CLI");
+    assert!(
+        inspect.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let inspect_out = String::from_utf8_lossy(&inspect.stdout);
+    let inspect_parsed: serde_json::Value =
+        serde_json::from_str(inspect_out.trim()).expect("valid inspect json");
+    assert_eq!(inspect_parsed["ok"], true);
+    assert_eq!(inspect_parsed["command"], "meshloop:inspect");
+    assert_eq!(inspect_parsed["data"]["session_id"], session_id);
+    assert!(inspect_parsed["data"]["nodes"].is_array());
+
+    // 3. Cancel session
+    let cancel = meshloop()
+        .current_dir(&dir)
+        .args(["cancel", "--session-id", session_id, "--json", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .output()
+        .expect("cancel CLI");
+    assert!(
+        cancel.status.success(),
+        "cancel failed: {}",
+        String::from_utf8_lossy(&cancel.stderr)
+    );
+    let cancel_out = String::from_utf8_lossy(&cancel.stdout);
+    let cancel_parsed: serde_json::Value =
+        serde_json::from_str(cancel_out.trim()).expect("valid cancel json");
+    assert_eq!(cancel_parsed["ok"], true);
+    assert_eq!(cancel_parsed["command"], "meshloop:cancel");
+    assert_eq!(cancel_parsed["data"]["status"], "cancelled");
+
     fs::remove_dir_all(&dir).ok();
 }

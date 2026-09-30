@@ -46,6 +46,15 @@ pub struct HumanAcceptanceEvidence {
     pub accepted_at: String,
 }
 
+/// Machine-verifiable Git commit and worktree export metadata emitted upon task completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitExport {
+    pub worktree_path: String,
+    pub branch_ref: String,
+    pub commit_sha: String,
+    pub patch_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Evidence {
     Deterministic(DeterministicEvidence),

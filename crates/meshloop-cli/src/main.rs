@@ -15,7 +15,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use meshloop_domain::state::{PlanDecision, PlanState};
+use meshloop_domain::state::{PlanDecision, PlanState, TaskState};
 use meshloop_domain::task_graph::{TaskGraph, TaskId};
 use meshloop_engine::ports::{HarnessCapabilities, RunStore, WorkspacePort};
 use meshloop_engine::router::Router;
@@ -134,6 +134,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             worktree_base,
             db,
             fixture_only,
+            detach,
         } => cmd_run(
             plan,
             accept_plan,
@@ -142,6 +143,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             worktree_base,
             db,
             fixture_only,
+            detach,
             inv.json,
             inv.origin,
         ),
@@ -166,16 +168,27 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Cancel {
             graph,
             task,
+            session_id,
             config,
             db,
             worktree_base,
-        } => cmd_cancel(graph, task, config, db, worktree_base, inv.origin),
+        } => cmd_cancel(
+            graph,
+            task,
+            session_id,
+            config,
+            db,
+            worktree_base,
+            inv.json,
+            inv.origin,
+        ),
         Command::Inspect {
             task,
             graph,
+            session_id,
             config,
             db,
-        } => cmd_inspect(task, graph, config, db, inv.origin),
+        } => cmd_inspect(task, graph, session_id, config, db, inv.json, inv.origin),
         Command::Accept {
             task,
             identity,
@@ -592,6 +605,7 @@ fn cmd_run(
     worktree_base: Option<PathBuf>,
     db: Option<PathBuf>,
     fixture_only: bool,
+    detach: bool,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
@@ -619,7 +633,7 @@ fn cmd_run(
         eprintln!("plan failed structural validation: {e:?}");
         return ExitCode::from(2);
     }
-    let (cfg, _) = match load_cfg(config) {
+    let (cfg, _) = match load_cfg(config.clone()) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -628,7 +642,7 @@ fn cmd_run(
         config: &cfg,
         repo_root: root,
         db_path: db.as_deref(),
-        worktree_base,
+        worktree_base: worktree_base.clone(),
         origin: origin.clone(),
         fixture_only,
     }) {
@@ -737,28 +751,93 @@ fn cmd_run(
         eprintln!("accept-plan failed: {e:?}");
         return ExitCode::from(1);
     }
+    if detach {
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("meshloop"));
+        let mut cmd = std::process::Command::new(current_exe);
+        cmd.arg("resume").arg("--graph").arg(&gid);
+        if let Some(cfg) = &config {
+            cmd.arg("--config").arg(cfg);
+        }
+        if let Some(d) = &db {
+            cmd.arg("--db").arg(d);
+        }
+        if let Some(wb) = &worktree_base {
+            cmd.arg("--worktree-base").arg(wb);
+        }
+        if fixture_only {
+            cmd.arg("--fixture-only");
+        }
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+
+        match cmd.spawn() {
+            Ok(_) => {
+                if json {
+                    println!(
+                        "{}",
+                        json_out::ok(
+                            "meshloop:run",
+                            origin,
+                            serde_json::json!({
+                                "session_id": gid,
+                                "graph_id": gid,
+                                "status": "running",
+                                "detached": true,
+                            }),
+                        )
+                    );
+                } else {
+                    println!("Detached session started: {gid}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err(
+                            "meshloop:run",
+                            origin,
+                            format!("Failed to spawn detached process: {e}")
+                        )
+                    );
+                } else {
+                    eprintln!("Failed to spawn detached process: {e}");
+                }
+                return ExitCode::from(1);
+            }
+        }
+    }
     match saga.loop_until_idle() {
         Ok(reason) => {
             let status = saga.status(&gid).ok();
+            let git_export = saga.export_git_metadata(&gid).ok().flatten();
             if json {
                 let row = saga.store.load_run(&gid).ok().flatten();
                 let plan_id = row.as_ref().map(|r| r.plan_id.clone());
                 let artifact_digest = row.as_ref().map(|r| {
                     meshloop_domain::digest::ArtifactDigest::sha256(r.plan_json.as_bytes())
                 });
-                println!(
-                    "{}",
-                    json_out::ok(
-                        "meshloop:run",
-                        origin,
-                        serde_json::json!({
-                            "idle": format!("{reason:?}"),
-                            "graph_id": gid,
-                            "plan_id": plan_id,
-                            "artifact_digest": artifact_digest,
-                        }),
-                    )
-                );
+                let mut data = serde_json::json!({
+                    "idle": format!("{reason:?}"),
+                    "graph_id": gid,
+                    "plan_id": plan_id,
+                    "artifact_digest": artifact_digest,
+                });
+                if let Some(export) = git_export {
+                    data["git_export"] =
+                        serde_json::to_value(export).unwrap_or(serde_json::Value::Null);
+                }
+                println!("{}", json_out::ok("meshloop:run", origin, data,));
             } else {
                 println!("{}", report::format_idle(reason));
                 if let Some(s) = &status {
@@ -946,66 +1025,202 @@ fn cmd_resume(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_cancel(
     graph: Option<String>,
     task: Option<u32>,
+    session_id: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
+    json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(config, db, worktree_base, false, origin, |saga| {
-        let id = match saga.resolve_graph_id(graph.as_deref()) {
+    let resolved_id = graph.or(session_id);
+    with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
+        let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("{e:?}");
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:cancel", origin, format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
                 return ExitCode::from(2);
             }
         };
+        // Kill process trees of any live attempts to prevent orphaned processes
+        if let Ok(graph) = saga.graph(&id) {
+            for node in &graph.nodes {
+                if let Ok(Some(attempt)) = saga.store.latest_attempt_for_task(&id, node.id)
+                    && let Some(pid) = attempt.pid
+                {
+                    meshloop_adapters::process::kill_process_tree(pid);
+                }
+            }
+        }
         let task = task.map(TaskId);
         match saga.cancel(&id, task) {
             Ok(()) => {
-                println!("cancelled.");
+                if json {
+                    println!(
+                        "{}",
+                        json_out::ok(
+                            "meshloop:cancel",
+                            origin,
+                            serde_json::json!({
+                                "session_id": id,
+                                "status": "cancelled",
+                            }),
+                        )
+                    );
+                } else {
+                    println!("cancelled.");
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("{e:?}");
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:cancel", origin, format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
                 ExitCode::from(1)
             }
         }
     })
 }
 
+fn compute_overall_status(s: &meshloop_engine::run_loop::RunStatus) -> &'static str {
+    if s.nodes.is_empty() {
+        return "idle";
+    }
+    if s.nodes.iter().all(|n| n.state == TaskState::Integrated) {
+        return "completed";
+    }
+    if s.nodes.iter().any(|n| n.state == TaskState::Failed) {
+        return "failed";
+    }
+    if s.nodes.iter().any(|n| n.state == TaskState::Cancelled) {
+        return "cancelled";
+    }
+    if s.nodes.iter().any(|n| n.state == TaskState::AwaitingReview) {
+        return "awaiting_acceptance";
+    }
+    "running"
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_inspect(
-    task: u32,
+    task: Option<u32>,
     graph: Option<String>,
+    session_id: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
+    json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    with_saga(config, db, None, false, origin, |saga| {
-        let id = match saga.resolve_graph_id(graph.as_deref()) {
+    let resolved_id = graph.or(session_id);
+    with_saga(config, db, None, false, origin.clone(), |saga| {
+        let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("{e:?}");
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:inspect", origin, format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
                 return ExitCode::from(2);
             }
         };
         match saga.status(&id) {
             Ok(s) => {
-                if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == task) {
-                    println!(
-                        "task {} state={:?} {} worktree={:?}",
-                        n.task_id.0, n.state, n.description, n.worktree
-                    );
-                    ExitCode::SUCCESS
+                if let Some(t) = task {
+                    if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == t) {
+                        if json {
+                            println!(
+                                "{}",
+                                json_out::ok(
+                                    "meshloop:inspect",
+                                    origin.clone(),
+                                    serde_json::json!({
+                                        "session_id": id,
+                                        "task_id": n.task_id.0,
+                                        "state": format!("{:?}", n.state),
+                                        "description": n.description,
+                                        "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                        "pane_id": n.pane_id,
+                                        "live": n.live,
+                                        "note": n.note,
+                                    }),
+                                )
+                            );
+                        } else {
+                            println!(
+                                "task {} state={:?} {} worktree={:?}",
+                                n.task_id.0, n.state, n.description, n.worktree
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    } else {
+                        if json {
+                            println!(
+                                "{}",
+                                json_out::err("meshloop:inspect", origin.clone(), "no such task")
+                            );
+                        } else {
+                            eprintln!("no such task");
+                        }
+                        ExitCode::from(2)
+                    }
                 } else {
-                    eprintln!("no such task");
-                    ExitCode::from(2)
+                    let git_export = saga.export_git_metadata(&id).ok().flatten();
+                    let overall_status = compute_overall_status(&s);
+                    if json {
+                        let mut data = serde_json::json!({
+                            "session_id": id,
+                            "graph_id": s.graph_id,
+                            "status": overall_status,
+                            "plan_state": format!("{:?}", s.plan_state),
+                            "nodes": s.nodes.iter().map(|n| serde_json::json!({
+                                "id": n.task_id.0,
+                                "state": format!("{:?}", n.state),
+                                "description": n.description,
+                                "pane_id": n.pane_id,
+                                "live": n.live,
+                                "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                "note": n.note,
+                            })).collect::<Vec<_>>(),
+                        });
+                        if let Some(export) = git_export {
+                            data["git_export"] =
+                                serde_json::to_value(export).unwrap_or(serde_json::Value::Null);
+                        }
+                        println!("{}", json_out::ok("meshloop:inspect", origin.clone(), data));
+                    } else {
+                        print!("{}", report::format_status(&s));
+                    }
+                    ExitCode::SUCCESS
                 }
             }
             Err(e) => {
-                eprintln!("{e:?}");
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:inspect", origin, format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
                 ExitCode::from(1)
             }
         }

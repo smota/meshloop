@@ -115,6 +115,55 @@ This generates:
 
 ---
 
+## Skills Manager development copies
+
+For the local development installation, `skills/meshloop-*` in the Meshloop
+checkout is the authoritative source. Skills Manager owns the imported library
+copies, their metadata, the **Meshloop** preset, and agent/project deployments.
+Local import copies files; a recorded local source path is not a live link.
+Samuel accepted this copy-based workflow on 2026-09-25, with the requirement that
+changes to Meshloop skills also refresh the copies used by Skills Manager.
+
+Environment Contract owns environment declarations and audits this integration
+through the Skills Manager CLI. The development executable may point to the
+checkout's release build; that link does not refresh skill copies or rebuild the
+binary after source changes. Keep the embedded session pack and executable
+compatible with the changed skills, following ADR 0018.
+
+Whenever a skill or a file it uses changes:
+
+1. Inspect the installed Skills Manager CLI, configured library, existing skill
+   records, **Meshloop** preset membership, and current deployments. Preserve IDs,
+   unrelated skills, local edits, and activation choices. Reuse the existing preset.
+2. Refresh each affected library copy from its individual `skills/meshloop-*`
+   directory through the Manager's supported local re-import workflow. Check the
+   installed CLI help and behavior first: do not assume that an update command for
+   Git sources refreshes local sources, or that re-import always preserves identity.
+   If it would duplicate records or overwrite divergent library edits, report the
+   conflict before proceeding. Keep all bundled operator skills in the preset.
+3. Verify file inventories and content hashes between the source and each refreshed
+   library copy, excluding Manager-owned metadata. Confirm that membership and
+   record identity were preserved and no duplicate skills were created.
+4. Inspect already activated agent/project destinations. Refresh stale copies
+   through Skills Manager within the authorized scope; verify linked destinations
+   resolve to the refreshed library. New activations remain a separate choice.
+   Library refresh alone is not evidence that every deployed copy is current.
+5. Record source revision (and dirty state), affected skill IDs, refreshed library
+   entries, checked destinations, validation results, and any pending work in the
+   task's completion report. If the Manager is unavailable or a destination cannot
+   be refreshed, explicitly report it as pending rather than claiming full sync.
+
+Use the Manager's supported interfaces for mutations; retain its ownership of
+metadata and distribution. Do not edit its SQLite database or replace library
+copies with development junctions as part of this workflow. Before a refresh,
+retain enough prior content and metadata to restore the affected entries through
+supported Manager operations if verification fails.
+
+This is a maintenance requirement, not an automatic synchronization mechanism or
+an installation receipt. Recording it does not itself import or activate skills.
+
+---
+
 ## Step 5: Configure MCP Client (Cursor, Claude Desktop, etc.)
 
 To use Meshloop tools inside an MCP-compliant IDE or client, add `meshloop mcp` to your MCP configuration file:

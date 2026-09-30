@@ -9,7 +9,7 @@ use meshloop_domain::capability::HarnessError;
 use meshloop_domain::diagnostic::DiagnosticLattice;
 use meshloop_domain::digest::compute_plan_id;
 use meshloop_domain::evidence::{
-    AttemptId, CandidateRef, DeterministicEvidence, Evidence, HumanAcceptanceEvidence,
+    AttemptId, CandidateRef, DeterministicEvidence, Evidence, GitExport, HumanAcceptanceEvidence,
 };
 use meshloop_domain::policy::CouplingPenalty;
 use meshloop_domain::state::{
@@ -231,7 +231,7 @@ impl<'a> RunLoop<'a> {
         replay_tasks(&recs).map_err(Into::into)
     }
 
-    fn graph(&self, graph_id: &str) -> Result<TaskGraph, OrchestratorError> {
+    pub fn graph(&self, graph_id: &str) -> Result<TaskGraph, OrchestratorError> {
         self.store.graph_from_run(graph_id).map_err(Into::into)
     }
 
@@ -1927,6 +1927,65 @@ impl<'a> RunLoop<'a> {
             plan_state: row.plan_state,
             nodes,
         })
+    }
+
+    pub fn export_git_metadata(
+        &self,
+        graph_id: &str,
+    ) -> Result<Option<GitExport>, OrchestratorError> {
+        let integrate = self.integrate_path(graph_id);
+        let ibranch = self.integrate_branch(graph_id);
+        let row = self.store.load_run(graph_id)?;
+        let base = row.as_ref().map(|r| r.run_base.as_str()).unwrap_or("HEAD");
+
+        // 1. If integrate worktree exists, check its HEAD commit
+        if self.workspace.worktree_exists(&integrate)
+            && let Ok(head) = self.workspace.head(&integrate)
+            && !head.trim().is_empty()
+        {
+            let diff_text = self
+                .workspace
+                .unified_diff(&integrate, base)
+                .unwrap_or_default();
+            let patch_sha256 = meshloop_domain::digest::sha256_hex(diff_text.as_bytes());
+            return Ok(Some(GitExport {
+                worktree_path: integrate.display().to_string(),
+                branch_ref: format!("refs/heads/{ibranch}"),
+                commit_sha: head.to_lowercase(),
+                patch_sha256,
+            }));
+        }
+
+        // 2. Otherwise look for latest task attempt with a worktree
+        if let Ok(graph) = self.graph(graph_id) {
+            for node in graph.nodes.iter().rev() {
+                if let Ok(Some(attempt)) = self.store.latest_attempt_for_task(graph_id, node.id)
+                    && let Some(wt) = &attempt.worktree_path
+                    && self.workspace.worktree_exists(wt)
+                {
+                    let commit_sha = self
+                        .workspace
+                        .commit_all(wt, "meshloop task export")
+                        .or_else(|_| self.workspace.head(wt));
+                    if let Ok(sha) = commit_sha
+                        && !sha.trim().is_empty()
+                    {
+                        let branch = self.attempt_branch(graph_id, node.id, attempt.attempt_id);
+                        let diff_text = self.workspace.unified_diff(wt, base).unwrap_or_default();
+                        let patch_sha256 =
+                            meshloop_domain::digest::sha256_hex(diff_text.as_bytes());
+                        return Ok(Some(GitExport {
+                            worktree_path: wt.display().to_string(),
+                            branch_ref: format!("refs/heads/{branch}"),
+                            commit_sha: sha.to_lowercase(),
+                            patch_sha256,
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn resolve_graph_id(&self, requested: Option<&str>) -> Result<String, OrchestratorError> {
