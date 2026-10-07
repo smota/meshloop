@@ -101,6 +101,57 @@ impl ProcessView for NullPidIsDead {
     }
 }
 
+/// Kills the process tree of an attempt this process no longer holds a handle for, such as
+/// a harness left running when a previous Meshloop process crashed (ADR 0025 amendment, #30).
+///
+/// PIDs can be reused, so the tree is killed only when `pid` is alive, runs the expected
+/// executable, and on POSIX still leads its own process group (as `spawn_owned` arranges).
+/// Returns whether a kill was issued.
+pub fn kill_orphaned_tree(pid: u32, executable: &std::path::Path) -> bool {
+    if pid == 0 || !orphan_identity_matches(pid, executable) {
+        return false;
+    }
+    kill_process_tree(pid);
+    true
+}
+
+#[cfg(windows)]
+fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
+    let Some(stem) = executable.file_stem() else {
+        return false;
+    };
+    let image = format!("{}.exe", stem.to_string_lossy());
+    WindowsProcessView.is_live(&ProcessHint {
+        pid,
+        image_name: Some(image),
+    }) == LiveCheck::Live
+}
+
+#[cfg(not(windows))]
+fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
+    let Some(name) = executable
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+    else {
+        return false;
+    };
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "pgid=,stat=,comm=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut fields = text.split_whitespace();
+    let (Some(pgid), Some(stat), Some(comm)) = (fields.next(), fields.next(), fields.next()) else {
+        return false;
+    };
+    // Linux truncates comm to 15 bytes; macOS reports a path.
+    let comm = comm.rsplit('/').next().unwrap_or(comm);
+    let name_matches = comm == name || (comm.len() == 15 && name.starts_with(comm));
+    pgid == pid.to_string() && !stat.starts_with('Z') && name_matches
+}
+
 /// Kills a process and all of its descendants (the entire process tree).
 ///
 /// On Windows, executes `taskkill /F /T /PID <pid>` to terminate child compilers,

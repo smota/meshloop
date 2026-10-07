@@ -197,6 +197,9 @@ impl HarnessCapabilities for CliHarness {
         // Idempotent against an already-exited/never-tracked process, per ADR 0003.
         if let Some((mut child, _, _)) = registry.remove(&Self::attempt_key(handle)) {
             child.kill_tree();
+        } else if let Some(pid) = handle.pid {
+            // Not ours: a previous Meshloop process started it and is gone (#30).
+            crate::process::kill_orphaned_tree(pid, &self.config.executable);
         }
         Ok(())
     }
