@@ -1,0 +1,36 @@
+{
+  "tiers": {
+    "architect-lead": {
+      "capabilities": [
+        "high-context",
+        "formal-logic",
+        "deep-reasoning"
+      ]
+    },
+    "deep-reasoning": {
+      "capabilities": [
+        "adversarial-audit",
+        "security-analysis"
+      ]
+    },
+    "balanced": {
+      "capabilities": [
+        "fast-implementation",
+        "unit-testing"
+      ]
+    },
+    "lightweight": {
+      "capabilities": [
+        "fixtures",
+        "formatting",
+        "inventory"
+      ]
+    }
+  },
+  "roleAssignments": {
+    "coordinator": "architect-lead",
+    "adversarial-reviewer": "deep-reasoning",
+    "developer": "balanced",
+    "fixture-builder": "lightweight"
+  }
+}

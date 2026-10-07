@@ -1,0 +1,40 @@
+{
+  "id": "agentflow-sdlc.codex",
+  "name": "AgentFlow SDLC for Codex",
+  "version": "1.0.0",
+  "harness": "codex",
+  "namespace": "agentflow",
+  "entry": ".agents/skills",
+  "roleEntry": ".agentflow/roles/codex",
+  "skills": [
+    "agentflow-orchestrator",
+    "agentflow-collaborator",
+    "agentflow-scanner",
+    "agentflow-designer",
+    "agentflow-migrator",
+    "agentflow-auditor"
+  ],
+  "roles": [
+    "product-manager",
+    "analyst",
+    "architect",
+    "implementation-planner",
+    "developer",
+    "tester",
+    "reviewer",
+    "technical-writer",
+    "pr-readiness",
+    "qa-expert"
+  ],
+  "commands": [
+    "agentflow-sdlc sdlc validate",
+    "agentflow-sdlc skills sync --harness codex",
+    "agentflow-sdlc roles sync --harness codex --apply",
+    "agentflow-sdlc cockpit doctor --json"
+  ],
+  "settings": [
+    ".codex/hooks.json"
+  ],
+  "generatedBy": "agentflow-sdlc",
+  "canonicalSource": "adapters/codex/manifest.json"
+}

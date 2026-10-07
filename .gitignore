@@ -13,3 +13,6 @@
 *.db-wal
 .pair/
 /.pi/
+/.agentflow/transactions/
+/.agentflow-adapters.lock.json
+/.agentflow-role-adapters.lock.json

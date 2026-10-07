@@ -17,8 +17,10 @@ docs/engineering/harnesses.md.
 ## Work contract
 - Inspect branch and working-tree state; preserve user changes and unrelated work.
 - Identify the objective, scope, exclusions, acceptance criteria, permitted paths,
-  and applicable ADRs. An approved local task is sufficient during bootstrap;
-  reference GitHub issues when available, without inventing identifiers.
+  and applicable ADRs from the GitHub issue that owns the work; create one first if
+  none exists. GitHub issues are the only backlog: record follow-ups as issues.
+- Backlog, claiming, roles, Meshloop execution, handoffs, and reviews follow
+  docs/engineering/agent-workflow.md (AgentFlow SDLC + Meshloop operating model).
 - Classify risk, effort, and change surfaces separately. Small security changes
   are not automatically low risk. Read-only reviews do not authorize remediation.
 - Plan and implement within the user's authorization. Commit, push, merge, release,
