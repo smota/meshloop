@@ -785,19 +785,7 @@ fn cmd_run(
         if fixture_only {
             cmd.arg("--fixture-only");
         }
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-
-        match cmd.spawn() {
+        match meshloop_adapters::process::spawn_detached(cmd) {
             Ok(_) => {
                 if json {
                     println!(

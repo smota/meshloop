@@ -215,3 +215,25 @@ fn grandchild_dies_on_parent_abort() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn detached_spawn_does_not_hold_the_callers_output_pipe() {
+    // Regression for #5: on Windows the detached worker inherited the caller's stdout pipe,
+    // so a caller capturing output waited for the whole background session.
+    let start = Instant::now();
+    let out = std::process::Command::new(fixture_path())
+        .args(["--spawn-detached-sleeper", "3000"])
+        .output()
+        .expect("run spawner");
+    let elapsed = start.elapsed();
+    let sleeper: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("spawner prints the detached pid");
+    meshloop_adapters::process::kill_process_tree(sleeper);
+    assert!(out.status.success(), "spawner failed: {out:?}");
+    assert!(
+        elapsed < Duration::from_millis(2000),
+        "capturing the spawner's output waited {elapsed:?}; the detached 3 s sleeper holds its pipe"
+    );
+}

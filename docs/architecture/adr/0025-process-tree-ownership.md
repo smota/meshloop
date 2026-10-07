@@ -50,3 +50,19 @@ Constraints:
   - `grandchild_dies_on_parent_abort`: confirms OS kernel terminates grandchildren when parent abruptly aborts (`std::process::abort()`).
 - `xtask bench`: metric `conc.orphan_process_count` reports `0` (PASS).
 - 100% passing tests in `cargo test -p meshloop-adapters` (24 passed) and `cargo test --workspace` (131 passed).
+
+## Amendment 2026-10-07: detached spawns do not inherit caller handles
+
+- Status: Accepted
+- Approval evidence: accepted by Samuel (human) on 2026-10-07 in the AgentFlow/Meshloop setup session, as the decision requested on issue #5.
+- Executor: Claude Code (Opus 5.5)
+
+**Context.** `meshloop run --detach` must return to its caller promptly (#5: session ID in < 500 ms). On Windows, `CreateProcess` with handle inheritance gives the detached `resume` worker every inheritable handle of the CLI, including the stdout/stderr pipes of a caller that captures output. The worker's own stdio being null does not prevent this. Callers using `Command::output()` (tests, AgentFlow's CLI adapter) therefore blocked until the background session finished: the CLI exited in 0.18-0.59 s, but stdout reached EOF only after 2.3-2.8 s locally, and after more than 5 s on hosted CI.
+
+**Decision.** `meshloop_adapters::process::spawn_detached` owns detached spawning. On Windows it clears `HANDLE_FLAG_INHERIT` on the caller's three standard handles for the duration of the spawn, starts the worker with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and null stdio, and then restores the flags. This adds `unsafe` Win32 calls (`GetStdHandle`, `GetHandleInformation`, `SetHandleInformation`) to `meshloop-adapters`, next to the existing Job Object code, with `SAFETY` comments; the CLI keeps `deny(unsafe_code)`. On POSIX, `exec` passes on only the fds that were explicitly set up, so no handle change is needed; the worker gets its own process group (`process_group(0)`).
+
+**Alternatives.** `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` would restrict inheritance precisely, but std's `Command` cannot pass process attributes on stable Rust, so this would mean reimplementing process creation. A trampoline process would inherit the same handles. Leaving it as is breaks the detach contract.
+
+**Consequences.** Only the three standard handles are covered. Other inheritable handles that the CLI itself inherited from its parent are still passed on, which is acceptable because the CLI opens none of its own as inheritable. Concurrent spawns during the window are unaffected, because std duplicates inherited stdio into fresh inheritable handles.
+
+**Verification.** `crates/meshloop-adapters/tests/process_tree.rs::detached_spawn_does_not_hold_the_callers_output_pipe` launches a fixture that detaches a 3 s sleeper and asserts that capturing the fixture's output returns in under 2 s. With the inherit-clearing disabled it fails after 3.25 s; with it, it passes.
