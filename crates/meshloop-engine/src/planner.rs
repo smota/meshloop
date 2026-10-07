@@ -70,7 +70,10 @@ impl std::fmt::Display for PlanError {
                 last,
                 saved_plan,
             } => {
-                write!(f, "planner produced a rejected plan on all {attempts} attempt(s); last error: {last}")?;
+                write!(
+                    f,
+                    "planner produced a rejected plan on all {attempts} attempt(s); last error: {last}"
+                )?;
                 match saved_plan {
                     Some(p) => write!(f, "; last rejected plan saved to {}", p.display()),
                     None => write!(f, "; the rejected plan could not be saved"),
@@ -83,7 +86,8 @@ impl std::fmt::Display for PlanError {
 impl std::error::Error for PlanError {}
 
 /// Dispatches the decomposition agent, retrying a rejected (malformed or structurally
-/// invalid) plan as a new attempt up to `max_retries` more times. Each retry prompt carries
+/// invalid) plan as a new attempt. `max_retries` is the total attempt budget, as for tasks
+/// (`[limits] max_retries`: the first dispatch counts; 0 is treated as 1). Each retry prompt carries
 /// the previous error. Dispatch errors are not retried here. The last rejected plan is
 /// copied under `rejected_dir` and its path reported in the final error.
 pub fn decompose_with_retry(
@@ -92,7 +96,7 @@ pub fn decompose_with_retry(
     max_retries: u32,
     rejected_dir: &Path,
 ) -> Result<TaskGraph, PlanError> {
-    let total = max_retries.saturating_add(1);
+    let total = max_retries.max(1);
     let mut attempt_spec = spec.clone();
     for n in 0..total {
         attempt_spec.attempt_id = AttemptId(spec.attempt_id.0.saturating_add(n));
@@ -296,7 +300,7 @@ mod tests {
     /// prompt it was given.
     struct ScriptedPlanner {
         responses: Vec<String>,
-        prompts: std::cell::RefCell<Vec<String>>,
+        prompts: std::sync::Mutex<Vec<String>>,
     }
 
     impl HarnessCapabilities for ScriptedPlanner {
@@ -304,7 +308,7 @@ mod tests {
             unimplemented!()
         }
         fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
-            let mut prompts = self.prompts.borrow_mut();
+            let mut prompts = self.prompts.lock().unwrap();
             let idx = prompts.len().min(self.responses.len() - 1);
             prompts.push(spec.prompt.clone());
             std::fs::write(spec.worktree_path.join(PLAN_FILE), &self.responses[idx]).unwrap();
@@ -326,7 +330,8 @@ mod tests {
         }
     }
 
-    const VALID: &str = r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"Tier1"}]}"#;
+    const VALID: &str =
+        r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"Tier1"}]}"#;
     const BAD_TIER: &str = r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"analysis"}]}"#;
 
     fn scratch(name: &str) -> (PathBuf, AgentSpec) {
@@ -355,7 +360,7 @@ mod tests {
         let graph = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
             .expect("second attempt is valid");
         assert_eq!(graph.nodes.len(), 1);
-        let prompts = harness.prompts.borrow();
+        let prompts = harness.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
         assert!(!prompts[0].contains("your previous graph failed"));
         assert!(prompts[1].contains("your previous graph failed"));
@@ -372,7 +377,7 @@ mod tests {
         };
         let err = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
             .expect_err("every attempt is rejected");
-        assert_eq!(harness.prompts.borrow().len(), 3);
+        assert_eq!(harness.prompts.lock().unwrap().len(), 2);
         let PlanError::Exhausted {
             attempts,
             saved_plan: Some(path),
@@ -381,7 +386,7 @@ mod tests {
         else {
             panic!("expected Exhausted with a saved plan, got {err:?}");
         };
-        assert_eq!(*attempts, 3);
+        assert_eq!(*attempts, 2);
         assert!(path.is_file());
         assert_eq!(std::fs::read_to_string(path).unwrap(), BAD_TIER);
         assert!(err.to_string().contains(&path.display().to_string()));

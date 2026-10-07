@@ -350,7 +350,11 @@ mod tests {
         }
         let value = serde_json::to_value(node(1, "d", &[])).unwrap();
         let fields: Vec<&String> = value.as_object().unwrap().keys().collect();
-        assert_eq!(fields.len(), 6, "TaskNode gained a field; update the contract");
+        assert_eq!(
+            fields.len(),
+            6,
+            "TaskNode gained a field; update the contract"
+        );
         for field in fields {
             assert!(
                 spec.prompt.contains(&format!("- {field}:")),

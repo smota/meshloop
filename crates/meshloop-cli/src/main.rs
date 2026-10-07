@@ -1500,7 +1500,8 @@ fn cmd_doctor(
         },
     };
     let harnesses_ready = error.is_none();
-    let store_ignored = gitignore::store_ignored(&db.unwrap_or_else(|| compose::default_db(&repo_root())));
+    let store_ignored =
+        gitignore::store_ignored(&db.unwrap_or_else(|| compose::default_db(&repo_root())));
 
     let data = serde_json::json!({
         "daemonless": true,

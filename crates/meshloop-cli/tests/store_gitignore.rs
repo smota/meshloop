@@ -11,7 +11,11 @@ fn fixture_path() -> String {
     dir.pop();
     dir.pop();
     let path = dir.join(&exe);
-    assert!(path.exists(), "expected fixture harness at {}", path.display());
+    assert!(
+        path.exists(),
+        "expected fixture harness at {}",
+        path.display()
+    );
     path.to_string_lossy().to_string()
 }
 
@@ -95,13 +99,20 @@ fn plan_in_fresh_repo_never_shows_store_as_untracked() {
         .arg(&cfg)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(dir.join(".meshloop").join("state.sqlite").exists());
     assert_eq!(
         fs::read_to_string(dir.join(".meshloop").join(".gitignore")).unwrap(),
         "*\n"
     );
-    assert!(!dir.join(".gitignore").exists(), "root .gitignore untouched");
+    assert!(
+        !dir.join(".gitignore").exists(),
+        "root .gitignore untouched"
+    );
     let status = git(&dir, &["status", "--porcelain", "-uall"]);
     assert!(!status.contains(".meshloop"), "status: {status}");
     assert!(
@@ -128,7 +139,10 @@ fn bundle_reports_missing_and_only_edits_with_flag() {
     assert_eq!(v["data"]["gitignore_line"], "/.meshloop/");
     assert_eq!(fs::read(&root_ignore).unwrap(), before);
 
-    let human = meshloop(&dir).args(["bundle", "--dest", "."]).output().unwrap();
+    let human = meshloop(&dir)
+        .args(["bundle", "--dest", "."])
+        .output()
+        .unwrap();
     assert!(String::from_utf8_lossy(&human.stdout).contains("gitignore: missing"));
     assert_eq!(fs::read(&root_ignore).unwrap(), before);
 
