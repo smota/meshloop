@@ -1052,7 +1052,21 @@ fn bundle(root: &Path) -> ExitCode {
     let skills_src = root.join("skills");
     let embedded = root.join("crates/meshloop-cli/session-bundle/skills");
     let _ = fs::remove_dir_all(&embedded);
-    copy_dir(&skills_src, &embedded);
+    let _ = fs::create_dir_all(&embedded);
+    if let Ok(entries) = fs::read_dir(&skills_src) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !is_session_pack_entry(&name.to_string_lossy()) {
+                continue;
+            }
+            let to = embedded.join(&name);
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &to);
+            } else {
+                let _ = fs::copy(entry.path(), to);
+            }
+        }
+    }
     if !cargo(
         root,
         &["build", "-p", "meshloop-cli", "--locked", "--offline"],
@@ -1143,10 +1157,17 @@ fn assert_publish_manifest(root: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The session pack ships Meshloop operator skills only. Other top-level entries
+/// under `skills/` (for example AgentFlow-managed `agentflow-*`) stay out of it.
+fn is_session_pack_entry(name: &str) -> bool {
+    name == "README.md" || name.starts_with("meshloop-")
+}
+
 fn assert_embedded_skills_match(root: &Path) -> Result<(), String> {
     let src = root.join("skills");
     let embedded = root.join("crates/meshloop-cli/session-bundle/skills");
-    let src_files = collect_files(&src)?;
+    let mut src_files = collect_files(&src)?;
+    src_files.retain(|rel, _| is_session_pack_entry(rel.split('/').next().unwrap_or(rel)));
     let embedded_files = collect_files(&embedded)?;
     if src_files.len() != embedded_files.len() {
         return Err(format!(

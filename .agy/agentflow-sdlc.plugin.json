@@ -1,0 +1,40 @@
+{
+  "id": "agentflow-sdlc.agy",
+  "name": "AgentFlow SDLC for AGY",
+  "version": "1.0.0",
+  "harness": "agy",
+  "namespace": "agentflow",
+  "entry": ".agents/skills",
+  "roleEntry": ".agentflow/roles/agy",
+  "skills": [
+    "agentflow-orchestrator",
+    "agentflow-collaborator",
+    "agentflow-scanner",
+    "agentflow-designer",
+    "agentflow-migrator",
+    "agentflow-auditor"
+  ],
+  "roles": [
+    "product-manager",
+    "analyst",
+    "architect",
+    "implementation-planner",
+    "developer",
+    "tester",
+    "reviewer",
+    "technical-writer",
+    "pr-readiness",
+    "qa-expert"
+  ],
+  "commands": [
+    "agentflow-sdlc sdlc validate",
+    "agentflow-sdlc skills sync --harness agy",
+    "agentflow-sdlc roles sync --harness agy --apply",
+    "agentflow-sdlc cockpit doctor --json"
+  ],
+  "settings": [
+    ".agy/settings.json"
+  ],
+  "generatedBy": "agentflow-sdlc",
+  "canonicalSource": "adapters/agy/manifest.json"
+}

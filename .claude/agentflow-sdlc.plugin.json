@@ -1,0 +1,40 @@
+{
+  "id": "agentflow-sdlc.claude-code",
+  "name": "AgentFlow SDLC for Claude Code",
+  "version": "1.0.0",
+  "harness": "claude-code",
+  "namespace": "agentflow",
+  "entry": ".claude/skills",
+  "roleEntry": ".agentflow/roles/claude-code",
+  "skills": [
+    "agentflow-orchestrator",
+    "agentflow-collaborator",
+    "agentflow-scanner",
+    "agentflow-designer",
+    "agentflow-migrator",
+    "agentflow-auditor"
+  ],
+  "roles": [
+    "product-manager",
+    "analyst",
+    "architect",
+    "implementation-planner",
+    "developer",
+    "tester",
+    "reviewer",
+    "technical-writer",
+    "pr-readiness",
+    "qa-expert"
+  ],
+  "commands": [
+    "agentflow-sdlc sdlc validate",
+    "agentflow-sdlc skills sync --harness claude-code",
+    "agentflow-sdlc roles sync --harness claude-code --apply",
+    "agentflow-sdlc cockpit doctor --json"
+  ],
+  "settings": [
+    ".claude/settings.json"
+  ],
+  "generatedBy": "agentflow-sdlc",
+  "canonicalSource": "adapters/claude-code/manifest.json"
+}

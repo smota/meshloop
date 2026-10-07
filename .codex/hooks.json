@@ -1,0 +1,9 @@
+{
+  "agentflowSdlc": {
+    "managedBy": "agentflow-sdlc",
+    "commands": [
+      "agentflow-sdlc sdlc validate",
+      "agentflow-sdlc skills status --harness codex"
+    ]
+  }
+}
