@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::task_graph::{TaskGraph, TaskId, TaskNode};
+use meshloop_domain::task_graph::{TaskGraph, TaskId, TaskNode, Tier};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
@@ -175,6 +175,46 @@ pub fn build_repair_spec(
     }
 }
 
+/// The planner's output contract: every `TaskNode` field with its allowed values, the
+/// accepted tier names (taken from the domain type so they cannot drift), and a one-node
+/// example serialized from the domain types.
+fn planning_output_contract() -> String {
+    let tiers = Tier::ALL
+        .iter()
+        .map(|t| t.name())
+        .collect::<Vec<_>>()
+        .join("|");
+    let example = TaskGraph {
+        graph_id: "example-graph".into(),
+        nodes: vec![TaskNode {
+            id: TaskId(1),
+            description: "Add the parse_widget function with unit tests".into(),
+            depends_on: vec![],
+            tier: Some(Tier::Tier1),
+            allowed_paths: vec!["crates/widgets/src/".into()],
+            empty_diff_ok: false,
+        }],
+    };
+    let example = serde_json::to_string_pretty(&example).unwrap_or_default();
+    format!(
+        "Write exactly one JSON TaskGraph to meshloop-plan.json in this worktree. \
+         Unknown values are rejected, so use exactly these fields.\n\
+         graph_id: string matching [A-Za-z0-9._-]+ (no slashes or spaces).\n\
+         nodes: non-empty array; each node has:\n\
+         - id: integer >= 1, unique within the graph.\n\
+         - description: string, what this task must accomplish.\n\
+         - depends_on: array of ids of other nodes that must finish first ([] if none); no cycles.\n\
+         - tier: exactly one of {tiers}, or omit it (null) to let Meshloop assign one. \
+         Never a role or phase name such as \"analysis\" or \"implementation\".\n\
+         - allowed_paths: array of repo-relative path prefixes the task may change \
+         (e.g. \"crates/foo/src/\"); omit or [] for no restriction.\n\
+         - empty_diff_ok: boolean, default false. Set true only for a node that legitimately \
+         produces no diff (e.g. a pure analysis or verification step); otherwise leave false.\n\
+         Example of a valid one-node graph:\n{example}\n\
+         No other files unless required to produce that graph. Do not print prose."
+    )
+}
+
 /// The decomposition dispatch itself (ADR 0009/runtime-design.md §5) is an AgentSpec whose
 /// declared output contract is a task graph, not a worktree diff.
 pub fn build_planning_spec(
@@ -190,11 +230,7 @@ pub fn build_planning_spec(
         situation: scope_and_exclusions.to_string(),
         complication: objective.to_string(),
         question: "Decompose this objective into a versioned task graph.".into(),
-        output_contract: "Write exactly one JSON TaskGraph to meshloop-plan.json in this worktree \
-             (graph_id matching [A-Za-z0-9._-]+, nodes[] with id >= 1, description, \
-             depends_on, optional tier, optional allowed_paths, optional empty_diff_ok). \
-             No other files unless required to produce that graph. Do not print prose."
-            .into(),
+        output_contract: planning_output_contract(),
     });
     AgentSpec {
         task_id: TaskId(0),
@@ -296,6 +332,38 @@ mod tests {
             Duration::from_secs(300),
         );
         assert!(spec.prompt.contains("meshloop-plan.json"));
+    }
+
+    #[test]
+    fn planning_prompt_lists_every_tier_variant_and_task_node_field() {
+        let spec = build_planning_spec(
+            "o",
+            "s",
+            AttemptId(1),
+            "claude-code",
+            "m",
+            PathBuf::from("/tmp/wt"),
+            Duration::from_secs(300),
+        );
+        for tier in Tier::ALL {
+            assert!(spec.prompt.contains(tier.name()), "missing {tier:?}");
+        }
+        let value = serde_json::to_value(node(1, "d", &[])).unwrap();
+        let fields: Vec<&String> = value.as_object().unwrap().keys().collect();
+        assert_eq!(
+            fields.len(),
+            6,
+            "TaskNode gained a field; update the contract"
+        );
+        for field in fields {
+            assert!(
+                spec.prompt.contains(&format!("- {field}:")),
+                "contract does not describe `{field}`"
+            );
+        }
+        assert!(spec.prompt.contains("[A-Za-z0-9._-]+"));
+        assert!(spec.prompt.contains("empty_diff_ok"));
+        assert!(spec.prompt.contains("\"graph_id\": \"example-graph\""));
     }
 
     #[test]

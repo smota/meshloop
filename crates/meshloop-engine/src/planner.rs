@@ -3,22 +3,45 @@
 //! and assigns tiers — it never judges decomposition *quality* (MECE-ness), which this
 //! project cannot mechanically verify; that is the `awaiting-plan-review` human gate's job.
 
+use std::path::{Path, PathBuf};
+
 use meshloop_domain::capability::HarnessError;
+use meshloop_domain::evidence::AttemptId;
 use meshloop_domain::task_graph::{GraphError, TaskGraph, Tier};
 
 use crate::agent::AgentSpec;
 use crate::ports::{HarnessCapabilities, HarnessOutcome};
 
-fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, PlanError> {
-    let file_path = spec.worktree_path.join("meshloop-plan.json");
+const PLAN_FILE: &str = "meshloop-plan.json";
+
+/// A plan the planner produced but Meshloop rejected, with the text that was rejected.
+struct Rejected {
+    error: PlanError,
+    raw: Option<String>,
+}
+
+impl From<PlanError> for Rejected {
+    fn from(error: PlanError) -> Self {
+        Self { error, raw: None }
+    }
+}
+
+fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, Rejected> {
+    let file_path = spec.worktree_path.join(PLAN_FILE);
     let raw = if file_path.is_file() {
         std::fs::read_to_string(&file_path).map_err(|e| PlanError::Malformed(e.to_string()))?
     } else {
         outcome.output_redacted.clone()
     };
+    let reject = |error: PlanError| Rejected {
+        error,
+        raw: Some(raw.clone()),
+    };
     let graph: TaskGraph =
-        serde_json::from_str(&raw).map_err(|e| PlanError::Malformed(e.to_string()))?;
-    graph.validate().map_err(PlanError::Invalid)?;
+        serde_json::from_str(&raw).map_err(|e| reject(PlanError::Malformed(e.to_string())))?;
+    graph
+        .validate()
+        .map_err(|e| reject(PlanError::Invalid(e)))?;
     Ok(graph)
 }
 
@@ -27,6 +50,94 @@ pub enum PlanError {
     Dispatch(HarnessError),
     Malformed(String),
     Invalid(GraphError),
+    /// Every allowed attempt produced a rejected plan. `saved_plan` is where the last one
+    /// was preserved for inspection, when it could be saved.
+    Exhausted {
+        attempts: u32,
+        last: Box<PlanError>,
+        saved_plan: Option<PathBuf>,
+    },
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanError::Dispatch(e) => write!(f, "planner dispatch failed: {e:?}"),
+            PlanError::Malformed(e) => write!(f, "plan is malformed: {e}"),
+            PlanError::Invalid(e) => write!(f, "plan is invalid: {e:?}"),
+            PlanError::Exhausted {
+                attempts,
+                last,
+                saved_plan,
+            } => {
+                write!(
+                    f,
+                    "planner produced a rejected plan on all {attempts} attempt(s); last error: {last}"
+                )?;
+                match saved_plan {
+                    Some(p) => write!(f, "; last rejected plan saved to {}", p.display()),
+                    None => write!(f, "; the rejected plan could not be saved"),
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+/// Dispatches the decomposition agent, retrying a rejected (malformed or structurally
+/// invalid) plan as a new attempt. `max_retries` is the total attempt budget, as for tasks
+/// (`[limits] max_retries`: the first dispatch counts; 0 is treated as 1). Each retry prompt carries
+/// the previous error. Dispatch errors are not retried here. The last rejected plan is
+/// copied under `rejected_dir` and its path reported in the final error.
+pub fn decompose_with_retry(
+    harness: &dyn HarnessCapabilities,
+    spec: &AgentSpec,
+    max_retries: u32,
+    rejected_dir: &Path,
+) -> Result<TaskGraph, PlanError> {
+    let total = max_retries.max(1);
+    let mut attempt_spec = spec.clone();
+    for n in 0..total {
+        attempt_spec.attempt_id = AttemptId(spec.attempt_id.0.saturating_add(n));
+        // A stale file from a previous attempt must never be mistaken for this one's output.
+        let _ = std::fs::remove_file(spec.worktree_path.join(PLAN_FILE));
+        let rejected = match decompose_inner(harness, &attempt_spec) {
+            Ok(graph) => return Ok(graph),
+            Err(r) => r,
+        };
+        if !matches!(
+            rejected.error,
+            PlanError::Malformed(_) | PlanError::Invalid(_)
+        ) {
+            return Err(rejected.error);
+        }
+        if n + 1 == total {
+            let saved_plan = save_rejected(rejected_dir, rejected.raw.as_deref());
+            return Err(PlanError::Exhausted {
+                attempts: total,
+                last: Box::new(rejected.error),
+                saved_plan,
+            });
+        }
+        attempt_spec.prompt = format!(
+            "{}\n\nyour previous graph failed: {}\nFix exactly that problem and rewrite {PLAN_FILE}.",
+            spec.prompt, rejected.error
+        );
+    }
+    unreachable!("total is at least 1 and the last iteration returns")
+}
+
+fn save_rejected(dir: &Path, raw: Option<&str>) -> Option<PathBuf> {
+    let raw = raw?;
+    std::fs::create_dir_all(dir).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("rejected-plan-{stamp}-{}.json", std::process::id()));
+    std::fs::write(&path, raw).ok()?;
+    Some(path)
 }
 
 /// Dispatches the decomposition agent and returns a structurally-validated graph, or a
@@ -36,6 +147,13 @@ pub fn decompose(
     harness: &dyn HarnessCapabilities,
     spec: &AgentSpec,
 ) -> Result<TaskGraph, PlanError> {
+    decompose_inner(harness, spec).map_err(|r| r.error)
+}
+
+fn decompose_inner(
+    harness: &dyn HarnessCapabilities,
+    spec: &AgentSpec,
+) -> Result<TaskGraph, Rejected> {
     match harness.invoke(spec) {
         Ok(handle) => {
             let outcome: HarnessOutcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
@@ -53,7 +171,7 @@ pub fn decompose(
                     return Ok(graph);
                 }
             }
-            Err(PlanError::Dispatch(e))
+            Err(PlanError::Dispatch(e).into())
         }
     }
 }
@@ -176,6 +294,114 @@ mod tests {
             decompose(&harness, &spec()),
             Err(PlanError::Malformed(_))
         ));
+    }
+
+    /// Writes each scripted response to the worktree's plan file on invoke and records the
+    /// prompt it was given.
+    struct ScriptedPlanner {
+        responses: Vec<String>,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl HarnessCapabilities for ScriptedPlanner {
+        fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
+            unimplemented!()
+        }
+        fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
+            let mut prompts = self.prompts.lock().unwrap();
+            let idx = prompts.len().min(self.responses.len() - 1);
+            prompts.push(spec.prompt.clone());
+            std::fs::write(spec.worktree_path.join(PLAN_FILE), &self.responses[idx]).unwrap();
+            Ok(HarnessHandle {
+                attempt_id: spec.attempt_id,
+                pid: None,
+                pane_id: None,
+            })
+        }
+        fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn collect(&self, _handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
+            Ok(HarnessOutcome {
+                exit_code: 0,
+                output_redacted: String::new(),
+                worktree_changed: true,
+            })
+        }
+    }
+
+    const VALID: &str =
+        r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"Tier1"}]}"#;
+    const BAD_TIER: &str = r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"analysis"}]}"#;
+
+    fn scratch(name: &str) -> (PathBuf, AgentSpec) {
+        let dir = std::env::temp_dir().join(format!("meshloop-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = crate::agent::build_planning_spec(
+            "objective",
+            "scope",
+            AttemptId(0),
+            "claude-code",
+            "m",
+            dir.clone(),
+            Duration::from_secs(60),
+        );
+        (dir, spec)
+    }
+
+    #[test]
+    fn invalid_tier_then_valid_plan_succeeds_on_second_attempt_with_error_in_prompt() {
+        let (dir, spec) = scratch("retry-ok");
+        let harness = ScriptedPlanner {
+            responses: vec![BAD_TIER.into(), VALID.into()],
+            prompts: Default::default(),
+        };
+        let graph = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
+            .expect("second attempt is valid");
+        assert_eq!(graph.nodes.len(), 1);
+        let prompts = harness.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[0].contains("your previous graph failed"));
+        assert!(prompts[1].contains("your previous graph failed"));
+        assert!(prompts[1].contains("unknown variant `analysis`"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_attempts_malformed_reports_saved_rejected_plan_that_exists() {
+        let (dir, spec) = scratch("retry-exhausted");
+        let harness = ScriptedPlanner {
+            responses: vec![BAD_TIER.into()],
+            prompts: Default::default(),
+        };
+        let err = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
+            .expect_err("every attempt is rejected");
+        assert_eq!(harness.prompts.lock().unwrap().len(), 2);
+        let PlanError::Exhausted {
+            attempts,
+            saved_plan: Some(path),
+            ..
+        } = &err
+        else {
+            panic!("expected Exhausted with a saved plan, got {err:?}");
+        };
+        assert_eq!(*attempts, 2);
+        assert!(path.is_file());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), BAD_TIER);
+        assert!(err.to_string().contains(&path.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_errors_are_not_retried() {
+        let (dir, spec) = scratch("retry-dispatch");
+        let harness = FakeHarness {
+            response: Err(HarnessError::Timeout),
+        };
+        let err = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected")).unwrap_err();
+        assert!(matches!(err, PlanError::Dispatch(_)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
