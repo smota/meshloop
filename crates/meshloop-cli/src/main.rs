@@ -631,6 +631,8 @@ fn cmd_review_plan(
     ExitCode::SUCCESS
 }
 
+const EMPTY_VERIFY_WARNING: &str = "verify_command is empty: nodes are not checked beyond git diff";
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     plan: PathBuf,
@@ -687,6 +689,9 @@ fn cmd_run(
             return ExitCode::from(2);
         }
     };
+    if composed.verify_command.is_empty() {
+        eprintln!("warning: {EMPTY_VERIFY_WARNING}");
+    }
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
         .harnesses
         .iter()
@@ -1491,6 +1496,7 @@ fn cmd_doctor(
     let origin_session = origin.session.clone();
     let origin_harness = origin.harness.clone();
 
+    let mut warnings: Vec<&str> = Vec::new();
     let (config_path, harnesses, error) = match crate::config::discover(config.as_deref()) {
         Err(_) => (
             None,
@@ -1504,6 +1510,9 @@ fn cmd_doctor(
                 Some(format!("failed to load config: {e:?}")),
             ),
             Ok(cfg) => {
+                if cfg.verify.verify_command.is_empty() {
+                    warnings.push(EMPTY_VERIFY_WARNING);
+                }
                 let rows = doctor_probe(&cfg);
                 let error = (!rows.iter().any(|r| r["dispatchable"] == true)).then(|| {
                     "no selected harness is dispatchable; see data.harnesses[].reason".to_string()
@@ -1531,6 +1540,7 @@ fn cmd_doctor(
         "harnesses_ready": harnesses_ready,
         "harnesses": harnesses,
         "store_ignored": store_ignored,
+        "warnings": warnings,
         "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
     if json {
@@ -1558,6 +1568,9 @@ fn cmd_doctor(
             println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
         }
         println!("  store_ignored: {store_ignored}");
+        for w in &warnings {
+            println!("  warning: {w}");
+        }
         if !store_ignored {
             println!(
                 "  fix: add `{}` to .gitignore, or run `meshloop bundle --dest . --gitignore`",

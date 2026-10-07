@@ -1335,6 +1335,8 @@ impl<'a> RunLoop<'a> {
                     }));
                 }
             }
+        } else {
+            rows.push(skipped_verify_evidence(&candidate_ref));
         }
         Ok((rows, lattice_out, diag_out))
     }
@@ -2126,11 +2128,40 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
     }
 }
 
+/// Evidence recorded when no `verify_command` is configured, so the skipped check is visible.
+fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
+    Evidence::Deterministic(DeterministicEvidence {
+        tool: "verify".into(),
+        tool_version: "n/a".into(),
+        exit_code: 0,
+        output_redacted: "skipped: verify_command is empty".into(),
+        candidate: candidate.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn skipped_verify_evidence_is_a_passing_deterministic_row() {
+        let candidate = CandidateRef {
+            task_id: TaskId(7),
+            attempt_id: AttemptId(2),
+            revision: "abc123".into(),
+        };
+        match skipped_verify_evidence(&candidate) {
+            Evidence::Deterministic(ev) => {
+                assert_eq!(ev.tool, "verify");
+                assert_eq!(ev.exit_code, 0);
+                assert!(ev.output_redacted.starts_with("skipped:"));
+                assert_eq!(ev.candidate, candidate);
+            }
+            other => panic!("expected deterministic evidence, got {other:?}"),
+        }
+    }
 
     struct FakeView {
         answer: LiveCheck,

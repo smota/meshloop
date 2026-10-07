@@ -1616,3 +1616,43 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+fn doctor_warnings(tag: &str, verify_command: &str) -> Vec<String> {
+    let dir = disposable_repo(tag);
+    let config_path = write_config(&dir, r#"["--emit-graph"]"#);
+    let text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("verify_command = []", verify_command);
+    fs::write(&config_path, text).unwrap();
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--json", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    let warnings = parsed["data"]["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .map(|w| w.as_str().expect("warning string").to_string())
+        .collect();
+    let _ = fs::remove_dir_all(&dir);
+    warnings
+}
+
+#[test]
+fn doctor_warns_when_verify_command_is_empty() {
+    let warnings = doctor_warnings("doctor-verify-empty", "verify_command = []");
+    assert!(
+        warnings.iter().any(|w| w.contains("verify_command")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn doctor_has_no_warnings_when_verify_command_is_set() {
+    let warnings = doctor_warnings("doctor-verify-set", r#"verify_command = ["true"]"#);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
