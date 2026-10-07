@@ -4,12 +4,14 @@
 //! 1. `grandchild_dies_on_timeout`: Grandchild processes are reaped on timeout / kill_tree.
 //! 2. `grandchild_dies_on_parent_abort`: Grandchild processes are forcibly terminated by OS
 //!    kernel when the parent process aborts/crashes (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE).
+//!    Windows only: POSIX process groups have no kernel teardown on owner abort, so
+//!    that guarantee does not exist there (tracked as a limitation, see ADR 0025).
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use meshloop_adapters::process::{WindowsProcessView, spawn_owned};
+use meshloop_adapters::process::{HostProcessView, spawn_owned};
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
 fn fixture_path() -> PathBuf {
@@ -70,8 +72,8 @@ fn grandchild_dies_on_timeout() {
     // Verify child is dead
     assert!(owned.try_wait().unwrap().is_some());
 
-    // Verify grandchild is dead (poll up to 3 seconds for Windows OS teardown)
-    let view = WindowsProcessView;
+    // Verify grandchild is dead (poll up to 4 seconds for OS teardown)
+    let view = HostProcessView {};
     let hint = ProcessHint {
         pid: grandchild_pid,
         image_name: None,
@@ -100,6 +102,7 @@ fn grandchild_dies_on_timeout() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+#[cfg(windows)]
 #[test]
 fn grandchild_dies_on_parent_abort() {
     let tmp = unique_temp_dir("grandchild_dies_on_parent_abort");
@@ -130,7 +133,7 @@ fn grandchild_dies_on_parent_abort() {
     assert!(grandchild_pid > 0);
 
     // Wait for OS kernel to clean up the Job Object via KILL_ON_JOB_CLOSE
-    let view = WindowsProcessView;
+    let view = HostProcessView {};
     let hint = ProcessHint {
         pid: grandchild_pid,
         image_name: None,

@@ -1,4 +1,4 @@
-//! Windows PID liveness hints. PID reuse is a residual: Live only if the PID is listed
+//! Host PID liveness hints. PID reuse is a residual: Live only if the PID is listed
 //! *and* the image name matches when known.
 
 use std::process::Command;
@@ -40,6 +40,36 @@ impl ProcessView for WindowsProcessView {
         }
     }
 }
+
+/// POSIX liveness via `ps -o stat= -p <pid>`: no row or a zombie (`Z`) is Dead, since a
+/// zombie can no longer run. The image name is not checked here.
+pub struct PosixProcessView;
+
+impl ProcessView for PosixProcessView {
+    fn is_live(&self, hint: &ProcessHint) -> LiveCheck {
+        if hint.pid == 0 {
+            return LiveCheck::Dead;
+        }
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &hint.pid.to_string()])
+            .output();
+        let Ok(out) = output else {
+            return LiveCheck::Ambiguous;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        match text.trim().chars().next() {
+            None | Some('Z') => LiveCheck::Dead,
+            Some(_) => LiveCheck::Live,
+        }
+    }
+}
+
+/// The liveness view for the current host.
+#[cfg(windows)]
+pub type HostProcessView = WindowsProcessView;
+/// The liveness view for the current host.
+#[cfg(not(windows))]
+pub type HostProcessView = PosixProcessView;
 
 /// In-process view used when we still hold the Child (never claims Live for a NULL pid).
 pub struct NullPidIsDead;
@@ -137,7 +167,7 @@ mod tests {
         let _ = child.wait();
 
         // Ensure process is no longer running, polling briefly for Windows tasklist cleanup
-        let view = WindowsProcessView;
+        let view = HostProcessView {};
         let hint = ProcessHint {
             pid,
             image_name: None,
@@ -149,5 +179,31 @@ mod tests {
             check = view.is_live(&hint);
         }
         assert!(check == LiveCheck::Dead || check == LiveCheck::Ambiguous);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn posix_view_reports_live_then_dead_including_zombie() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let hint = ProcessHint {
+            pid: child.id(),
+            image_name: None,
+        };
+        let view = PosixProcessView;
+        assert_eq!(view.is_live(&hint), LiveCheck::Live);
+        // Killed but not yet reaped: a zombie must already count as Dead.
+        child.kill().expect("kill sleep");
+        let start = std::time::Instant::now();
+        let mut check = view.is_live(&hint);
+        while check == LiveCheck::Live && start.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            check = view.is_live(&hint);
+        }
+        assert_eq!(check, LiveCheck::Dead);
+        let _ = child.wait();
+        assert_eq!(view.is_live(&hint), LiveCheck::Dead);
     }
 }

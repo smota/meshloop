@@ -8,7 +8,7 @@ use std::time::Duration;
 use meshloop_adapters::check::CommandCheckRunner;
 use meshloop_adapters::git::GitWorktreeAdapter;
 use meshloop_adapters::harness::{CliHarness, CliHarnessConfig};
-use meshloop_adapters::process::WindowsProcessView;
+use meshloop_adapters::process::HostProcessView;
 use meshloop_adapters::store::SqliteStore;
 use meshloop_domain::capability::{HarnessError, HarnessProfile};
 use meshloop_domain::policy::ModelCapabilityTier;
@@ -68,7 +68,7 @@ pub struct Composed {
     pub candidates: Vec<Candidate>,
     pub git: GitWorktreeAdapter,
     pub store: SqliteStore,
-    pub processes: WindowsProcessView,
+    pub processes: HostProcessView,
     pub checks: CommandCheckRunner,
     pub limits: RunLimits,
     pub verify_command: Vec<String>,
@@ -153,7 +153,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
         candidates,
         git,
         store,
-        processes: WindowsProcessView,
+        processes: HostProcessView {},
         checks: CommandCheckRunner,
         limits: RunLimits {
             max_retries: req.config.limits.max_retries,
