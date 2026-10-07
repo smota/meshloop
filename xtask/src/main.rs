@@ -3089,11 +3089,11 @@ fn bench(root: &Path) -> ExitCode {
             "os": std::env::consts::OS,
             "hostname": hostname,
             "crate_versions": {
-                "meshloop-domain": "0.2.0",
-                "meshloop-context": "0.2.0",
-                "meshloop-engine": "0.2.0",
-                "meshloop-adapters": "0.2.0",
-                "meshloop-cli": "0.2.0"
+                "meshloop-domain": "0.3.0",
+                "meshloop-context": "0.3.0",
+                "meshloop-engine": "0.3.0",
+                "meshloop-adapters": "0.3.0",
+                "meshloop-cli": "0.3.0"
             }
         },
         "phases": {
