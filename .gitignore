@@ -16,3 +16,9 @@
 /.agentflow/transactions/
 /.agentflow-adapters.lock.json
 /.agentflow-role-adapters.lock.json
+# Agent skills are deployed per machine by Skills Manager
+/.agents/skills/
+/.claude/skills/
+/.codex/skills/
+/.gemini/antigravity/skills/
+/.grok/skills/
