@@ -106,15 +106,16 @@ pub fn kill_process_tree(pid: u32) {
     #[cfg(not(windows))]
     {
         use std::process::Stdio;
-        // Attempt process group kill first, then fallback to single pid
+        // Process group kill first, then the single pid. `-s KILL --` keeps the negative
+        // pgid from being parsed as an option by any kill implementation.
         let _ = Command::new("kill")
-            .args(["-9", &format!("-{}", pid)])
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
+            .args(["-s", "KILL", "--", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
