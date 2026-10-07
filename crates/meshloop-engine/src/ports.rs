@@ -62,6 +62,13 @@ pub trait HarnessCapabilities: Sync {
         let _ = worktree;
         None
     }
+
+    /// OS image name of the process `invoke` spawns (e.g. `pwsh.exe`), persisted with the
+    /// attempt pid so another process can tell a live worker from a reused pid. `None` when
+    /// the harness has no process of its own (fixtures, panes).
+    fn process_image(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

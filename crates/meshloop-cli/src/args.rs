@@ -25,6 +25,8 @@ pub enum Command {
     },
     Status {
         graph: Option<String>,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
     },
     Plan {
         objective: String,
@@ -163,7 +165,11 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
 
 fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(|s| verb(s)) {
-        None => Ok(Command::Status { graph: None }),
+        None => Ok(Command::Status {
+            graph: None,
+            config: None,
+            db: None,
+        }),
         Some(v) if v == "--help" || v == "-h" || v == "help" => Ok(Command::Help),
         Some(v) if v == "--version" || v == "-V" || v == "version" => Ok(Command::Version),
         Some(v) if v == "mcp" => Ok(Command::Mcp),
@@ -254,6 +260,8 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }
         Some(v) if v == "status" => Ok(Command::Status {
             graph: flag_value(&args[1..], "--graph"),
+            config: flag_value(&args[1..], "--config").map(PathBuf::from),
+            db: flag_value(&args[1..], "--db").map(PathBuf::from),
         }),
         Some(v) if v == "resume" => {
             let rest = &args[1..];
@@ -413,7 +421,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop review-plan --plan <path> --accept|--decline|--adjust [--reason] [--as] [--json]\n\
      \x20 meshloop run --plan <path> [--accept-plan] [--reset] [--fixture-only] [--json]\n\
      \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
-     \x20 meshloop status [--graph <id>] [--json]\n\
+     \x20 meshloop status [--graph <id>] [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
@@ -423,4 +431,26 @@ pub fn help_text() -> &'static str {
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
      \x20 or MESHLOOP_ORIGIN_HARNESS / MESHLOOP_ORIGIN_SESSION.\n\
      Live workers are the default (Herdr). --fixture-only forces the CI subprocess double."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_keeps_config_db_and_graph() {
+        let args: Vec<String> = ["status", "--config", "x", "--db", "y", "--graph", "g"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let inv = parse(&args).expect("parse");
+        match inv.command {
+            Command::Status { graph, config, db } => {
+                assert_eq!(graph.as_deref(), Some("g"));
+                assert_eq!(config, Some(PathBuf::from("x")));
+                assert_eq!(db, Some(PathBuf::from("y")));
+            }
+            _ => panic!("expected status"),
+        }
+    }
 }

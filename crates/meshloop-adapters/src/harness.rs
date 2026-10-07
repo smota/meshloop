@@ -187,6 +187,10 @@ impl HarnessCapabilities for CliHarness {
         }
     }
 
+    fn process_image(&self) -> Option<String> {
+        crate::process::process_image_name(&self.config.executable)
+    }
+
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {
         let mut registry = self
             .running

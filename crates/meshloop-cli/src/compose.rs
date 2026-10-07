@@ -61,6 +61,12 @@ impl HarnessCapabilities for DispatchHarness {
             Self::Fixture(h) | Self::Direct(h) => h.pane_for_worktree(worktree),
         }
     }
+
+    fn process_image(&self) -> Option<String> {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.process_image(),
+        }
+    }
 }
 
 pub struct Composed {

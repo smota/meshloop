@@ -83,7 +83,9 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
-        Command::Status { graph } => cmd_status(graph, inv.json, inv.origin),
+        Command::Status { graph, config, db } => {
+            cmd_status(graph, config, db, inv.json, inv.origin)
+        }
         Command::Plan {
             objective,
             config,
@@ -629,6 +631,8 @@ fn cmd_review_plan(
     ExitCode::SUCCESS
 }
 
+const EMPTY_VERIFY_WARNING: &str = "verify_command is empty: nodes are not checked beyond git diff";
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     plan: PathBuf,
@@ -685,6 +689,9 @@ fn cmd_run(
             return ExitCode::from(2);
         }
     };
+    if composed.verify_command.is_empty() {
+        eprintln!("warning: {EMPTY_VERIFY_WARNING}");
+    }
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
         .harnesses
         .iter()
@@ -935,29 +942,33 @@ fn with_saga(
 
 fn cmd_status(
     graph: Option<String>,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    if crate::config::discover(None).is_err() {
+    if crate::config::discover(config.as_deref()).is_err() {
+        let msg = "no config found; pass --config or add meshloop.toml";
         if json {
-            println!(
-                "{}",
-                json_out::ok(
-                    "meshloop:status",
-                    origin,
-                    serde_json::json!({ "banner": report::banner(), "runs": [] }),
-                )
-            );
+            println!("{}", json_out::err("meshloop:status", origin, msg));
         } else {
-            print!("{}", report::banner());
+            eprintln!("{msg}");
         }
-        return ExitCode::SUCCESS;
+        return ExitCode::from(2);
     }
-    let db = None;
-    with_saga(None, db, None, false, origin.clone(), |saga| {
+    with_saga(config, db, None, false, origin.clone(), |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
-            Err(_) => {
+            Err(e) => {
+                if let Some(g) = graph.as_deref() {
+                    let msg = format!("graph '{g}' not found: {e:?}");
+                    if json {
+                        println!("{}", json_out::err("meshloop:status", origin.clone(), msg));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                    return ExitCode::from(2);
+                }
                 if json {
                     println!(
                         "{}",
@@ -1002,8 +1013,15 @@ fn cmd_status(
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("{e:?}");
-                ExitCode::from(1)
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:status", origin.clone(), format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
+                ExitCode::from(2)
             }
         }
     })
@@ -1478,6 +1496,7 @@ fn cmd_doctor(
     let origin_session = origin.session.clone();
     let origin_harness = origin.harness.clone();
 
+    let mut warnings: Vec<&str> = Vec::new();
     let (config_path, harnesses, error) = match crate::config::discover(config.as_deref()) {
         Err(_) => (
             None,
@@ -1491,6 +1510,9 @@ fn cmd_doctor(
                 Some(format!("failed to load config: {e:?}")),
             ),
             Ok(cfg) => {
+                if cfg.verify.verify_command.is_empty() {
+                    warnings.push(EMPTY_VERIFY_WARNING);
+                }
                 let rows = doctor_probe(&cfg);
                 let error = (!rows.iter().any(|r| r["dispatchable"] == true)).then(|| {
                     "no selected harness is dispatchable; see data.harnesses[].reason".to_string()
@@ -1518,6 +1540,7 @@ fn cmd_doctor(
         "harnesses_ready": harnesses_ready,
         "harnesses": harnesses,
         "store_ignored": store_ignored,
+        "warnings": warnings,
         "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
     if json {
@@ -1545,6 +1568,9 @@ fn cmd_doctor(
             println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
         }
         println!("  store_ignored: {store_ignored}");
+        for w in &warnings {
+            println!("  warning: {w}");
+        }
         if !store_ignored {
             println!(
                 "  fix: add `{}` to .gitignore, or run `meshloop bundle --dest . --gitignore`",
