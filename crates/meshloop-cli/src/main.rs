@@ -1008,8 +1008,15 @@ fn cmd_status(
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("{e:?}");
-                ExitCode::from(1)
+                if json {
+                    println!(
+                        "{}",
+                        json_out::err("meshloop:status", origin.clone(), format!("{e:?}"))
+                    );
+                } else {
+                    eprintln!("{e:?}");
+                }
+                ExitCode::from(2)
             }
         }
     })

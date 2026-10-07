@@ -1411,7 +1411,6 @@ fn status_with_unknown_graph_is_an_error_naming_it() {
 }
 
 #[test]
-#[test]
 fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
     let dir = disposable_repo("json-clean");
     let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
