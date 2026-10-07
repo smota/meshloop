@@ -165,7 +165,9 @@ impl DerefMut for OwnedChild {
 }
 
 /// Spawns a `Command` enclosed within an owned process group or Win32 Job Object.
+/// On Windows the child never gets its own console window (see `hide_console`).
 pub fn spawn_owned(mut cmd: Command) -> std::io::Result<OwnedChild> {
+    super::hide_console(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;

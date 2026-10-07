@@ -8,13 +8,30 @@ pub use job::{OwnedChild, spawn_owned};
 
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
+/// Keeps a child from getting a console window of its own. A console-less parent (such as
+/// the detached `resume` worker) otherwise makes Windows allocate one for every console
+/// child and hand it to the default terminal, which then reports an error when the job closes.
+/// Standard handles are still passed explicitly, so inherited stdio keeps working.
+/// No-op off Windows. Overwrites any creation flags already set on `cmd`.
+pub fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 pub struct WindowsProcessView;
 
 impl ProcessView for WindowsProcessView {
     fn is_live(&self, hint: &ProcessHint) -> LiveCheck {
-        let output = Command::new("tasklist")
-            .args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {}", hint.pid)])
-            .output();
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {}", hint.pid)]);
+        hide_console(&mut cmd);
+        let output = cmd.output();
         let Ok(out) = output else {
             return LiveCheck::Ambiguous;
         };
@@ -96,12 +113,13 @@ pub fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::process::Stdio;
-        let _ = Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        hide_console(&mut cmd);
+        let _ = cmd.status();
     }
     #[cfg(not(windows))]
     {
