@@ -117,12 +117,26 @@ pub fn kill_orphaned_tree(pid: u32, executable: &std::path::Path) -> bool {
     true
 }
 
+/// The OS image name a process spawned from `executable` reports: `<stem>.exe` on Windows
+/// (what `tasklist` shows, whether or not the configured path has the extension), the file
+/// name elsewhere. This is what attempts persist so liveness checks can reject reused pids.
+pub fn process_image_name(executable: &std::path::Path) -> Option<String> {
+    if cfg!(windows) {
+        executable
+            .file_stem()
+            .map(|stem| format!("{}.exe", stem.to_string_lossy()))
+    } else {
+        executable
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+}
+
 #[cfg(windows)]
 fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
-    let Some(stem) = executable.file_stem() else {
+    let Some(image) = process_image_name(executable) else {
         return false;
     };
-    let image = format!("{}.exe", stem.to_string_lossy());
     WindowsProcessView.is_live(&ProcessHint {
         pid,
         image_name: Some(image),
@@ -216,6 +230,57 @@ mod tests {
             }),
             LiveCheck::Live
         );
+    }
+
+    #[test]
+    fn process_image_name_matches_what_the_os_reports() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                process_image_name(std::path::Path::new("pwsh")).as_deref(),
+                Some("pwsh.exe")
+            );
+            assert_eq!(
+                process_image_name(std::path::Path::new(r"C:\tools\node.exe")).as_deref(),
+                Some("node.exe")
+            );
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            process_image_name(std::path::Path::new("/usr/bin/node")).as_deref(),
+            Some("node")
+        );
+    }
+
+    /// The persisted image lets a process that does not own the child see it as live (#47).
+    #[test]
+    fn persisted_image_name_reports_a_running_child_live() {
+        #[cfg(windows)]
+        let (exe, args) = (
+            "powershell",
+            ["-NoProfile", "-Command", "Start-Sleep -Seconds 30"],
+        );
+        #[cfg(not(windows))]
+        let (exe, args) = ("sleep", ["30", "", ""]);
+        let mut cmd = Command::new(exe);
+        cmd.args(args.iter().filter(|a| !a.is_empty()));
+        let mut child = cmd.spawn().expect("spawn sleeper");
+        let hint = ProcessHint {
+            pid: child.id(),
+            image_name: process_image_name(std::path::Path::new(exe)),
+        };
+        assert_eq!(HostProcessView {}.is_live(&hint), LiveCheck::Live);
+        #[cfg(windows)]
+        assert_eq!(
+            HostProcessView {}.is_live(&ProcessHint {
+                pid: child.id(),
+                image_name: Some("claude".into()),
+            }),
+            LiveCheck::Ambiguous,
+            "a harness name is not an image name; it must not read as Live"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

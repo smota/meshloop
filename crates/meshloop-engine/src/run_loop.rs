@@ -1217,16 +1217,9 @@ impl<'a> RunLoop<'a> {
                 self.maybe_fallback(graph_id, task_id, fail, &selected)
             }
             Ok(handle) => {
-                let image = Path::new(
-                    &self
-                        .candidates
-                        .iter()
-                        .find(|c| c.harness == candidate.harness)
-                        .map(|c| c.harness.clone())
-                        .unwrap_or_default(),
-                )
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned());
+                // The spawned process's image, not the harness name, so liveness checks
+                // from another process can match the persisted pid (#47).
+                let image = harness.process_image();
                 self.store
                     .update_attempt_pid(attempt_id, handle.pid, image.as_deref())?;
                 self.store
