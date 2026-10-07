@@ -67,6 +67,10 @@ fn main() {
             let exe = env::current_exe().expect("current exe");
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--sleep-ms").arg(ms);
+            #[allow(
+                clippy::zombie_processes,
+                reason = "the detached sleeper is meant to outlive this fixture; the test kills it"
+            )]
             let child = meshloop_adapters::process::spawn_detached(cmd).expect("spawn detached");
             println!("{}", child.id());
         }
