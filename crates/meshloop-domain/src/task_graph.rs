@@ -14,6 +14,21 @@ pub enum Tier {
     Tier3,
 }
 
+impl Tier {
+    /// Every variant, in declaration order. `name` matches exhaustively, so adding a
+    /// variant fails to compile there until it is handled and listed here.
+    pub const ALL: [Tier; 3] = [Tier::Tier1, Tier::Tier2, Tier::Tier3];
+
+    /// The exact string serde accepts for this variant in a plan file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tier::Tier1 => "Tier1",
+            Tier::Tier2 => "Tier2",
+            Tier::Tier3 => "Tier3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskNode {
     pub id: TaskId,
@@ -275,6 +290,16 @@ mod tests {
             allowed_paths: vec![],
             empty_diff_ok: false,
         }
+    }
+
+    #[test]
+    fn tier_all_and_name_match_variant_names() {
+        for tier in Tier::ALL {
+            // serde's default representation of a unit variant is its Debug name.
+            assert_eq!(format!("{tier:?}"), tier.name());
+        }
+        let distinct: HashSet<_> = Tier::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(distinct.len(), Tier::ALL.len());
     }
 
     #[test]
