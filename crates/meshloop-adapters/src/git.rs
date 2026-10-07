@@ -46,6 +46,7 @@ impl GitWorktreeAdapter {
         cmd.env("GIT_AUTHOR_EMAIL", "meshloop@localhost");
         cmd.env("GIT_COMMITTER_NAME", "meshloop");
         cmd.env("GIT_COMMITTER_EMAIL", "meshloop@localhost");
+        crate::process::hide_console(&mut cmd);
         let output = cmd.output().map_err(|e| GitError::Io(e.to_string()))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

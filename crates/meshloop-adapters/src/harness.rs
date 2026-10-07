@@ -56,15 +56,6 @@ impl HarnessCapabilities for CliHarness {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // All stdio is redirected, so the probe needs no console. Without this flag a
-        // console-less parent makes Windows allocate one and hand it to the default terminal,
-        // which then reports an error when the job closes mid-handoff.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
         let mut child =
             crate::process::spawn_owned(cmd).map_err(|e| HarnessError::ProcessFault {
                 detail: e.to_string(),
