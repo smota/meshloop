@@ -168,13 +168,24 @@ verify_command = ["cargo", "check"]
 [harnesses.codex]
 kind = "codex"
 executable = "codex"
+# Read-only probe; must exit without interaction. Defaults to ["--version"].
+version_args = ["--version"]
+# Required for live dispatch: argv that runs one prompt non-interactively.
+# `{prompt_file}` becomes the path of a file holding the prompt; `{model_ref}` the model.
+# Meshloop ships no per-harness flags (ADR 0003); take these from your CLI's docs.
+invoke_args_template = []
 model_ref = "codex"
 model_tier = "top"
 ```
 
+A harness with an empty `invoke_args_template` is probed but never dispatched, so this
+sample is **not runnable as-is**. Every probe is bounded by `[limits] probe_timeout_seconds`
+(default 15); a version call that opens an interactive UI is reported as a probe timeout.
+Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
+
 ### Step 4: Validate and Run Your First Closed Loop
 ```bash
-# 1. Validate environment, Git worktrees, and configured CLI harnesses
+# 1. Load meshloop.toml and probe each selected CLI harness (bounded)
 meshloop doctor
 
 # 2. Decompose a high-level objective into an iterative DAG
@@ -195,7 +206,7 @@ Every capability is universally accessible across terminal CLI verbs, in-agent s
 
 | Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
 | :--- | :--- | :--- | :--- | :--- |
-| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated task DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Spawns workers in ephemeral Git worktrees with Job Object ownership. |

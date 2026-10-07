@@ -40,7 +40,10 @@ pub enum OrchestratorError {
     Workspace(WorkspaceError),
     Plan(PlanError),
     Illegal(String),
-    DuplicateGraph { graph_id: String, resume: bool },
+    DuplicateGraph {
+        graph_id: String,
+        resume: bool,
+    },
     MissingGraph(String),
     PlanDeclined(String),
     PlanAlreadyAccepted(String),
@@ -48,7 +51,8 @@ pub enum OrchestratorError {
     AlreadyAccepted(TaskId),
     EmptyIdentity,
     SnapshotMismatch,
-    NoCandidate,
+    /// No configured harness passed routing; one entry per configured candidate.
+    NoCandidate(Vec<crate::router::Rejection>),
 }
 
 impl From<StoreError> for OrchestratorError {
@@ -254,7 +258,15 @@ impl<'a> RunLoop<'a> {
             SystemTime::now(),
             &ctx,
         );
-        let top = selected.first().ok_or(OrchestratorError::NoCandidate)?;
+        let top = selected.first().ok_or_else(|| {
+            OrchestratorError::NoCandidate(Router::rejections(
+                &self.candidates,
+                &profiles,
+                &quotas,
+                SystemTime::now(),
+                Tier::Tier3,
+            ))
+        })?;
         self.require_dispatch_ok(&top.harness)?;
         let harness = *self
             .harnesses
@@ -2004,14 +2016,32 @@ impl<'a> RunLoop<'a> {
         Err(OrchestratorError::MissingGraph("no runs".into()))
     }
 
+    /// Probes every configured harness concurrently, so the slowest probe (bounded by the
+    /// adapter's own deadline) sets the cost. A probe error becomes an `Unsupported` profile
+    /// carrying the error, so it stays visible to diagnostics instead of being dropped.
     fn probe_all(&self) -> HashMap<String, meshloop_domain::capability::HarnessProfile> {
-        let mut profiles = HashMap::new();
-        for (name, h) in &self.harnesses {
-            if let Ok(p) = h.probe() {
-                profiles.insert(name.clone(), p);
-            }
-        }
-        profiles
+        use meshloop_domain::capability::HarnessProfile;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .harnesses
+                .iter()
+                .map(|(name, h)| (name, scope.spawn(move || h.probe())))
+                .collect();
+            handles
+                .into_iter()
+                .map(|(name, handle)| {
+                    let profile = match handle.join() {
+                        Ok(Ok(p)) => p,
+                        Ok(Err(e)) => HarnessProfile::unsupported(
+                            name.clone(),
+                            format!("probe failed: {e:?}"),
+                        ),
+                        Err(_) => HarnessProfile::unsupported(name.clone(), "probe panicked"),
+                    };
+                    (name.clone(), profile)
+                })
+                .collect()
+        })
     }
 
     fn load_quotas(&self) -> HashMap<String, meshloop_domain::capability::QuotaState> {

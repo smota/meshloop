@@ -1,5 +1,7 @@
 //! CLI-subprocess `HarnessCapabilities` (runtime-design.md §2). `probe` shells out to the
 //! configured executable's own version flag — real signal, never an assumed version string.
+//! The probe is bounded by `probe_timeout` and runs in an owned process tree (ADR 0025), so
+//! a harness whose version call opens an interactive UI is rejected instead of hanging.
 //! `invoke`'s argument shape is entirely config-supplied (`invoke_args_template`); Meshloop
 //! ships no hardcoded per-harness CLI flag, per ADR 0003.
 
@@ -18,6 +20,9 @@ pub struct CliHarnessConfig {
     pub name: String,
     pub executable: PathBuf,
     pub version_args: Vec<String>,
+    /// Deadline for the version call; on expiry the process tree is killed and the harness
+    /// is reported `Unsupported` with a timeout reason.
+    pub probe_timeout: Duration,
     /// Argument template for a dispatch; `{prompt_file}` is substituted with the path to a
     /// temp file holding the rendered prompt. Supplied by the user's configuration, never
     /// hardcoded per harness in this project.
@@ -46,35 +51,90 @@ impl HarnessCapabilities for CliHarness {
     /// Real, read-only: resolves the configured executable and reads its actual reported
     /// version. Never invoked with a task prompt — see module docs.
     fn probe(&self) -> Result<HarnessProfile, HarnessError> {
-        let output = Command::new(&self.config.executable)
-            .args(&self.config.version_args)
+        let mut cmd = Command::new(&self.config.executable);
+        cmd.args(&self.config.version_args)
             .stdin(Stdio::null())
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                Ok(HarnessProfile {
-                    harness: self.config.name.clone(),
-                    version,
-                    compatibility: Compatibility::Compatible,
-                    supports_noninteractive: !self.config.invoke_args_template.is_empty(),
-                    supports_structured_output: false,
-                    supports_cancellation: true,
-                })
-            }
-            Ok(out) => Ok(HarnessProfile {
-                harness: self.config.name.clone(),
-                version: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                compatibility: Compatibility::Unsupported,
-                supports_noninteractive: false,
-                supports_structured_output: false,
-                supports_cancellation: false,
-            }),
-            Err(e) => Err(HarnessError::ProcessFault {
-                detail: e.to_string(),
-            }),
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // All stdio is redirected, so the probe needs no console. Without this flag a
+        // console-less parent makes Windows allocate one and hand it to the default terminal,
+        // which then reports an error when the job closes mid-handoff.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        let mut child =
+            crate::process::spawn_owned(cmd).map_err(|e| HarnessError::ProcessFault {
+                detail: e.to_string(),
+            })?;
+        let stdout_handle = crate::check::spawn_drain(child.stdout.take());
+        let stderr_handle = crate::check::spawn_drain(child.stderr.take());
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if start.elapsed() >= self.config.probe_timeout => {
+                    child.kill_tree();
+                    // Readers are not joined: a descendant outside the job could still hold
+                    // a pipe open, and the probe must stay bounded.
+                    return Ok(HarnessProfile::unsupported(
+                        self.config.name.clone(),
+                        format!(
+                            "probe timed out after {}s running {} {}; the version call must exit without interaction",
+                            self.config.probe_timeout.as_secs(),
+                            self.config.executable.display(),
+                            self.config.version_args.join(" ")
+                        ),
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => {
+                    child.kill_tree();
+                    return Err(HarnessError::ProcessFault {
+                        detail: e.to_string(),
+                    });
+                }
+            }
+        };
+        // Closing the job reaps any descendant on Windows; the bounded join covers a
+        // descendant elsewhere that still holds a pipe open.
+        drop(child);
+        let deadline = start + self.config.probe_timeout;
+        let stdout = join_until(stdout_handle, deadline);
+        let stderr = join_until(stderr_handle, deadline);
+
+        if !status.success() {
+            let detail = crate::redact::redact(stderr.trim());
+            let mut profile = HarnessProfile::unsupported(
+                self.config.name.clone(),
+                format!(
+                    "version call exited with {}{}",
+                    status.code().unwrap_or(-1),
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {detail}")
+                    }
+                ),
+            );
+            profile.version = detail;
+            return Ok(profile);
+        }
+
+        let supports_noninteractive = !self.config.invoke_args_template.is_empty();
+        Ok(HarnessProfile {
+            harness: self.config.name.clone(),
+            version: stdout.trim().to_string(),
+            compatibility: Compatibility::Compatible,
+            supports_noninteractive,
+            supports_structured_output: false,
+            supports_cancellation: true,
+            reason: (!supports_noninteractive).then(|| {
+                "no invoke_args_template configured; cannot dispatch non-interactively".into()
+            }),
+        })
     }
 
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
@@ -215,6 +275,17 @@ impl HarnessCapabilities for CliHarness {
             }
         }
     }
+}
+
+/// Joins a pipe reader, giving up with empty output once `deadline` passes.
+fn join_until(handle: std::thread::JoinHandle<String>, deadline: Instant) -> String {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return String::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().unwrap_or_default()
 }
 
 // Contract tests against the fixture harness binary live in tests/harness_contract.rs —

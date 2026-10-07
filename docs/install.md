@@ -10,7 +10,7 @@ Once installed, Meshloop operations can be triggered via terminal slash commands
 
 | Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
 | :--- | :--- | :--- | :--- | :--- |
-| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
@@ -92,9 +92,20 @@ verify_command = ["cargo", "check"]
 [harnesses.codex]
 kind = "codex"
 executable = "codex"
+# Read-only probe; must exit without interaction. Defaults to ["--version"].
+version_args = ["--version"]
+# Required for live dispatch: argv that runs one prompt non-interactively.
+# `{prompt_file}` becomes the path of a file holding the prompt; `{model_ref}` the model.
+# Meshloop ships no per-harness flags (ADR 0003); take these from your CLI's docs.
+invoke_args_template = []
 model_ref = "codex"
 model_tier = "top"
 ```
+
+A harness with an empty `invoke_args_template` is probed but never dispatched, so this
+sample is **not runnable as-is**. Every probe is bounded by `[limits] probe_timeout_seconds`
+(default 15); a version call that opens an interactive UI is reported as a probe timeout.
+Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
 
 - **Database:** Local execution state is stored in `.meshloop/state.sqlite` (SQLite WAL mode).
 - **Workspaces:** Isolated task executions occur in `.meshloop-worktrees/<task-id>`.
@@ -191,15 +202,25 @@ Run the diagnostic check:
 meshloop doctor
 ```
 
-Expected output:
+`doctor` finds `meshloop.toml` (or takes `--config <path>`), loads it, and probes every
+selected harness in parallel. It exits non-zero, with `ok: false`, when no config is found,
+the config is invalid, or no selected harness is dispatchable. Abridged `--json` output:
 ```json
 {
-  "daemonless": true,
-  "live_transport": "direct-cli",
-  "git_available": true,
-  "harnesses_ready": true
+  "ok": true,
+  "data": {
+    "daemonless": true,
+    "live_transport": "direct-cli",
+    "config": "meshloop.toml",
+    "harnesses_ready": true,
+    "harnesses": [
+      { "name": "codex", "version": "<reported>", "dispatchable": true, "reason": null }
+    ]
+  }
 }
 ```
+A harness that is not ready carries a `reason`, such as a probe timeout, a failed version
+call, or a missing `invoke_args_template`.
 
 When `doctor` passes, proceed to the **[Getting Started Guide](start.md)** to run the planning and execution loop:
 ```text

@@ -12,7 +12,7 @@ Meshloop operations can be triggered through terminal slash commands, MCP tools,
 
 | Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
 | :--- | :--- | :--- | :--- | :--- |
-| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
+| `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
@@ -33,7 +33,7 @@ The standard workflow runs in a target Git repository:
 
 | State | What you see | Action |
 |---|---|---|
-| **Ready** | `daemonless: true`, `live_transport: direct-cli`, harnesses verified | `/meshloop:doctor` then `/meshloop:plan` |
+| **Ready** | `ok: true`, `harnesses_ready: true` | `/meshloop:doctor` then `/meshloop:plan` |
 | **Plan in flight** | Planner executes; writes `meshloop-plan.json` | Review the generated task graph |
 | **Review Plan** | Interactive 3-way decision prompt | `/meshloop:review-plan` — choose **Accept**, **Decline**, or **Adjust** |
 | **Accept** | Plan accepted (`PlanAccepted`); no workers spawned yet | `/meshloop:run` |
@@ -58,7 +58,9 @@ meshloop doctor
 ```text
 /meshloop:doctor
 ```
-Ensures `daemonless: true` and `live_transport: "direct-cli"`. If doctor fails, check CLI harness paths in `meshloop.toml`.
+Loads `meshloop.toml` and probes each selected harness. If doctor fails, read each
+`data.harnesses[].reason`: a probe timeout means the `version_args` call did not exit on its
+own; a missing `invoke_args_template` means the harness cannot be dispatched.
 
 ### 2. Plan — Decompose Objective into Task Graph
 ```text

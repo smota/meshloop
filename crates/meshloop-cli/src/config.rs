@@ -40,6 +40,14 @@ pub struct Limits {
     /// Maximum attempts per task (the first dispatch counts). `1` means no fallback.
     pub max_retries: u32,
     pub task_timeout_seconds: u64,
+    /// Deadline for each harness's version probe. A probe that does not exit in time
+    /// (an interactive UI, an auth prompt) marks that harness unsupported.
+    #[serde(default = "default_probe_timeout_seconds")]
+    pub probe_timeout_seconds: u64,
+}
+
+fn default_probe_timeout_seconds() -> u64 {
+    15
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -54,7 +62,9 @@ pub struct HarnessConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub kind: Option<String>,
-    #[serde(default)]
+    /// Arguments for the read-only version probe. Defaults to `["--version"]`; never empty,
+    /// since a bare invocation of most harness CLIs opens an interactive session.
+    #[serde(default = "default_version_args")]
     pub version_args: Vec<String>,
     #[serde(default)]
     pub invoke_args_template: Vec<String>,
@@ -65,6 +75,10 @@ pub struct HarnessConfig {
 
 fn default_model_tier() -> String {
     "mid".into()
+}
+
+fn default_version_args() -> Vec<String> {
+    vec!["--version".into()]
 }
 
 #[derive(Debug)]
@@ -97,7 +111,38 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
             return Err(ConfigError::SelectedButNotConfigured(name.clone()));
         }
     }
+    for (name, hc) in &config.harnesses {
+        if hc.version_args.is_empty() {
+            return Err(ConfigError::Parse(format!(
+                "harness '{name}': version_args must not be empty (omit it to use [\"--version\"])"
+            )));
+        }
+    }
+    if config.limits.probe_timeout_seconds == 0 {
+        return Err(ConfigError::Parse(
+            "limits.probe_timeout_seconds must be greater than 0".into(),
+        ));
+    }
     Ok(config)
+}
+
+/// Selected harnesses that can never be dispatched as configured, with the reason. These
+/// load fine (doctor and probes still report on them) but routing will always skip them.
+pub fn dispatch_warnings(config: &Config) -> Vec<(String, String)> {
+    config
+        .selected_harnesses
+        .iter()
+        .filter_map(|name| {
+            let hc = config.harnesses.get(name)?;
+            hc.invoke_args_template.is_empty().then(|| {
+                (
+                    name.clone(),
+                    "no invoke_args_template configured; it will be probed but never dispatched"
+                        .to_string(),
+                )
+            })
+        })
+        .collect()
 }
 
 pub fn resolve_executable(configured: &str) -> PathBuf {
@@ -158,6 +203,7 @@ mod tests {
         for name in &config.selected_harnesses {
             let hc = &config.harnesses[name];
             assert!(hc.kind.as_deref() == Some(name.as_str()) || hc.kind.is_some());
+            assert!(!hc.version_args.is_empty(), "{name}: version_args");
         }
     }
 
@@ -172,6 +218,69 @@ mod tests {
         let config = load(&path).expect("fixture config should load");
         assert_eq!(config.selected_harnesses, vec!["fixture"]);
         assert!(config.harnesses.contains_key("fixture"));
+    }
+
+    fn write_temp(tag: &str, toml: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("meshloop-cfg-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("meshloop.toml");
+        std::fs::write(&path, toml).unwrap();
+        path
+    }
+
+    const MINIMAL: &str = r#"
+        selected_harnesses = ["grok"]
+        [limits]
+        max_concurrent_workers = 1
+        max_retries = 1
+        task_timeout_seconds = 60
+        [harnesses.grok]
+        kind = "grok"
+        executable = "grok"
+        model_ref = "grok"
+        model_tier = "top"
+    "#;
+
+    #[test]
+    fn omitted_version_args_default_to_version_flag_and_probe_timeout_is_bounded() {
+        // Issue #9: the minimal repro config used to probe the bare executable forever.
+        let path = write_temp("defaults", MINIMAL);
+        let config = load(&path).expect("minimal config loads");
+        assert_eq!(config.harnesses["grok"].version_args, vec!["--version"]);
+        assert_eq!(config.limits.probe_timeout_seconds, 15);
+        let warnings = dispatch_warnings(&config);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].0, "grok");
+        assert!(warnings[0].1.contains("invoke_args_template"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn explicitly_empty_version_args_are_rejected() {
+        let toml = MINIMAL.replace(
+            "model_tier = \"top\"",
+            "model_tier = \"top\"
+version_args = []",
+        );
+        let path = write_temp("empty-version", &toml);
+        let result = load(&path);
+        assert!(
+            matches!(&result, Err(ConfigError::Parse(m)) if m.contains("grok") && m.contains("version_args")),
+            "{result:?}"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn zero_probe_timeout_is_rejected() {
+        let toml = MINIMAL.replace(
+            "task_timeout_seconds = 60",
+            "task_timeout_seconds = 60
+probe_timeout_seconds = 0",
+        );
+        let path = write_temp("zero-probe", &toml);
+        assert!(matches!(load(&path), Err(ConfigError::Parse(_))));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

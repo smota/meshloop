@@ -18,7 +18,7 @@ use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome,
 use meshloop_engine::router::Candidate;
 use meshloop_engine::run_loop::RunLimits;
 
-use crate::config::{Config, resolve_executable};
+use crate::config::{Config, HarnessConfig, Limits, resolve_executable};
 
 pub enum DispatchHarness {
     Fixture(CliHarness),
@@ -99,6 +99,18 @@ pub fn default_worktree_base(repo_root: &Path) -> PathBuf {
         .join(name)
 }
 
+/// Builds the subprocess adapter for one configured harness. Shared by `compose` and
+/// `doctor`, which probes without opening the store.
+pub fn cli_harness(name: &str, hc: &HarnessConfig, limits: &Limits) -> CliHarness {
+    CliHarness::new(CliHarnessConfig {
+        name: name.to_string(),
+        executable: resolve_executable(&hc.executable),
+        version_args: hc.version_args.clone(),
+        probe_timeout: Duration::from_secs(limits.probe_timeout_seconds),
+        invoke_args_template: hc.invoke_args_template.clone(),
+    })
+}
+
 pub struct ComposeRequest<'a> {
     pub config: &'a Config,
     pub repo_root: PathBuf,
@@ -119,12 +131,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
             .get(name)
             .ok_or_else(|| format!("harness '{name}' selected but not configured"))?;
         let is_fixture = name == "fixture" || req.fixture_only;
-        let cli = CliHarness::new(CliHarnessConfig {
-            name: name.clone(),
-            executable: resolve_executable(&hc.executable),
-            version_args: hc.version_args.clone(),
-            invoke_args_template: hc.invoke_args_template.clone(),
-        });
+        let cli = cli_harness(name, hc, &req.config.limits);
         let dispatch = if is_fixture {
             DispatchHarness::Fixture(cli)
         } else {

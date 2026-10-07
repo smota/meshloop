@@ -11,6 +11,13 @@ use meshloop_domain::task_graph::Tier;
 
 use crate::ports::{FeedbackKey, RoutingFeedbackStore, TierKey};
 
+/// A configured candidate that routing filtered out, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejection {
+    pub harness: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub harness: String,
@@ -186,6 +193,41 @@ impl Router {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().map(|(c, _)| c).collect()
     }
+
+    /// Why each configured candidate fails `select`'s filters, in configuration order.
+    /// Candidates that pass every filter are omitted. Used to make `NoCandidate` actionable.
+    pub fn rejections(
+        configured: &[Candidate],
+        profiles: &HashMap<String, HarnessProfile>,
+        quotas: &HashMap<String, QuotaState>,
+        now: SystemTime,
+        task_tier: Tier,
+    ) -> Vec<Rejection> {
+        configured
+            .iter()
+            .filter_map(|c| {
+                let reason = if !tier_fits(task_tier, c.model_tier) {
+                    format!(
+                        "model_tier {:?} does not fit task {:?}",
+                        c.model_tier, task_tier
+                    )
+                } else if let Some(r) = match profiles.get(&c.harness) {
+                    Some(p) => p.rejection_reason(),
+                    None => Some("not probed".into()),
+                } {
+                    r
+                } else if quotas.get(&c.harness).is_some_and(|q| !q.is_available(now)) {
+                    "in quota cooldown".into()
+                } else {
+                    return None;
+                };
+                Some(Rejection {
+                    harness: c.harness.clone(),
+                    reason,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +248,7 @@ mod tests {
             supports_noninteractive: true,
             supports_structured_output: true,
             supports_cancellation: cancellable,
+            reason: None,
         }
     }
 
@@ -490,5 +533,39 @@ mod tests {
             &ctx(Tier::Tier1, &headroom, &feedback),
         );
         assert_eq!(selected[0].harness, "plenty");
+    }
+
+    #[test]
+    fn rejections_name_each_filtered_candidate_and_why() {
+        let cand = |h: &str, t| Candidate {
+            harness: h.into(),
+            model_ref: "m".into(),
+            model_tier: t,
+        };
+        let configured = vec![
+            cand("ok", ModelCapabilityTier::TopTier),
+            cand("weak", ModelCapabilityTier::MidTier),
+            cand("hung", ModelCapabilityTier::TopTier),
+            cand("missing", ModelCapabilityTier::TopTier),
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("ok".into(), profile(true, true));
+        profiles.insert("weak".into(), profile(true, true));
+        profiles.insert(
+            "hung".into(),
+            HarnessProfile::unsupported("hung", "probe timed out after 15s"),
+        );
+        let rejected = Router::rejections(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            Tier::Tier3,
+        );
+        let names: Vec<_> = rejected.iter().map(|r| r.harness.as_str()).collect();
+        assert_eq!(names, ["weak", "hung", "missing"]);
+        assert!(rejected[0].reason.contains("model_tier"));
+        assert_eq!(rejected[1].reason, "probe timed out after 15s");
+        assert_eq!(rejected[2].reason, "not probed");
     }
 }

@@ -19,7 +19,9 @@ pub enum Command {
     Version,
     Mcp,
     Roles,
-    Doctor,
+    Doctor {
+        config: Option<PathBuf>,
+    },
     Status {
         graph: Option<String>,
     },
@@ -156,7 +158,9 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         Some(v) if v == "--version" || v == "-V" || v == "version" => Ok(Command::Version),
         Some(v) if v == "mcp" => Ok(Command::Mcp),
         Some(v) if v == "roles" => Ok(Command::Roles),
-        Some(v) if v == "doctor" => Ok(Command::Doctor),
+        Some(v) if v == "doctor" => Ok(Command::Doctor {
+            config: flag_value(&args[1..], "--config").map(PathBuf::from),
+        }),
         Some(v) if v == "plan" => {
             let rest = &args[1..];
             let objective = flag_value(rest, "--objective").unwrap_or_default();
@@ -378,7 +382,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
      \x20 meshloop status [--graph <id>] [--json]\n\
      \x20 meshloop roles [--json]\n\
-     \x20 meshloop doctor [--json]\n\
+     \x20 meshloop doctor [--config <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
      \x20 meshloop mutate-plan [--graph <id>] (--mutation <json> | --mutation-file <path>) [--require-review] [--json]\n\
      \x20 meshloop mcp\n\

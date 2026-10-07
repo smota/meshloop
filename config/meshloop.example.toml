@@ -2,6 +2,12 @@
 # (config/meshloop.fixture.toml) and `--fixture-only`.
 #
 # `kind` is the harness identifier. Isolation is git worktrees.
+#
+# NOT RUNNABLE AS-IS: live dispatch needs an `invoke_args_template` per harness, the argv
+# that runs one prompt non-interactively (`{prompt_file}` = prompt file path, `{model_ref}`).
+# Meshloop ships no per-harness CLI flags (ADR 0003); take them from each CLI's docs.
+# Without one, a harness is probed but never dispatched. Check with:
+#   meshloop doctor --config meshloop.toml
 selected_harnesses = ["grok", "claude", "codex"]
 
 [limits]
@@ -9,6 +15,9 @@ max_concurrent_workers = 1
 # Maximum attempts per task (the first dispatch counts). 2 means one fallback.
 max_retries = 2
 task_timeout_seconds = 300
+# Deadline for each harness's version probe. A probe that does not exit (an interactive UI,
+# an auth prompt) marks that harness unsupported instead of blocking `plan`.
+probe_timeout_seconds = 15
 
 [verify]
 # Optional structured argv run in the attempt worktree after git-diff. Empty = git-diff only.
@@ -17,6 +26,9 @@ verify_command = []
 [harnesses.grok]
 kind = "grok"
 executable = "grok"
+# Read-only probe; must exit without interaction. Defaults to ["--version"].
+version_args = ["--version"]
+# invoke_args_template = [...]  # required for live dispatch; see header
 model_ref = "grok"
 model_tier = "top"
 

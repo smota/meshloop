@@ -73,7 +73,9 @@ impl CheckRunner for CommandCheckRunner {
     }
 }
 
-fn spawn_drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<String> {
+pub(crate) fn spawn_drain<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut buf = String::new();
         if let Some(mut out) = pipe {

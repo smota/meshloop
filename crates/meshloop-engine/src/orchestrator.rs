@@ -92,7 +92,7 @@ mod tests {
     use std::time::Duration;
 
     struct ScriptedHarness {
-        script: std::cell::RefCell<Vec<Result<HarnessOutcome, HarnessError>>>,
+        script: std::sync::Mutex<Vec<Result<HarnessOutcome, HarnessError>>>,
     }
 
     impl HarnessCapabilities for ScriptedHarness {
@@ -110,7 +110,7 @@ mod tests {
             Ok(())
         }
         fn collect(&self, _handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
-            self.script.borrow_mut().remove(0)
+            self.script.lock().unwrap().remove(0)
         }
     }
 
@@ -137,12 +137,12 @@ mod tests {
     #[test]
     fn capacity_exhausted_falls_back_to_next_candidate_visibly() {
         let primary = ScriptedHarness {
-            script: std::cell::RefCell::new(vec![Err(HarnessError::CapacityExhausted {
+            script: std::sync::Mutex::new(vec![Err(HarnessError::CapacityExhausted {
                 retry_after: Duration::from_secs(60),
             })]),
         };
         let fallback = ScriptedHarness {
-            script: std::cell::RefCell::new(vec![Ok(HarnessOutcome {
+            script: std::sync::Mutex::new(vec![Ok(HarnessOutcome {
                 exit_code: 0,
                 output_redacted: "done".into(),
                 worktree_changed: true,
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn every_candidate_exhausted_resolves_to_blocked_not_a_panic() {
         let h = ScriptedHarness {
-            script: std::cell::RefCell::new(vec![Err(HarnessError::Timeout)]),
+            script: std::sync::Mutex::new(vec![Err(HarnessError::Timeout)]),
         };
         let mut harnesses: HashMap<String, &dyn HarnessCapabilities> = HashMap::new();
         harnesses.insert("codex".into(), &h);
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn unsupported_is_a_caller_bug_not_a_fallback_case() {
         let h = ScriptedHarness {
-            script: std::cell::RefCell::new(vec![Err(HarnessError::Unsupported)]),
+            script: std::sync::Mutex::new(vec![Err(HarnessError::Unsupported)]),
         };
         let mut harnesses: HashMap<String, &dyn HarnessCapabilities> = HashMap::new();
         harnesses.insert("codex".into(), &h);
