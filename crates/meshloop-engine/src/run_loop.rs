@@ -160,6 +160,19 @@ struct RepairTick {
     revision: String,
 }
 
+/// Liveness for display (`status`/`inspect`): widens the owned view with an OS-level probe
+/// for detached workers another process owns. Recovery must keep using the owned view, where
+/// `Dead` means "this process cannot collect it".
+fn observed_live(owned: LiveCheck, attempt: &AttemptRow, processes: &dyn ProcessView) -> LiveCheck {
+    match (owned, &attempt.pane_id, attempt.pid, &attempt.ended_at) {
+        (LiveCheck::Dead, None, Some(pid), None) => processes.is_live(&ProcessHint {
+            pid,
+            image_name: attempt.image_name.clone(),
+        }),
+        (owned, ..) => owned,
+    }
+}
+
 fn terminal(state: TaskState) -> bool {
     matches!(
         state,
@@ -1926,9 +1939,12 @@ impl<'a> RunLoop<'a> {
         for n in &graph.nodes {
             let state = tasks.get(&n.id).copied().unwrap_or(TaskState::Pending);
             let attempt = self.store.latest_attempt_for_task(graph_id, n.id)?;
-            let live = attempt
-                .as_ref()
-                .map(|a| format!("{:?}", self.attempt_live(a)));
+            let live = attempt.as_ref().map(|a| {
+                format!(
+                    "{:?}",
+                    observed_live(self.attempt_live(a), a, self.processes)
+                )
+            });
             let pane_id = attempt.as_ref().and_then(|a| a.pane_id.clone());
             let note = if state == TaskState::Ready {
                 Some("Ready (may be waiting on QACR or cancel to unblock dependents)".into())
@@ -2107,5 +2123,106 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
         }
         IdleReason::WaitingOnLiveWorker => 0,
         IdleReason::NoCapableCandidate | IdleReason::FailedTerminal => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    struct FakeView {
+        answer: LiveCheck,
+        calls: Cell<u32>,
+    }
+
+    impl FakeView {
+        fn new(answer: LiveCheck) -> Self {
+            Self {
+                answer,
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl ProcessView for FakeView {
+        fn is_live(&self, _hint: &ProcessHint) -> LiveCheck {
+            self.calls.set(self.calls.get() + 1);
+            self.answer
+        }
+    }
+
+    fn attempt(pid: Option<u32>, ended_at: Option<&str>) -> AttemptRow {
+        AttemptRow {
+            attempt_id: meshloop_domain::evidence::AttemptId(1),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: None,
+            model_ref: None,
+            worktree_path: None,
+            pid,
+            image_name: Some("worker.exe".into()),
+            pane_id: None,
+            started_at: None,
+            ended_at: ended_at.map(String::from),
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn dead_owned_with_live_process_is_live() {
+        let view = FakeView::new(LiveCheck::Live);
+        let got = observed_live(LiveCheck::Dead, &attempt(Some(7), None), &view);
+        assert_eq!(got, LiveCheck::Live);
+        assert_eq!(view.calls.get(), 1);
+    }
+
+    #[test]
+    fn dead_owned_with_exited_process_is_dead() {
+        let view = FakeView::new(LiveCheck::Dead);
+        let got = observed_live(LiveCheck::Dead, &attempt(Some(7), None), &view);
+        assert_eq!(got, LiveCheck::Dead);
+    }
+
+    #[test]
+    fn dead_owned_with_pid_reuse_is_ambiguous() {
+        let view = FakeView::new(LiveCheck::Ambiguous);
+        let got = observed_live(LiveCheck::Dead, &attempt(Some(7), None), &view);
+        assert_eq!(got, LiveCheck::Ambiguous);
+        assert_ne!(got, LiveCheck::Live);
+    }
+
+    #[test]
+    fn ended_attempt_is_dead_without_consulting_view() {
+        let view = FakeView::new(LiveCheck::Live);
+        let got = observed_live(LiveCheck::Dead, &attempt(Some(7), Some("t")), &view);
+        assert_eq!(got, LiveCheck::Dead);
+        assert_eq!(view.calls.get(), 0);
+    }
+
+    #[test]
+    fn missing_pid_is_dead_without_consulting_view() {
+        let view = FakeView::new(LiveCheck::Live);
+        let got = observed_live(LiveCheck::Dead, &attempt(None, None), &view);
+        assert_eq!(got, LiveCheck::Dead);
+        assert_eq!(view.calls.get(), 0);
+    }
+
+    #[test]
+    fn pane_attempt_is_dead_without_consulting_view() {
+        let view = FakeView::new(LiveCheck::Live);
+        let mut a = attempt(Some(7), None);
+        a.pane_id = Some("p".into());
+        assert_eq!(observed_live(LiveCheck::Dead, &a, &view), LiveCheck::Dead);
+        assert_eq!(view.calls.get(), 0);
+    }
+
+    #[test]
+    fn owned_live_stays_live_without_consulting_view() {
+        let view = FakeView::new(LiveCheck::Dead);
+        let got = observed_live(LiveCheck::Live, &attempt(Some(7), None), &view);
+        assert_eq!(got, LiveCheck::Live);
+        assert_eq!(view.calls.get(), 0);
     }
 }

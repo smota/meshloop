@@ -83,7 +83,9 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
-        Command::Status { graph } => cmd_status(graph, inv.json, inv.origin),
+        Command::Status { graph, config, db } => {
+            cmd_status(graph, config, db, inv.json, inv.origin)
+        }
         Command::Plan {
             objective,
             config,
@@ -935,29 +937,33 @@ fn with_saga(
 
 fn cmd_status(
     graph: Option<String>,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
-    if crate::config::discover(None).is_err() {
+    if crate::config::discover(config.as_deref()).is_err() {
+        let msg = "no config found; pass --config or add meshloop.toml";
         if json {
-            println!(
-                "{}",
-                json_out::ok(
-                    "meshloop:status",
-                    origin,
-                    serde_json::json!({ "banner": report::banner(), "runs": [] }),
-                )
-            );
+            println!("{}", json_out::err("meshloop:status", origin, msg));
         } else {
-            print!("{}", report::banner());
+            eprintln!("{msg}");
         }
-        return ExitCode::SUCCESS;
+        return ExitCode::from(2);
     }
-    let db = None;
-    with_saga(None, db, None, false, origin.clone(), |saga| {
+    with_saga(config, db, None, false, origin.clone(), |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
-            Err(_) => {
+            Err(e) => {
+                if let Some(g) = graph.as_deref() {
+                    let msg = format!("graph '{g}' not found: {e:?}");
+                    if json {
+                        println!("{}", json_out::err("meshloop:status", origin.clone(), msg));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                    return ExitCode::from(2);
+                }
                 if json {
                     println!(
                         "{}",

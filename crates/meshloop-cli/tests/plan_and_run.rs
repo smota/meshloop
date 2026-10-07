@@ -1309,6 +1309,108 @@ fn mutate_plan_with_require_review_gates_resume() {
     fs::remove_dir_all(&dir).ok();
 }
 
+fn empty_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("meshloop-cli-empty-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn status_honours_config_and_db_outside_cwd() {
+    let dir = disposable_repo("status-cfg");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g_status_cfg","nodes":[{"id":1,"description":"first task","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    let db_path = dir.join("state.sqlite");
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--fixture-only", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--worktree-base")
+        .arg(dir.join("worktrees"))
+        .output()
+        .expect("run CLI");
+    assert!(run.status.success(), "run failed: {:?}", run);
+
+    let elsewhere = empty_temp_dir("status-cfg-cwd");
+    let out = meshloop()
+        .current_dir(&elsewhere)
+        .args(["status", "--graph", "g_status_cfg", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--json")
+        .output()
+        .expect("status CLI");
+    assert!(out.status.success(), "status failed: {:?}", out);
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("status stdout is JSON");
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["data"]["graph_id"], "g_status_cfg");
+    let ids: Vec<u64> = parsed["data"]["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .filter_map(|n| n["id"].as_u64())
+        .collect();
+    assert_eq!(ids, vec![1]);
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&elsewhere).ok();
+}
+
+#[test]
+fn status_without_any_config_is_an_error() {
+    let elsewhere = empty_temp_dir("status-noconfig");
+    let out = meshloop()
+        .current_dir(&elsewhere)
+        .args(["status", "--json"])
+        .output()
+        .expect("status CLI");
+    assert!(!out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("status stdout is JSON");
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed.to_string().contains("config"),
+        "error should mention the config: {parsed}"
+    );
+    fs::remove_dir_all(&elsewhere).ok();
+}
+
+#[test]
+fn status_with_unknown_graph_is_an_error_naming_it() {
+    let dir = disposable_repo("status-unknown");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let out = meshloop()
+        .current_dir(&dir)
+        .args(["status", "--graph", "nope", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(dir.join("state.sqlite"))
+        .output()
+        .expect("status CLI");
+    assert!(!out.status.success());
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("status stdout is JSON");
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed.to_string().contains("nope"),
+        "error should name the graph: {parsed}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 #[test]
 fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
     let dir = disposable_repo("json-clean");
