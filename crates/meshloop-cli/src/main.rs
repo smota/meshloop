@@ -6,6 +6,7 @@ mod args;
 mod compose;
 mod config;
 mod context_tools;
+mod gitignore;
 mod json_out;
 mod mcp;
 mod report;
@@ -81,7 +82,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         }
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
-        Command::Doctor { config } => cmd_doctor(config, inv.json, inv.origin),
+        Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
         Command::Status { graph } => cmd_status(graph, inv.json, inv.origin),
         Command::Plan {
             objective,
@@ -235,7 +236,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             inv.json,
             inv.origin,
         ),
-        Command::Bundle { dest } => cmd_bundle(dest, inv.json, inv.origin),
+        Command::Bundle { dest, gitignore } => cmd_bundle(dest, gitignore, inv.json, inv.origin),
         Command::AstSkeleton { path } => cmd_ast_skeleton(&path, inv.json, inv.origin),
         Command::SymbolLookup { query, k, scope } => {
             cmd_symbol_lookup(&query, k, scope.as_deref(), inv.json, inv.origin)
@@ -1371,9 +1372,16 @@ fn cmd_symbol_lookup(
     }
 }
 
-fn cmd_bundle(dest: PathBuf, json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
-    match session_bundle::write_to(&dest) {
-        Ok(files) => {
+fn cmd_bundle(
+    dest: PathBuf,
+    gitignore: bool,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let written = session_bundle::write_to(&dest)
+        .and_then(|files| gitignore::bundle_check(&dest, gitignore).map(|g| (files, g)));
+    match written {
+        Ok((files, ignore)) => {
             if json {
                 let paths: Vec<String> = files
                     .iter()
@@ -1388,11 +1396,27 @@ fn cmd_bundle(dest: PathBuf, json: bool, origin: meshloop_engine::origin::Origin
                             "dest": dest.to_string_lossy(),
                             "version": env!("CARGO_PKG_VERSION"),
                             "files": paths,
+                            "gitignore": ignore.as_str(),
+                            "gitignore_line": gitignore::IGNORE_LINE,
                         }),
                     )
                 );
             } else {
                 println!("bundled to {}", dest.display());
+                println!("gitignore: {}", ignore.as_str());
+                if ignore == gitignore::BundleIgnore::Missing {
+                    eprintln!(
+                        "add this line to {}/.gitignore (or rerun with --gitignore): {}",
+                        dest.display(),
+                        gitignore::IGNORE_LINE
+                    );
+                }
+            }
+            if json && ignore == gitignore::BundleIgnore::Missing {
+                eprintln!(
+                    "gitignore: missing; add `{}` to .gitignore (or rerun with --gitignore)",
+                    gitignore::IGNORE_LINE
+                );
             }
             ExitCode::SUCCESS
         }
@@ -1438,6 +1462,7 @@ fn cmd_roles(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
 
 fn cmd_doctor(
     config: Option<PathBuf>,
+    db: Option<PathBuf>,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
@@ -1466,6 +1491,7 @@ fn cmd_doctor(
         },
     };
     let harnesses_ready = error.is_none();
+    let store_ignored = gitignore::store_ignored(&db.unwrap_or_else(|| compose::default_db(&repo_root())));
 
     let data = serde_json::json!({
         "daemonless": true,
@@ -1481,6 +1507,7 @@ fn cmd_doctor(
         "config": config_path.as_ref().map(|p| p.display().to_string()),
         "harnesses_ready": harnesses_ready,
         "harnesses": harnesses,
+        "store_ignored": store_ignored,
         "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
     if json {
@@ -1506,6 +1533,13 @@ fn cmd_doctor(
                 format!("not ready: {}", h["reason"].as_str().unwrap_or("unknown"))
             };
             println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
+        }
+        println!("  store_ignored: {store_ignored}");
+        if !store_ignored {
+            println!(
+                "  fix: add `{}` to .gitignore, or run `meshloop bundle --dest . --gitignore`",
+                gitignore::IGNORE_LINE
+            );
         }
         if let Some(e) = &error {
             println!("  error: {e}");

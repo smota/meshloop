@@ -21,6 +21,7 @@ pub enum Command {
     Roles,
     Doctor {
         config: Option<PathBuf>,
+        db: Option<PathBuf>,
     },
     Status {
         graph: Option<String>,
@@ -108,6 +109,7 @@ pub enum Command {
     },
     Bundle {
         dest: PathBuf,
+        gitignore: bool,
     },
     AstSkeleton {
         path: String,
@@ -168,6 +170,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         Some(v) if v == "roles" => Ok(Command::Roles),
         Some(v) if v == "doctor" => Ok(Command::Doctor {
             config: flag_value(&args[1..], "--config").map(PathBuf::from),
+            db: flag_value(&args[1..], "--db").map(PathBuf::from),
         }),
         Some(v) if v == "plan" => {
             let rest = &args[1..];
@@ -348,6 +351,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 dest: flag_value(rest, "--dest")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("dist/meshloop-session-bundle")),
+                gitignore: has_flag(rest, "--gitignore"),
             })
         }
         Some(v) if v == "ast-skeleton" => {
@@ -411,11 +415,11 @@ pub fn help_text() -> &'static str {
      \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
      \x20 meshloop status [--graph <id>] [--json]\n\
      \x20 meshloop roles [--json]\n\
-     \x20 meshloop doctor [--config <path>] [--json]\n\
+     \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
      \x20 meshloop mutate-plan [--graph <id>] (--mutation <json> | --mutation-file <path>) [--require-review] [--json]\n\
      \x20 meshloop mcp\n\
-     \x20 meshloop bundle [--dest <dir>]\n\
+     \x20 meshloop bundle [--dest <dir>] [--gitignore]\n\
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
      \x20 or MESHLOOP_ORIGIN_HARNESS / MESHLOOP_ORIGIN_SESSION.\n\
      Live workers are the default (Herdr). --fixture-only forces the CI subprocess double."
