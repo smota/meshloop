@@ -19,7 +19,7 @@ use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::converge::{RepairAction, RepairBudget, RepairSession};
-use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose};
+use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_with_retry};
 use crate::ports::{
     AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, LiveCheck,
     ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord, WorkspaceError,
@@ -297,8 +297,14 @@ impl<'a> RunLoop<'a> {
             wt.clone(),
             self.limits.task_timeout,
         );
-        let graph = decompose(harness, &spec).map_err(OrchestratorError::Plan)?;
-        let mut graph = graph;
+        let rejected_dir = self
+            .workspace
+            .repo_root()
+            .join(".meshloop")
+            .join("rejected-plans");
+        let mut graph =
+            decompose_with_retry(harness, &spec, self.limits.max_retries, &rejected_dir)
+                .map_err(OrchestratorError::Plan)?;
         assign_tiers(&mut graph, &DefaultTierAssigner);
         Ok(graph)
     }

@@ -370,6 +370,10 @@ fn cmd_plan(
             eprintln!("Run `meshloop doctor --config <path>` for per-harness readiness.");
             return ExitCode::from(1);
         }
+        Err(OrchestratorError::Plan(e)) => {
+            eprintln!("Decomposition failed: {e}");
+            return ExitCode::from(1);
+        }
         Err(e) => {
             eprintln!("Decomposition failed: {e:?}");
             return ExitCode::from(1);
@@ -542,7 +546,12 @@ fn cmd_review_plan(
         ) {
             Ok(g) => graph = g,
             Err(e) => {
-                eprintln!("Adjust decomposition failed: {e:?}");
+                match &e {
+                    OrchestratorError::Plan(p) => {
+                        eprintln!("Adjust decomposition failed: {p}")
+                    }
+                    _ => eprintln!("Adjust decomposition failed: {e:?}"),
+                }
                 return ExitCode::from(1);
             }
         }
