@@ -112,13 +112,53 @@ fn handle_line(line: &str) -> String {
     }
 }
 
-fn tool_list() -> Vec<Value> {
+pub(crate) fn tool_list() -> Vec<Value> {
     bundled_commands()
         .iter()
         .filter(|c| **c != "meshloop:mcp")
         .filter_map(|c| MeshloopId::parse(c).ok())
-        .map(|id| {
-            json!({
+        .map(|id| match id.as_str() {
+            "meshloop:ast-skeleton" => json!({
+                "name": id.mcp_tool(),
+                "description": "Return the AST skeleton of one source or Markdown file inside the \
+                    server's working directory: signatures, types, and docs kept, bodies elided. \
+                    Reports original and pruned approximate token counts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path, relative to the server's working directory"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            "meshloop:symbol-lookup" => json!({
+                "name": id.mcp_tool(),
+                "description": "Rank declared symbols across the server's working directory with the \
+                    quantized FWHT signature index. Reports index build and search time separately. \
+                    Multi-token queries or signature fragments rank best; a single short identifier \
+                    can collide with unrelated entries in the 64-dimension sketch.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Free-text symbol query" },
+                        "k": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": crate::context_tools::MAX_LOOKUP_K,
+                            "default": crate::context_tools::DEFAULT_LOOKUP_K
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "Subdirectory to index, relative to the working directory"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            _ => json!({
                 "name": id.mcp_tool(),
                 "description": format!("Meshloop {} (canonical {})", id.cli_verb(), id.as_str()),
                 "inputSchema": {
@@ -128,9 +168,35 @@ fn tool_list() -> Vec<Value> {
                         "args": { "type": "array", "items": { "type": "string" } }
                     }
                 }
-            })
+            }),
         })
         .collect()
+}
+
+/// Map a context tool's typed arguments to CLI flags. Other tools pass `args` through.
+fn typed_flags(id: &MeshloopId, arguments: &Value) -> Result<Vec<String>, String> {
+    let text = |key: &str| arguments.get(key).and_then(|v| v.as_str());
+    match id.as_str() {
+        "meshloop:ast-skeleton" => {
+            let path = text("path").ok_or("meshloop_ast_skeleton requires a string `path`")?;
+            Ok(vec!["--path".into(), path.into()])
+        }
+        "meshloop:symbol-lookup" => {
+            let query = text("query").ok_or("meshloop_symbol_lookup requires a string `query`")?;
+            let mut flags = vec!["--query".to_string(), query.to_string()];
+            if let Some(k) = arguments.get("k") {
+                let k = k
+                    .as_u64()
+                    .ok_or("meshloop_symbol_lookup `k` must be a positive integer")?;
+                flags.extend(["--k".to_string(), k.to_string()]);
+            }
+            if let Some(scope) = text("scope") {
+                flags.extend(["--scope".to_string(), scope.to_string()]);
+            }
+            Ok(flags)
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
@@ -148,6 +214,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let typed = typed_flags(&id, arguments)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg(id.cli_verb()).arg("--json");
@@ -157,6 +224,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
     if let Some(s) = arguments.get("origin_session").and_then(|v| v.as_str()) {
         cmd.arg("--origin-session").arg(s);
     }
+    cmd.args(typed);
     for a in extra {
         cmd.arg(a);
     }
@@ -197,6 +265,45 @@ mod tests {
         let line_2026 = r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2026-01-01"}}"#;
         let reply_2026 = handle_line(line_2026);
         assert!(reply_2026.contains("2026-01-01"));
+    }
+
+    #[test]
+    fn context_tools_are_listed_with_typed_schemas() {
+        let tools = tool_list();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from tools/list"))
+                .clone()
+        };
+        let skel = find("meshloop_ast_skeleton");
+        assert_eq!(skel["inputSchema"]["required"], json!(["path"]));
+        let lookup = find("meshloop_symbol_lookup");
+        assert_eq!(lookup["inputSchema"]["required"], json!(["query"]));
+        assert_eq!(lookup["inputSchema"]["properties"]["k"]["type"], "integer");
+    }
+
+    #[test]
+    fn typed_flags_map_and_validate_arguments() {
+        let skel = MeshloopId::parse("meshloop_ast_skeleton").unwrap();
+        assert_eq!(
+            typed_flags(&skel, &json!({"path": "src/lib.rs"})).unwrap(),
+            vec!["--path", "src/lib.rs"]
+        );
+        assert!(typed_flags(&skel, &json!({})).is_err());
+
+        let lookup = MeshloopId::parse("meshloop_symbol_lookup").unwrap();
+        assert_eq!(
+            typed_flags(
+                &lookup,
+                &json!({"query": "Ledger", "k": 5, "scope": "crates"})
+            )
+            .unwrap(),
+            vec!["--query", "Ledger", "--k", "5", "--scope", "crates"]
+        );
+        assert!(typed_flags(&lookup, &json!({"query": "x", "k": -1})).is_err());
+        assert!(typed_flags(&lookup, &json!({"k": 3})).is_err());
     }
 
     #[test]

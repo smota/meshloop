@@ -109,6 +109,14 @@ pub enum Command {
     Bundle {
         dest: PathBuf,
     },
+    AstSkeleton {
+        path: String,
+    },
+    SymbolLookup {
+        query: String,
+        k: usize,
+        scope: Option<String>,
+    },
     MutatePlan {
         graph: Option<String>,
         mutation_file: Option<PathBuf>,
@@ -340,6 +348,27 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 dest: flag_value(rest, "--dest")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("dist/meshloop-session-bundle")),
+            })
+        }
+        Some(v) if v == "ast-skeleton" => {
+            let path = flag_value(&args[1..], "--path")
+                .ok_or_else(|| "meshloop:ast-skeleton requires --path <file>".to_string())?;
+            Ok(Command::AstSkeleton { path })
+        }
+        Some(v) if v == "symbol-lookup" => {
+            let rest = &args[1..];
+            let query = flag_value(rest, "--query")
+                .ok_or_else(|| "meshloop:symbol-lookup requires --query \"<text>\"".to_string())?;
+            let k = match flag_value(rest, "--k") {
+                Some(raw) => raw.parse().map_err(|_| {
+                    format!("meshloop:symbol-lookup --k expects a number, got {raw}")
+                })?,
+                None => crate::context_tools::DEFAULT_LOOKUP_K,
+            };
+            Ok(Command::SymbolLookup {
+                query,
+                k,
+                scope: flag_value(rest, "--scope"),
             })
         }
         Some(v) if v == "mutate-plan" => {

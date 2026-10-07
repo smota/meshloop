@@ -42,7 +42,8 @@ Native Windows (`rustc 1.98.0`).
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
   `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (reports `daemonless: true`),
   `orchestrate`, **`mutate-plan`** (ADR 0028), `mcp` (with MCP protocol version negotiation and resource/prompt support, ADR 0027),
-  `bundle`. Store: `.meshloop/state.sqlite`.
+  `bundle`, `ast-skeleton` and `symbol-lookup` (also MCP tools `meshloop_ast_skeleton` /
+  `meshloop_symbol_lookup`, issue #7). Store: `.meshloop/state.sqlite`.
 - **ADRs:** 0001–0022 accepted. 0023, 0025, 0028, 0030 accepted. 0024, 0026, 0027, 0029 proposed & implemented/verified.
 - **xtask:** commands for `check`, `bench` (SPEC-ML-BENCH-001 scorecard), `bench-dag`, `bench-world-s`, `live`, `smoke`, `bundle`, `publish-dry`.
 

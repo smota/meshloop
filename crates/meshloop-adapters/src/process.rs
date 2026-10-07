@@ -3,7 +3,9 @@
 
 use std::process::Command;
 
+pub mod detach;
 pub mod job;
+pub use detach::spawn_detached;
 pub use job::{OwnedChild, spawn_owned};
 
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};

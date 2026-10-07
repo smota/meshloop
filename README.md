@@ -217,6 +217,8 @@ Every capability is universally accessible across terminal CLI verbs, in-agent s
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agent harnesses. |
 | `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
 | `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
+| `meshloop:ast-skeleton` | — | `meshloop_ast_skeleton` | `meshloop ast-skeleton --path <file>` | **Context:** Returns one file's AST skeleton (bodies elided) with approximate token counts. Read-only; confined to the working directory. |
+| `meshloop:symbol-lookup` | — | `meshloop_symbol_lookup` | `meshloop symbol-lookup --query <text>` | **Context:** Ranks declared symbols across the working directory with the quantized signature index; reports index build and search time separately. |
 
 *Full workflow walkthrough: **[Getting Started Guide](docs/start.md)**.*
 

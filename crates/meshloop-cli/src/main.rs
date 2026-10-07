@@ -5,6 +5,7 @@
 mod args;
 mod compose;
 mod config;
+mod context_tools;
 mod json_out;
 mod mcp;
 mod report;
@@ -235,6 +236,10 @@ fn dispatch(inv: Invocation) -> ExitCode {
             inv.origin,
         ),
         Command::Bundle { dest } => cmd_bundle(dest, inv.json, inv.origin),
+        Command::AstSkeleton { path } => cmd_ast_skeleton(&path, inv.json, inv.origin),
+        Command::SymbolLookup { query, k, scope } => {
+            cmd_symbol_lookup(&query, k, scope.as_deref(), inv.json, inv.origin)
+        }
         Command::MutatePlan {
             graph,
             mutation_file,
@@ -785,19 +790,7 @@ fn cmd_run(
         if fixture_only {
             cmd.arg("--fixture-only");
         }
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-
-        match cmd.spawn() {
+        match meshloop_adapters::process::spawn_detached(cmd) {
             Ok(_) => {
                 if json {
                     println!(
@@ -1301,6 +1294,81 @@ fn cmd_integrate(
             ExitCode::from(1)
         }
     })
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    env::current_dir().map_err(|e| format!("cannot read current directory: {e}"))
+}
+
+fn cmd_ast_skeleton(path: &str, json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
+    match workspace_root().and_then(|root| context_tools::ast_skeleton(&root, path)) {
+        Ok(data) => {
+            if json {
+                println!("{}", json_out::ok("meshloop:ast-skeleton", origin, data));
+            } else {
+                eprintln!(
+                    "{} ({}): {} -> {} approx tokens, {}% saved",
+                    data["path"].as_str().unwrap_or_default(),
+                    data["language"].as_str().unwrap_or_default(),
+                    data["original_approx_tokens"],
+                    data["pruned_approx_tokens"],
+                    data["savings_percentage"],
+                );
+                println!("{}", data["skeleton"].as_str().unwrap_or_default());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", json_out::err("meshloop:ast-skeleton", origin, e));
+            } else {
+                eprintln!("{e}");
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_symbol_lookup(
+    query: &str,
+    k: usize,
+    scope: Option<&str>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    match workspace_root().and_then(|root| context_tools::symbol_lookup(&root, query, k, scope)) {
+        Ok(data) => {
+            if json {
+                println!("{}", json_out::ok("meshloop:symbol-lookup", origin, data));
+            } else {
+                println!(
+                    "indexed {} files ({} entries) in {} us; search {} us",
+                    data["files_indexed"],
+                    data["entries_indexed"],
+                    data["index_build_us"],
+                    data["search_us"],
+                );
+                for hit in data["hits"].as_array().into_iter().flatten() {
+                    println!(
+                        "{:>8} {} {} [{}]",
+                        hit["score"],
+                        hit["path"].as_str().unwrap_or_default(),
+                        hit["name"].as_str().unwrap_or_default(),
+                        hit["kind"].as_str().unwrap_or_default(),
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", json_out::err("meshloop:symbol-lookup", origin, e));
+            } else {
+                eprintln!("{e}");
+            }
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn cmd_bundle(dest: PathBuf, json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {

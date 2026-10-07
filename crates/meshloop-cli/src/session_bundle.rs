@@ -51,9 +51,24 @@ pub fn files() -> &'static [BundledFile] {
 }
 
 pub fn catalog_json(version: &str) -> String {
-    format!(
-        "{{\n  \"name\": \"meshloop-session-bundle\",\n  \"version\": \"{version}\",\n  \"namespace\": \"meshloop:\",\n  \"mcp\": \"meshloop mcp\",\n  \"slash_prefix\": \"/meshloop:\",\n  \"roles\": [\"meshloop:origin\",\"meshloop:planner\",\"meshloop:scout\",\"meshloop:worker\",\"meshloop:reviewer\"]\n}}\n"
-    )
+    let catalog = serde_json::json!({
+        "name": "meshloop-session-bundle",
+        "version": version,
+        "namespace": "meshloop:",
+        "mcp": "meshloop mcp",
+        "slash_prefix": "/meshloop:",
+        "roles": [
+            "meshloop:origin",
+            "meshloop:planner",
+            "meshloop:scout",
+            "meshloop:worker",
+            "meshloop:reviewer"
+        ],
+        "tools": crate::mcp::tool_list(),
+    });
+    let mut text = serde_json::to_string_pretty(&catalog).unwrap_or_else(|_| "{}".into());
+    text.push('\n');
+    text
 }
 
 pub fn pack_readme() -> &'static str {
