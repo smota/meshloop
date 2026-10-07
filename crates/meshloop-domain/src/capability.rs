@@ -18,9 +18,42 @@ pub struct HarnessProfile {
     pub supports_noninteractive: bool,
     pub supports_structured_output: bool,
     pub supports_cancellation: bool,
+    /// Why the harness is not dispatchable, when known (probe timeout, failed version
+    /// call, no non-interactive invoke template). Surfaced in diagnostics, never routed on.
+    pub reason: Option<String>,
 }
 
 impl HarnessProfile {
+    /// A profile for a harness that could not be confirmed, with the reason it was rejected.
+    pub fn unsupported(harness: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            harness: harness.into(),
+            version: String::new(),
+            compatibility: Compatibility::Unsupported,
+            supports_noninteractive: false,
+            supports_structured_output: false,
+            supports_cancellation: false,
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// Human-readable reason this profile is not dispatchable, or `None` when it is.
+    pub fn rejection_reason(&self) -> Option<String> {
+        if self.is_dispatchable() {
+            return None;
+        }
+        if let Some(r) = &self.reason {
+            return Some(r.clone());
+        }
+        Some(if self.compatibility == Compatibility::Unsupported {
+            "unsupported".into()
+        } else if !self.supports_noninteractive {
+            "no non-interactive invocation".into()
+        } else {
+            "cancellation not supported".into()
+        })
+    }
+
     /// A harness must be Compatible/Degraded, non-interactive, and cancellable to ever be
     /// a routing candidate — an unconfirmed capability is never assumed present.
     pub fn is_dispatchable(&self) -> bool {
@@ -171,8 +204,10 @@ mod tests {
             supports_noninteractive: true,
             supports_structured_output: false,
             supports_cancellation: true,
+            reason: None,
         };
         assert!(base.is_dispatchable());
+        assert_eq!(base.rejection_reason(), None);
 
         let mut unsupported = base.clone();
         unsupported.compatibility = Compatibility::Unsupported;
@@ -181,5 +216,15 @@ mod tests {
         let mut no_cancel = base;
         no_cancel.supports_cancellation = false;
         assert!(!no_cancel.is_dispatchable());
+    }
+
+    #[test]
+    fn unsupported_profile_carries_its_reason() {
+        let p = HarnessProfile::unsupported("grok", "probe timed out after 15s");
+        assert!(!p.is_dispatchable());
+        assert_eq!(
+            p.rejection_reason().as_deref(),
+            Some("probe timed out after 15s")
+        );
     }
 }

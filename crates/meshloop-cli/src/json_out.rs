@@ -36,3 +36,16 @@ pub fn err(command: &str, origin: Origin, error: impl ToString) -> String {
     })
     .unwrap_or_else(|_| "{\"ok\":false}".into())
 }
+
+/// An envelope that carries `data` whatever the outcome, for diagnostics such as `doctor`
+/// where a failing result still has a useful per-item report.
+pub fn report(command: &str, origin: Origin, error: Option<String>, data: Value) -> String {
+    serde_json::to_string_pretty(&Envelope {
+        ok: error.is_none(),
+        command: command.into(),
+        origin,
+        error,
+        data,
+    })
+    .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialize\"}".into())
+}

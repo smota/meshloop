@@ -21,6 +21,7 @@ fn harness_with_invoke() -> CliHarness {
         name: "fixture".into(),
         executable: fixture_path(),
         version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec!["--prompt-file".into(), "{prompt_file}".into()],
     })
 }
@@ -43,6 +44,7 @@ fn probe_reports_the_fixtures_real_reported_version() {
         name: "fixture".into(),
         executable: fixture_path(),
         version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
     });
     let profile = harness.probe().expect("probe should succeed");
@@ -56,6 +58,7 @@ fn probe_marks_a_failing_executable_unsupported_not_a_crash() {
         name: "fixture".into(),
         executable: fixture_path(),
         version_args: vec!["--fail".into()],
+        probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
     });
     let profile = harness
@@ -65,11 +68,67 @@ fn probe_marks_a_failing_executable_unsupported_not_a_crash() {
 }
 
 #[test]
+fn probe_of_a_non_exiting_version_call_times_out_unsupported() {
+    // Regression for issue #9: a bare interactive CLI used to block `plan` forever.
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--hang".into()],
+        probe_timeout: Duration::from_millis(500),
+        invoke_args_template: vec!["--prompt-file".into(), "{prompt_file}".into()],
+    });
+    let start = std::time::Instant::now();
+    let profile = harness
+        .probe()
+        .expect("a hung probe reports unsupported, not an error");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "probe must be bounded, took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(profile.compatibility, Compatibility::Unsupported);
+    assert!(!profile.is_dispatchable());
+    let reason = profile.rejection_reason().unwrap_or_default();
+    assert!(reason.contains("probe timed out"), "{reason}");
+}
+
+#[test]
+fn probe_without_an_invoke_template_is_not_dispatchable_and_says_why() {
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
+        invoke_args_template: vec![],
+    });
+    let profile = harness.probe().expect("probe should succeed");
+    assert_eq!(profile.compatibility, Compatibility::Compatible);
+    assert!(!profile.is_dispatchable());
+    let reason = profile.rejection_reason().unwrap_or_default();
+    assert!(reason.contains("invoke_args_template"), "{reason}");
+}
+
+#[test]
+fn probe_failure_reason_names_the_exit_code() {
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--fail".into()],
+        probe_timeout: Duration::from_secs(10),
+        invoke_args_template: vec![],
+    });
+    let profile = harness.probe().expect("probe should succeed");
+    let reason = profile.rejection_reason().unwrap_or_default();
+    assert!(reason.contains("exited with 1"), "{reason}");
+}
+
+#[test]
 fn invoke_without_a_configured_template_is_unsupported() {
     let harness = CliHarness::new(CliHarnessConfig {
         name: "fixture".into(),
         executable: fixture_path(),
         version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
     });
     let dir = std::env::temp_dir();
@@ -101,6 +160,7 @@ fn cancel_terminates_a_hung_process_and_is_idempotent() {
         name: "fixture".into(),
         executable: fixture_path(),
         version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec!["--hang".into()],
     });
     let dir = std::env::temp_dir().join(format!("meshloop-test-{}-b", std::process::id()));

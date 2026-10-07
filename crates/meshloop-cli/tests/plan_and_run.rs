@@ -404,8 +404,12 @@ fn roles_json_is_prefixed_and_namespaced_alias_works() {
 
 #[test]
 fn doctor_json_includes_origin_and_live_default() {
+    let dir = disposable_repo("doctor-ok");
+    let config_path = write_config(&dir, r#"["--emit-graph"]"#);
     let output = meshloop()
-        .args(["doctor", "--json"])
+        .current_dir(&dir)
+        .args(["doctor", "--json", "--config"])
+        .arg(&config_path)
         .output()
         .expect("doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -414,6 +418,95 @@ fn doctor_json_includes_origin_and_live_default() {
     assert!(stdout.contains("origin_session"));
     assert!(stdout.contains("live_default"));
     assert!(stdout.contains("ci-double"));
+    assert!(stdout.contains("\"harnesses_ready\": true"), "{stdout}");
+    assert!(stdout.contains("fixture-harness 1.0.0"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_without_a_config_is_not_ok() {
+    // Issue #9: doctor used to report ok with no config present.
+    let dir = disposable_repo("doctor-none");
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"ok\": false"), "{stdout}");
+    assert!(stdout.contains("no config found"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_reports_why_each_harness_is_not_ready() {
+    let dir = disposable_repo("doctor-reasons");
+    let config_path = write_config(&dir, "[]");
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--json", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"harnesses_ready\": false"), "{stdout}");
+    assert!(stdout.contains("invoke_args_template"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn plan_fails_fast_with_reasons_when_the_probe_hangs() {
+    // Issue #9: a harness whose version call never exits blocked `plan` forever.
+    let dir = disposable_repo("plan-hang");
+    let config_path = dir.join("meshloop.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 1
+task_timeout_seconds = 30
+probe_timeout_seconds = 1
+
+[harnesses.fixture]
+executable = "{}"
+version_args = ["--hang"]
+invoke_args_template = ["--emit-graph"]
+model_ref = "fixture-model"
+model_tier = "top"
+"#,
+            fixture_path().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["plan", "--objective", "x", "--config"])
+        .arg(&config_path)
+        .arg("--out")
+        .arg(dir.join("plan.json"))
+        .output()
+        .expect("run meshloop plan");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "plan must be bounded by the probe timeout, took {:?}",
+        start.elapsed()
+    );
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("fixture: probe timed out after 1s"),
+        "{stderr}"
+    );
+    assert!(!dir.join("plan.json").exists());
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

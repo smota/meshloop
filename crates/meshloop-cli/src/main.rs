@@ -80,7 +80,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
         }
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
-        Command::Doctor => cmd_doctor(inv.json, inv.origin),
+        Command::Doctor { config } => cmd_doctor(config, inv.json, inv.origin),
         Command::Status { graph } => cmd_status(graph, inv.json, inv.origin),
         Command::Plan {
             objective,
@@ -266,7 +266,12 @@ fn load_cfg(config: Option<PathBuf>) -> Result<(crate::config::Config, PathBuf),
         }
     };
     match crate::config::load(&path) {
-        Ok(c) => Ok((c, path)),
+        Ok(c) => {
+            for (name, why) in crate::config::dispatch_warnings(&c) {
+                eprintln!("warning: harness '{name}': {why}");
+            }
+            Ok((c, path))
+        }
         Err(e) => {
             eprintln!("failed to load config: {e:?}");
             Err(ExitCode::from(2))
@@ -342,11 +347,24 @@ fn cmd_plan(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
     };
+    eprintln!(
+        "meshloop:plan probing {} harness(es) in parallel (timeout {}s)",
+        cfg.selected_harnesses.len(),
+        cfg.limits.probe_timeout_seconds
+    );
     let graph = match saga.plan(
         &objective,
         scope.as_deref().unwrap_or("scope: this repository only"),
     ) {
         Ok(g) => g,
+        Err(OrchestratorError::NoCandidate(rejections)) => {
+            eprintln!("Decomposition failed: no harness can run the planner.");
+            for r in &rejections {
+                eprintln!("  {}: {}", r.harness, r.reason);
+            }
+            eprintln!("Run `meshloop doctor --config <path>` for per-harness readiness.");
+            return ExitCode::from(1);
+        }
         Err(e) => {
             eprintln!("Decomposition failed: {e:?}");
             return ExitCode::from(1);
@@ -1350,9 +1368,37 @@ fn cmd_roles(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_doctor(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
+fn cmd_doctor(
+    config: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
     let origin_session = origin.session.clone();
     let origin_harness = origin.harness.clone();
+
+    let (config_path, harnesses, error) = match crate::config::discover(config.as_deref()) {
+        Err(_) => (
+            None,
+            Vec::new(),
+            Some("no config found; pass --config or add meshloop.toml".to_string()),
+        ),
+        Ok(path) => match crate::config::load(&path) {
+            Err(e) => (
+                Some(path),
+                Vec::new(),
+                Some(format!("failed to load config: {e:?}")),
+            ),
+            Ok(cfg) => {
+                let rows = doctor_probe(&cfg);
+                let error = (!rows.iter().any(|r| r["dispatchable"] == true)).then(|| {
+                    "no selected harness is dispatchable; see data.harnesses[].reason".to_string()
+                });
+                (Some(path), rows, error)
+            }
+        },
+    };
+    let harnesses_ready = error.is_none();
+
     let data = serde_json::json!({
         "daemonless": true,
         "origin_session": origin_session,
@@ -1364,10 +1410,16 @@ fn cmd_doctor(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
         "namespace": "meshloop:",
         "supervisor_only": true,
         "kinds": ["claude", "codex", "pi", "grok", "agy"],
-        "note": "Doctor reports standalone environment. Live workers run as direct CLI subprocesses in Git worktrees.",
+        "config": config_path.as_ref().map(|p| p.display().to_string()),
+        "harnesses_ready": harnesses_ready,
+        "harnesses": harnesses,
+        "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
     if json {
-        println!("{}", json_out::ok("meshloop:doctor", origin, data));
+        println!(
+            "{}",
+            json_out::report("meshloop:doctor", origin, error.clone(), data)
+        );
     } else {
         println!("meshloop:doctor");
         println!("  daemonless: true");
@@ -1375,8 +1427,77 @@ fn cmd_doctor(json: bool, origin: meshloop_engine::origin::Origin) -> ExitCode {
         println!("  origin harness: {origin_harness:?}");
         println!("  live transport: direct-cli (default) | fixture: CI subprocess");
         println!("  namespace: meshloop: | origin: supervisor-only");
+        match &config_path {
+            Some(p) => println!("  config: {}", p.display()),
+            None => println!("  config: (none)"),
+        }
+        for h in &harnesses {
+            let status = if h["dispatchable"] == true {
+                "ready".to_string()
+            } else {
+                format!("not ready: {}", h["reason"].as_str().unwrap_or("unknown"))
+            };
+            println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
+        }
+        if let Some(e) = &error {
+            println!("  error: {e}");
+        }
     }
-    ExitCode::SUCCESS
+    if harnesses_ready {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Runs every selected harness's bounded probe concurrently and reports per-harness
+/// readiness in configuration order. Opens no store and dispatches nothing.
+fn doctor_probe(cfg: &crate::config::Config) -> Vec<serde_json::Value> {
+    use meshloop_domain::capability::Compatibility;
+    let built: Vec<(String, meshloop_adapters::harness::CliHarness)> = cfg
+        .selected_harnesses
+        .iter()
+        .filter_map(|name| {
+            let hc = cfg.harnesses.get(name)?;
+            Some((name.clone(), compose::cli_harness(name, hc, &cfg.limits)))
+        })
+        .collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = built
+            .iter()
+            .map(|(name, h)| (name, scope.spawn(move || h.probe())))
+            .collect();
+        handles
+            .into_iter()
+            .map(|(name, handle)| {
+                let executable = &cfg.harnesses[name].executable;
+                match handle.join() {
+                    Ok(Ok(p)) => serde_json::json!({
+                        "name": name,
+                        "executable": executable,
+                        "version": p.version,
+                        "compatible": p.compatibility != Compatibility::Unsupported,
+                        "dispatchable": p.is_dispatchable(),
+                        "reason": p.rejection_reason(),
+                    }),
+                    Ok(Err(e)) => serde_json::json!({
+                        "name": name,
+                        "executable": executable,
+                        "compatible": false,
+                        "dispatchable": false,
+                        "reason": format!("probe failed: {e:?}"),
+                    }),
+                    Err(_) => serde_json::json!({
+                        "name": name,
+                        "executable": executable,
+                        "compatible": false,
+                        "dispatchable": false,
+                        "reason": "probe panicked",
+                    }),
+                }
+            })
+            .collect()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

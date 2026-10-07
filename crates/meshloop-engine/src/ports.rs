@@ -40,7 +40,8 @@ pub struct HarnessOutcome {
 }
 
 /// runtime-design.md §2: probe/invoke/cancel/collect, none assuming undiscovered behavior.
-pub trait HarnessCapabilities {
+/// `Sync` so the orchestrator can probe every configured harness concurrently.
+pub trait HarnessCapabilities: Sync {
     fn probe(&self) -> Result<HarnessProfile, HarnessError>;
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError>;
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError>;
