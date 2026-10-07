@@ -151,6 +151,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_db(&req.repo_root));
     let store = SqliteStore::open(&db).map_err(|e: StoreError| format!("{e:?}"))?;
+    crate::gitignore::ensure_store_ignored(&db);
     let wt = req
         .worktree_base
         .unwrap_or_else(|| default_worktree_base(&req.repo_root));

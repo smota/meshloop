@@ -110,6 +110,12 @@ sample is **not runnable as-is**. Every probe is bounded by `[limits] probe_time
 Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
 
 - **Database:** Local execution state is stored in `.meshloop/state.sqlite` (SQLite WAL mode).
+  **Ignore it in Git:** add `/.meshloop/` to your repository's `.gitignore`, or run
+  `meshloop bundle --dest . --gitignore` to append a marked, idempotent block
+  (`# >>> meshloop >>>` … `# <<< meshloop <<<`). Without `--gitignore`, `bundle` never edits
+  `.gitignore`; it reports `gitignore: missing` and prints the line to add. On first store
+  creation `plan`/`run` also write `.meshloop/.gitignore` (`*`) so the store never shows as
+  untracked. `meshloop doctor --json` reports `store_ignored`.
 - **Workspaces:** Isolated task executions occur in `.meshloop-worktrees/<task-id>`.
 
 ---

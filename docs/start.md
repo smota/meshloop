@@ -54,6 +54,10 @@ meshloop --version
 meshloop doctor
 ```
 
+The local store lives in `.meshloop/state.sqlite`. Keep it out of Git: add `/.meshloop/` to
+`.gitignore` or run `meshloop bundle --dest . --gitignore` (opt-in; see
+[Install and Setup](install.md)). `meshloop doctor --json` reports `store_ignored`.
+
 ### 1. Doctor — Verify Environment
 ```text
 /meshloop:doctor
