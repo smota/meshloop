@@ -190,3 +190,115 @@ fn collect_on_an_unknown_handle_is_unsupported_not_a_panic() {
         Err(HarnessError::ProcessFault { .. })
     ));
 }
+
+fn wait_until_dead(pid: u32) -> bool {
+    use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
+    let view = meshloop_adapters::process::HostProcessView {};
+    let hint = ProcessHint {
+        pid,
+        image_name: None,
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if view.is_live(&hint) != LiveCheck::Live {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
+    // Simulates recovery after a crash (#30): the attempt's process tree is still running but
+    // this harness instance never started it, so only the recorded pid is known.
+    let dir = std::env::temp_dir().join(format!("meshloop-test-{}-orphan", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("grandchild.pid");
+    let mut cmd = std::process::Command::new(fixture_path());
+    cmd.arg("--spawn-grandchild")
+        .arg(&pid_file)
+        .arg(dir.join("heartbeat.txt"));
+    let orphan = meshloop_adapters::process::spawn_owned(cmd).expect("spawn orphan tree");
+    let leader = orphan.id();
+    let start = std::time::Instant::now();
+    let grandchild: u32 = loop {
+        if let Some(pid) = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            break pid;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "grandchild never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Drop ownership without killing, as a crashed process would.
+    std::mem::forget(orphan);
+
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
+        invoke_args_template: vec![],
+    });
+    let handle = HarnessHandle {
+        attempt_id: AttemptId(4242),
+        pid: Some(leader),
+        pane_id: None,
+    };
+    harness
+        .cancel(&handle)
+        .expect("cancel of an untracked attempt");
+
+    assert!(
+        wait_until_dead(leader),
+        "orphaned leader {leader} survived cancel"
+    );
+    assert!(
+        wait_until_dead(grandchild),
+        "orphaned grandchild {grandchild} survived cancel"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn cancel_leaves_an_unrelated_process_with_a_recorded_pid_alone() {
+    // A recycled pid must not be killed: the recorded pid now belongs to another executable.
+    #[cfg(windows)]
+    let mut other = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+        .spawn()
+        .expect("spawn unrelated process");
+    #[cfg(not(windows))]
+    let mut other = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn unrelated process");
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
+        invoke_args_template: vec![],
+    });
+    let handle = HarnessHandle {
+        attempt_id: AttemptId(4243),
+        pid: Some(other.id()),
+        pane_id: None,
+    };
+    harness
+        .cancel(&handle)
+        .expect("cancel of an untracked attempt");
+    std::thread::sleep(Duration::from_millis(300));
+    let still_running = other.try_wait().expect("poll unrelated process").is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert!(
+        still_running,
+        "cancel killed a process that is not this harness"
+    );
+}

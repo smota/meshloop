@@ -711,6 +711,17 @@ impl<'a> RunLoop<'a> {
             };
             match self.attempt_live(&attempt) {
                 LiveCheck::Dead => {
+                    // The harness no longer tracks this attempt, but a previous Meshloop
+                    // process may have left its process tree running: end it before the
+                    // node is retried in a fresh attempt (#30). Cancel is idempotent.
+                    if let Some(h) = attempt
+                        .harness
+                        .as_deref()
+                        .and_then(|n| self.harnesses.get(n))
+                    {
+                        let _ =
+                            h.cancel(&Self::attempt_handle(&attempt, self.resolve_pane(&attempt)));
+                    }
                     let rec = self.append(
                         graph_id,
                         node.id,
