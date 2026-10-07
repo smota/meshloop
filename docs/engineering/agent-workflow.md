@@ -35,8 +35,9 @@ repository. The generic AgentFlow process is in [`docs/agent-workflow.md`](../ag
    comment in place. An issue has one writer at a time.
 5. Change issue bodies with section-targeted edits, as the issue standards describe. Fold any
    clarifications humans give in comments back into the body.
-6. Close issues through a PR that says `Implements #<n>`. After merging, tick the epic's
-   tracking box. Reconcile issues that were delivered without a PR by commenting with the
+6. Close issues through a PR whose body says `Implements #<n>` (the AgentFlow reference) and
+   `Closes #<n>` (GitHub closes the issue on merge; `Implements` alone does not). After
+   merging, tick the epic's tracking box. Reconcile issues that were delivered without a PR by commenting with the
    commit and the check evidence, then closing them.
 
 ## Delivery path
