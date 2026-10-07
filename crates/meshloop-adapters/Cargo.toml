@@ -27,6 +27,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
