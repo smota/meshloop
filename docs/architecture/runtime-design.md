@@ -10,14 +10,14 @@ owning ADR as a successor, per docs/architecture/adr/README.md.
 The full mechanism below is the v1 *target*. Release 1 implements the subset in
 ADR 0016 (native Windows, one sequential writer, live Herdr workers, fixture as
 CI double, `meshloop:review-plan` as the plan gate). Residuals (WSL2, concurrency
-> 1, packaging, queried quota) are named in implementation-status.md. Do not read
+> 1, packaging, queried quota) are tracked as GitHub `limitation` issues. Do not read
 unverified paragraphs as product. Operator path: [Getting started](../start.md).
 
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
 **Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes
 Linux via WSL2 on that same host — not a separate bare-metal Linux machine.
-**WSL2 is unverified in R1** (implementation-status.md). For a given run, the
+**WSL2 is unverified in R1** ([#20](https://github.com/smota/meshloop/issues/20)). For a given run, the
 Meshloop binary, the target repository's worktrees, the Herdr instance, and the harness
 CLIs must all stay on one side of the Windows/WSL boundary: crossing it (a worktree on the
 Windows filesystem accessed from inside WSL via `/mnt/c`, or the reverse via `\\wsl$`) hits

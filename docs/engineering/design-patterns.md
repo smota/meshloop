@@ -138,7 +138,7 @@ Serves ADR 0001's concurrency cap and ADR 0009's per-harness load balancing.
 
 ## Test double / fake object
 Serves testing.md's port/adapter split and is the mechanism that makes every pattern above
-independently testable before Phase 5's real adapters exist (implementation-plan.md).
+independently testable before the real adapters exist.
 - **Design**: every port gets one canonical in-memory fake, built alongside the trait in
   Phase 3 — not one ad hoc mock per test.
 - **Implement**: fakes must be able to simulate failure modes the real adapters can hit

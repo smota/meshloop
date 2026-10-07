@@ -32,6 +32,7 @@ Layer 4: Deep Architecture, Invariants, & Specifications
 | **Inspect empirical benchmarks & regression rigor** | [Product & Engineering Log](product/product-log.md) | [Benchmark Specification](architecture/measurement-and-benchmark-spec.md) | Marketing briefs |
 | **Inspect peer sparring & architectural decisions** | [Architectural Rounds & Decisions](engineering/architectural-rounds-and-decisions.md) | [ADR Index](architecture/adr/README.md) | Unverified proposals |
 | **Audit isolation, process ownership & security** | [Threat Model & Isolation Posture](architecture/threat-model.md) | [Process-Tree Ownership (ADR 0025)](architecture/adr/0025-process-tree-ownership.md) | Operator slash commands |
+| **Pick up, plan, or execute work as an agent** | [Agent Workflow & Operating Model](engineering/agent-workflow.md) | [GitHub Issues](https://github.com/smota/meshloop/issues) | Repository files as backlog |
 | **Contribute new languages, harnesses, or checks** | [Contributing Guide](../CONTRIBUTING.md) | [Testing & Verification Strategy](engineering/testing.md) | Pre-loop historical designs |
 
 ---
@@ -102,7 +103,7 @@ All operations are universally accessible via terminal slash commands, stdio Mod
 - **[Architecture Decision Records (ADRs)](architecture/adr/README.md)** — Authoritative decision index from **ADR 0001 through ADR 0031**.
 
 ### Empirical Benchmarks & Product Governance
-- **[Product & Engineering Log](product/product-log.md)** — Verifiable record of hardening cycles, E2E refinement rounds, and roadmap milestones.
+- **[Product & Engineering Log](product/product-log.md)** — Verifiable record of hardening cycles, E2E refinement rounds, and delivered milestones. Planned work lives in [GitHub issues](https://github.com/smota/meshloop/issues).
 - **[Architectural Rounds & Peer Sparring](engineering/architectural-rounds-and-decisions.md)** — In-depth analysis of peer sparring between Agy, Grok, and Claude, technical rejections, and test cycles.
 - **[Benchmark Specification (`SPEC-ML-BENCH-001`)](architecture/measurement-and-benchmark-spec.md)** — 28 active metrics, statistical definitions, and verification methodology.
 - **[Testing Strategy](engineering/testing.md)** — Test tiers, fault injection, and running `xtask check` and `xtask bench`.

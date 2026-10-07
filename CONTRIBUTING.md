@@ -48,6 +48,7 @@ To plug in new linters, type checkers, or test runners:
   cargo run -p xtask -- live     # Verifies daemonless direct-cli and worktree isolation
   ```
 - **Branch Naming:** `codex/<slug>` for Codex, `work/<slug>` for other harnesses.
+- **Backlog:** Work starts from a [GitHub issue](https://github.com/smota/meshloop/issues); the repository holds no backlog files. See [agent workflow](docs/engineering/agent-workflow.md).
 - **Privacy:** Never commit credentials, private API keys, prompts, or `.meshloop/` state.
 
 ---
