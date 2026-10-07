@@ -30,7 +30,7 @@ jobs:
       - name: End-to-End Sandbox Smoke Test
         run: cargo run -p xtask -- smoke
       - name: Algorithmic & Invariant Benchmark Suite
-        run: cargo run -p xtask -- bench
+        run: cargo run --release -p xtask -- bench
       - name: Upload Benchmark & Scorecard Artifacts
         if: always()
         uses: actions/upload-artifact@v4
