@@ -11,9 +11,11 @@ fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fixture_harness"))
 }
 
-fn disposable_dir() -> PathBuf {
+/// Tests run in parallel and the clock can repeat, so each caller names its own directory.
+fn disposable_dir(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "meshloop-check-{}",
+        "meshloop-check-{test}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -25,7 +27,7 @@ fn disposable_dir() -> PathBuf {
 
 #[test]
 fn captures_rustc_type_errors_from_stderr() {
-    let dir = disposable_dir();
+    let dir = disposable_dir("rustc");
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
         dir.join("src/lib.rs"),
@@ -64,7 +66,7 @@ fn captures_rustc_type_errors_from_stderr() {
 
 #[test]
 fn drains_large_stderr_without_pipe_deadlock() {
-    let dir = disposable_dir();
+    let dir = disposable_dir("drain");
     let runner = CommandCheckRunner;
     let exe = fixture_path().to_string_lossy().into_owned();
     let argv = vec![exe, "--fill-stderr".into(), "65536".into()];
