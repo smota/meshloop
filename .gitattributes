@@ -1,1 +1,4 @@
 * text=auto eol=lf
+# AgentFlow-managed files are hashed byte-for-byte in agent-framework-lock.json.
+schemas/*.schema.json -text
+manifests/*.json -text
