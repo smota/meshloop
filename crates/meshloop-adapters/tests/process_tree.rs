@@ -28,6 +28,56 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+/// Diagnostic only: pid, ppid, pgid, state and command of the given processes.
+fn process_snapshot(pids: &[u32]) -> String {
+    #[cfg(not(windows))]
+    {
+        let list = pids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        match std::process::Command::new("ps")
+            .args(["-o", "pid,ppid,pgid,stat,args", "-p", &list])
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            Err(e) => format!("ps failed: {e}"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        format!("pids {pids:?}")
+    }
+}
+
+/// Diagnostic only: repeats the group kill and reports how `kill` itself responded.
+fn retry_group_kill(pgid: u32) -> String {
+    #[cfg(not(windows))]
+    {
+        match std::process::Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{pgid}")])
+            .output()
+        {
+            Ok(out) => format!(
+                "status {:?}, stderr {:?}, kill at {:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr),
+                std::process::Command::new("sh")
+                    .args(["-c", "command -v kill; kill --version 2>&1 | head -1"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default()
+            ),
+            Err(e) => format!("kill failed to start: {e}"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        format!("not applicable (pgid {pgid})")
+    }
+}
+
 #[test]
 fn grandchild_dies_on_timeout() {
     let tmp = unique_temp_dir("grandchild_dies_on_timeout");
@@ -67,6 +117,8 @@ fn grandchild_dies_on_timeout() {
     );
 
     // Simulate timeout / orchestrator cancellation by killing the tree
+    let child_pid = owned.id();
+    let before_kill = process_snapshot(&[child_pid, grandchild_pid]);
     owned.kill_tree();
 
     // Verify child is dead
@@ -87,7 +139,9 @@ fn grandchild_dies_on_timeout() {
     assert_ne!(
         is_live,
         LiveCheck::Live,
-        "Grandchild process must be dead after tree kill"
+        "Grandchild process must be dead after tree kill\nbefore kill:\n{before_kill}\nafter kill:\n{}\nretry group kill: {}",
+        process_snapshot(&[child_pid, grandchild_pid]),
+        retry_group_kill(child_pid)
     );
 
     // Verify heartbeat file stopped changing
