@@ -160,6 +160,7 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
     for a in extra {
         cmd.arg(a);
     }
+    meshloop_adapters::process::hide_console(&mut cmd);
     let out = cmd.output().map_err(|e| e.to_string())?;
     Ok(format!(
         "{}{}",
