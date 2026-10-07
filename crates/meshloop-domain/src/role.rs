@@ -137,6 +137,8 @@ pub fn bundled_commands() -> &'static [&'static str] {
         "meshloop:mutate-plan",
         "meshloop:mcp",
         "meshloop:bundle",
+        "meshloop:ast-skeleton",
+        "meshloop:symbol-lookup",
     ]
 }
 

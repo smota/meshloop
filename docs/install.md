@@ -22,6 +22,8 @@ Once installed, Meshloop operations can be triggered via terminal slash commands
 | `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
 | `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
 | `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
+| `meshloop:ast-skeleton` | — | `meshloop_ast_skeleton` | `meshloop ast-skeleton --path <file>` | **Context:** Returns one file's AST skeleton (bodies elided) with approximate token counts. Read-only; confined to the working directory. |
+| `meshloop:symbol-lookup` | — | `meshloop_symbol_lookup` | `meshloop symbol-lookup --query <text>` | **Context:** Ranks declared symbols across the working directory with the quantized signature index; reports index build and search time separately. |
 
 ---
 
