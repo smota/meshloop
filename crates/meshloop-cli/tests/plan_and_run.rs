@@ -1903,7 +1903,13 @@ fn watch_times_out_when_the_run_does_not_change() {
     let out = meshloop()
         .current_dir(&dir)
         .args([
-            "watch", "--graph", "gidle", "--timeout", "1", "--json", "--config",
+            "watch",
+            "--graph",
+            "gidle",
+            "--timeout",
+            "1",
+            "--json",
+            "--config",
         ])
         .arg(&config_path)
         .arg("--db")
