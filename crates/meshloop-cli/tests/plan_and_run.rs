@@ -180,6 +180,56 @@ fn run_refuses_without_accept_plan_flag() {
 }
 
 #[test]
+fn inspect_reports_real_attempt_timing_and_outcome() {
+    let dir = disposable_repo("attempt-timing");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gt","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let out = meshloop()
+        .current_dir(&dir)
+        .args([
+            "inspect", "--graph", "gt", "--task", "1", "--json", "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("inspect");
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let attempt = &parsed["data"]["attempts"][0];
+    // Real runs must record when the worker exited, not only fixture rows.
+    assert!(attempt["ended_at"].is_string(), "{parsed}");
+    assert!(attempt["duration_s"].is_u64(), "{parsed}");
+    assert_eq!(attempt["outcome"], "DeterministicChecksPassed", "{parsed}");
+    assert!(attempt["base_revision"].is_string(), "{parsed}");
+}
+
+#[test]
 fn run_pauses_for_human_accept_then_resume_integrates() {
     let dir = disposable_repo("run");
     let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
@@ -866,6 +916,171 @@ fn status_reports_waiting_for_acceptance_and_dependency() {
     assert_eq!(n1["blocked_by"], serde_json::json!([]));
     assert_eq!(n2["waiting_for"], "dependency", "{parsed}");
     assert_eq!(n2["blocked_by"], serde_json::json!([1]));
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+fn json_cmd(dir: &Path, config: &Path, db: &Path, args: &[&str]) -> serde_json::Value {
+    let out = meshloop()
+        .current_dir(dir)
+        .args(args)
+        .args(["--json", "--config"])
+        .arg(config)
+        .args(["--db"])
+        .arg(db)
+        .output()
+        .expect("meshloop json command");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{args:?} stdout: {stdout}");
+    serde_json::from_str(&stdout).expect("json")
+}
+
+#[test]
+fn inspect_lists_attempts_with_redacted_evidence_and_status_summarizes_run() {
+    use meshloop_adapters::store::SqliteStore;
+    use meshloop_domain::evidence::{
+        AttemptId, CandidateRef, DeterministicEvidence, Evidence, HumanAcceptanceEvidence,
+    };
+    use meshloop_domain::task_graph::TaskId;
+    use meshloop_engine::ports::{AttemptRow, EvidenceStore, RunStore};
+
+    let dir = disposable_repo("inspect-attempts");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gat","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null},{"id":2,"description":"second","depends_on":[1],"tier":null}]}"#,
+    )
+    .unwrap();
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+
+    // Node 2 never started (blocked on node 1), so seed two known attempts for it.
+    {
+        let mut store = SqliteStore::open(&db_path).expect("open store");
+        let mut seed = |harness: &str, model: &str, start: &str, end: &str, outcome: &str| {
+            let attempt_id = store.next_attempt_id().unwrap();
+            store
+                .save_attempt(&AttemptRow {
+                    attempt_id,
+                    graph_id: "gat".into(),
+                    task_id: TaskId(2),
+                    harness: Some(harness.into()),
+                    model_ref: Some(model.into()),
+                    worktree_path: None,
+                    pid: None,
+                    image_name: None,
+                    pane_id: None,
+                    started_at: Some(start.into()),
+                    ended_at: Some(end.into()),
+                    outcome: Some(outcome.into()),
+                })
+                .unwrap();
+            attempt_id
+        };
+        let first = seed("alpha", "model-a", "1000", "1010", "failed");
+        let second = seed("beta", "model-b", "2000", "2025", "ok");
+        let cand = |attempt_id: AttemptId| CandidateRef {
+            task_id: TaskId(2),
+            attempt_id,
+            revision: "rev".into(),
+        };
+        store
+            .record(Evidence::Deterministic(DeterministicEvidence {
+                candidate: cand(first),
+                tool: "git-diff".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: "REDACTED-STAT".into(),
+            }))
+            .unwrap();
+        store
+            .record(Evidence::HumanAcceptance(HumanAcceptanceEvidence {
+                candidate: cand(second),
+                accepted_by: "sam".into(),
+                accepted_at: "3000".into(),
+            }))
+            .unwrap();
+    }
+
+    let task = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--task", "2", "--graph", "gat"],
+    );
+    let attempts = task["data"]["attempts"].as_array().expect("attempts");
+    assert_eq!(attempts.len(), 2, "{task}");
+    assert_eq!(attempts[0]["harness"], "alpha");
+    assert_eq!(attempts[0]["model_ref"], "model-a");
+    assert_eq!(attempts[0]["started_at"], "1000");
+    assert_eq!(attempts[0]["ended_at"], "1010");
+    assert_eq!(attempts[0]["duration_s"], 10);
+    assert_eq!(attempts[0]["outcome"], "failed");
+    assert_eq!(attempts[0]["evidence"][0]["kind"], "deterministic");
+    assert_eq!(attempts[0]["evidence"][0]["tool"], "git-diff");
+    assert_eq!(attempts[0]["evidence"][0]["exit_code"], 1);
+    assert_eq!(
+        attempts[0]["evidence"][0]["summary_redacted"],
+        "REDACTED-STAT"
+    );
+    assert_eq!(attempts[1]["harness"], "beta");
+    assert_eq!(attempts[1]["duration_s"], 25);
+    assert_eq!(attempts[1]["evidence"][0]["kind"], "human_acceptance");
+    assert!(attempts[1]["evidence"][0]["exit_code"].is_null());
+
+    // Whole-graph inspect only carries attempts when asked.
+    let plain = json_cmd(&dir, &config_path, &db_path, &["inspect", "--graph", "gat"]);
+    assert!(
+        plain["data"]["nodes"][1].get("attempts").is_none(),
+        "{plain}"
+    );
+    let with = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--graph", "gat", "--attempts"],
+    );
+    let n2 = with["data"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == 2)
+        .unwrap();
+    assert_eq!(n2["attempts"].as_array().unwrap().len(), 2);
+
+    // Node 1 ran once for real; its wall time joins the seeded 10s + 25s.
+    let t1 = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--task", "1", "--graph", "gat"],
+    );
+    assert_eq!(t1["data"]["attempts"].as_array().unwrap().len(), 1, "{t1}");
+    let n1_wall = t1["data"]["attempts"][0]["duration_s"]
+        .as_u64()
+        .unwrap_or(0);
+    let status = json_cmd(&dir, &config_path, &db_path, &["status", "--graph", "gat"]);
+    assert_eq!(status["data"]["summary"]["attempts"], 3, "{status}");
+    assert_eq!(status["data"]["summary"]["retries"], 1);
+    assert_eq!(
+        status["data"]["summary"]["worker_wall_seconds"],
+        35 + n1_wall
+    );
 
     fs::remove_dir_all(&dir).ok();
 }

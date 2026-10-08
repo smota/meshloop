@@ -207,7 +207,10 @@ pub struct AttemptView {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub duration_s: Option<u64>,
+    /// The attempt's last ledger event (e.g. `DeterministicChecksPassed`).
     pub outcome: Option<String>,
+    /// Revision the attempt's worktree started from.
+    pub base_revision: Option<String>,
     pub evidence: Vec<EvidenceView>,
 }
 
@@ -324,6 +327,16 @@ impl<'a> RunLoop<'a> {
             occurred_at: stamp(),
         };
         self.store.append(rec.clone())?;
+        // A normal exit ends the attempt. Crash/timeout leaves `ended_at` unset: a live pane
+        // may still be harvested, and liveness treats any ended attempt as Dead.
+        if event == Event::HarnessExited
+            && let Some(id) = attempt
+            && let Some(mut row) = self.store.load_attempt(id)?
+            && row.ended_at.is_none()
+        {
+            row.ended_at = Some(rec.occurred_at.clone());
+            self.store.save_attempt(&row)?;
+        }
         Ok(rec)
     }
 
@@ -2015,8 +2028,26 @@ impl<'a> RunLoop<'a> {
     ) -> Result<Vec<AttemptView>, OrchestratorError> {
         let mut rows = self.store.attempts_for_task(graph_id, task_id)?;
         rows.sort_by_key(|a| a.attempt_id.0);
+        // The attempt row's `outcome` column holds the attempt's base revision ("base:<sha>"),
+        // which recovery reads; the outcome shown is the attempt's last ledger event instead.
+        let mut last_event: HashMap<AttemptId, Event> = HashMap::new();
+        for r in self.store.records_for_graph(graph_id)? {
+            if let Some(id) = r.attempt_id {
+                last_event.insert(id, r.event);
+            }
+        }
         rows.into_iter()
             .map(|a| {
+                let base_revision = a
+                    .outcome
+                    .as_deref()
+                    .and_then(|o| o.strip_prefix("base:"))
+                    .map(String::from);
+                let outcome = match last_event.get(&a.attempt_id) {
+                    Some(e) => Some(format!("{e:?}")),
+                    None if base_revision.is_none() => a.outcome.clone(),
+                    None => None,
+                };
                 let evidence = self
                     .store
                     .evidence_for_attempt(a.task_id, a.attempt_id)?
@@ -2030,7 +2061,8 @@ impl<'a> RunLoop<'a> {
                     model_ref: a.model_ref,
                     started_at: a.started_at,
                     ended_at: a.ended_at,
-                    outcome: a.outcome,
+                    outcome,
+                    base_revision,
                     evidence,
                 })
             })

@@ -106,6 +106,7 @@ pub fn attempt_json(a: &AttemptView) -> serde_json::Value {
         "ended_at": a.ended_at,
         "duration_s": a.duration_s,
         "outcome": a.outcome,
+        "base_revision": a.base_revision,
         "evidence": a.evidence.iter().map(|e| serde_json::json!({
             "kind": e.kind,
             "tool": e.tool,
