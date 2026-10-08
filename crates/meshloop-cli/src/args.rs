@@ -172,7 +172,168 @@ pub fn parse(args: &[String]) -> Result<Invocation, String> {
     })
 }
 
+/// Flags every subcommand accepts: `(takes_value, name)`.
+const GLOBAL_FLAGS: &[(bool, &str)] = &[
+    (false, "--json"),
+    (true, "--origin-harness"),
+    (true, "--origin-session"),
+    (false, "--help"),
+    (false, "-h"),
+];
+
+/// Per-verb flags beyond the global ones: `(takes_value, name)`. `None` for verbs that are
+/// not subcommands (help, version) or unknown. Must mirror what `parse_command` reads.
+fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
+    Some(match verb {
+        "mcp" | "roles" => &[],
+        "doctor" => &[(true, "--config"), (true, "--db")],
+        "plan" => &[
+            (true, "--objective"),
+            (true, "--config"),
+            (true, "--out"),
+            (true, "--scope"),
+            (true, "--db"),
+            (true, "--intent-file"),
+        ],
+        "review-plan" => &[
+            (false, "--accept"),
+            (false, "--decline"),
+            (false, "--adjust"),
+            (true, "--plan"),
+            (true, "--reason"),
+            (true, "--as"),
+            (true, "--objective"),
+            (true, "--intent-file"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--out"),
+            (true, "--scope"),
+            (false, "--fixture-only"),
+        ],
+        "run" => &[
+            (true, "--plan"),
+            (false, "--accept-plan"),
+            (false, "--reset"),
+            (true, "--config"),
+            (true, "--worktree-base"),
+            (true, "--db"),
+            (false, "--fixture-only"),
+            (false, "--detach"),
+        ],
+        "status" => &[(true, "--graph"), (true, "--config"), (true, "--db")],
+        "resume" => &[
+            (true, "--graph"),
+            (false, "--retry"),
+            (false, "--restart"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+            (false, "--fixture-only"),
+        ],
+        "cancel" => &[
+            (true, "--session-id"),
+            (true, "--graph"),
+            (true, "--task"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+        ],
+        "inspect" => &[
+            (true, "--session-id"),
+            (true, "--graph"),
+            (true, "--task"),
+            (true, "--config"),
+            (true, "--db"),
+            (false, "--attempts"),
+        ],
+        "watch" => &[
+            (true, "--session-id"),
+            (true, "--graph"),
+            (true, "--interval"),
+            (true, "--timeout"),
+            (true, "--config"),
+            (true, "--db"),
+        ],
+        "accept" => &[
+            (true, "--task"),
+            (true, "--as"),
+            (true, "--graph"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+        ],
+        "integrate" => &[
+            (true, "--graph"),
+            (true, "--into"),
+            (false, "--accept-integrate"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+        ],
+        "orchestrate" => &[
+            (true, "--task"),
+            (true, "--graph"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+            (true, "--model-a"),
+            (true, "--model-b"),
+            (false, "--fixture-only"),
+        ],
+        "bundle" => &[(true, "--dest"), (false, "--gitignore")],
+        "ast-skeleton" => &[(true, "--path")],
+        "symbol-lookup" => &[(true, "--query"), (true, "--k"), (true, "--scope")],
+        "mutate-plan" => &[
+            (true, "--graph"),
+            (true, "--mutation-file"),
+            (true, "--mutation"),
+            (false, "--require-review"),
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+        ],
+        _ => return None,
+    })
+}
+
+fn looks_like_flag(token: &str) -> bool {
+    token.starts_with("--")
+        || token
+            .strip_prefix('-')
+            .and_then(|r| r.chars().next())
+            .is_some_and(|c| c.is_alphabetic())
+}
+
+/// Reject any flag-like token the verb does not accept. The token after a value flag is
+/// that flag's value and is never inspected, even when it starts with `-`.
+fn reject_unknown_flags(verb: &str, rest: &[String]) -> Result<(), String> {
+    let Some(own) = verb_flags(verb) else {
+        return Ok(());
+    };
+    let mut tokens = rest.iter();
+    while let Some(token) = tokens.next() {
+        if !looks_like_flag(token) {
+            continue;
+        }
+        match GLOBAL_FLAGS
+            .iter()
+            .chain(own.iter())
+            .find(|(_, name)| name == token)
+        {
+            Some((true, _)) => {
+                tokens.next();
+            }
+            Some((false, _)) => {}
+            None => return Err(format!("meshloop:{verb} does not accept {token}")),
+        }
+    }
+    Ok(())
+}
+
 fn parse_command(args: &[String]) -> Result<Command, String> {
+    if let Some(first) = args.first() {
+        reject_unknown_flags(&verb(first), &args[1..])?;
+    }
     match args.first().map(|s| verb(s)) {
         None => Ok(Command::Status {
             graph: None,
@@ -489,5 +650,86 @@ mod tests {
             }
             _ => panic!("expected status"),
         }
+    }
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(ToString::to_string).collect()
+    }
+
+    /// Every documented flag of every verb, with the required ones present.
+    const DOCUMENTED: &[&str] = &[
+        "doctor --config c --db d",
+        "plan --objective o --config c --out x --scope s --db d --intent-file i",
+        "review-plan --accept --plan p --reason r --as me --objective o --intent-file i --config c --db d --out x --scope s --fixture-only",
+        "review-plan --decline --plan p",
+        "review-plan --adjust --reason r",
+        "run --plan p --accept-plan --reset --config c --worktree-base w --db d --fixture-only --detach",
+        "status --graph g --config c --db d",
+        "resume --graph g --retry --config c --db d --worktree-base w --fixture-only",
+        "resume --restart",
+        "cancel --session-id s --graph g --task 1 --config c --db d --worktree-base w",
+        "inspect --session-id s --graph g --task 1 --config c --db d --attempts",
+        "watch --session-id s --graph g --interval 2 --timeout 9 --config c --db d",
+        "accept --task 1 --as me --graph g --config c --db d --worktree-base w",
+        "integrate --graph g --into main --accept-integrate --config c --db d --worktree-base w",
+        "orchestrate --task 1 --graph g --config c --db d --worktree-base w --model-a a --model-b b --fixture-only",
+        "bundle --dest d --gitignore",
+        "ast-skeleton --path p",
+        "symbol-lookup --query q --k 3 --scope s",
+        "mutate-plan --graph g --mutation-file f --mutation {} --require-review --config c --db d --worktree-base w",
+        "mcp",
+        "roles",
+    ];
+
+    #[test]
+    fn documented_flags_still_parse() {
+        for line in DOCUMENTED {
+            parse(&argv(line)).unwrap_or_else(|e| panic!("`{line}` rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn global_flags_accepted_on_every_subcommand() {
+        for line in DOCUMENTED {
+            let with_globals =
+                format!("{line} --json --origin-harness h --origin-session s --help -h");
+            parse(&argv(&with_globals)).unwrap_or_else(|e| panic!("`{with_globals}`: {e}"));
+        }
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected_on_every_subcommand() {
+        for line in DOCUMENTED {
+            let verb = line.split_whitespace().next().unwrap();
+            let err = parse(&argv(&format!("{line} --bogus"))).expect_err(line);
+            assert_eq!(err, format!("meshloop:{verb} does not accept --bogus"));
+        }
+    }
+
+    #[test]
+    fn status_rejects_bogus_flag() {
+        let err = parse(&argv("status --bogus")).expect_err("must reject");
+        assert!(err.contains("--bogus") && err.contains("status"), "{err}");
+        let err = parse(&argv("status -z")).expect_err("must reject short flag");
+        assert!(err.contains("-z"), "{err}");
+        // A flag valid for another verb is still unknown here.
+        assert!(parse(&argv("status --attempts")).is_err());
+    }
+
+    #[test]
+    fn value_starting_with_dash_is_not_a_flag() {
+        let inv = parse(&argv("review-plan --adjust --reason -x")).expect("parse");
+        match inv.command {
+            Command::ReviewPlan { reason, .. } => assert_eq!(reason.as_deref(), Some("-x")),
+            _ => panic!("expected review-plan"),
+        }
+        assert!(parse(&argv("status --graph --not-a-flag")).is_ok());
+        // The skipped value does not shield the token after it.
+        assert!(parse(&argv("status --graph g --bogus")).is_err());
+    }
+
+    #[test]
+    fn prefixed_verb_form_is_validated_too() {
+        assert!(parse(&argv("meshloop:status --bogus")).is_err());
     }
 }
