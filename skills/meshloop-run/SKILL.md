@@ -18,7 +18,9 @@ meshloop run --plan <file> --json --origin-harness <h> --origin-session <id>
 A **worker executes via direct CLI in an ephemeral git worktree**.
 This origin pane must not implement the work. Current branch stays put.
 
-Do not poll. Read the JSON idle reason; then `/meshloop:status` or
+Do not poll `inspect`. Block with `meshloop watch --graph <id> --json` (NDJSON
+state changes; last line `{"exit":<reason>,"nodes":[…]}`; exit 0 = needs a human
+or completed, 1 = failed/cancelled, 3 = `--timeout`). Then `/meshloop:status` or
 `/meshloop:accept`. `--fixture-only` is CI only.
 
 `--accept-plan` on `run` is a debug shortcut that skips the 3-way question.

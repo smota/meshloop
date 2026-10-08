@@ -84,6 +84,14 @@ pub enum Command {
         db: Option<PathBuf>,
         attempts: bool,
     },
+    Watch {
+        graph: Option<String>,
+        session_id: Option<String>,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+        interval_secs: u64,
+        timeout_secs: u64,
+    },
     Accept {
         task: u32,
         identity: String,
@@ -308,6 +316,31 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 attempts: has_flag(rest, "--attempts"),
             })
         }
+        Some(v) if v == "watch" => {
+            let rest = &args[1..];
+            let session_id = flag_value(rest, "--session-id");
+            let graph = flag_value(rest, "--graph").or_else(|| session_id.clone());
+            let interval_secs = match flag_value(rest, "--interval") {
+                Some(raw) => raw.parse::<u64>().ok().filter(|n| *n >= 1).ok_or_else(|| {
+                    format!("meshloop:watch --interval expects whole seconds >= 1, got {raw}")
+                })?,
+                None => 5,
+            };
+            let timeout_secs = match flag_value(rest, "--timeout") {
+                Some(raw) => raw.parse::<u64>().map_err(|_| {
+                    format!("meshloop:watch --timeout expects whole seconds (0 = none), got {raw}")
+                })?,
+                None => 0,
+            };
+            Ok(Command::Watch {
+                graph,
+                session_id,
+                config: flag_value(rest, "--config").map(PathBuf::from),
+                db: flag_value(rest, "--db").map(PathBuf::from),
+                interval_secs,
+                timeout_secs,
+            })
+        }
         Some(v) if v == "accept" => {
             let rest = &args[1..];
             let task = flag_value(rest, "--task")
@@ -416,6 +449,7 @@ pub fn help_text() -> &'static str {
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
+     \x20 meshloop:watch\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -424,6 +458,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop run --plan <path> [--accept-plan] [--reset] [--fixture-only] [--json]\n\
      \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
      \x20 meshloop status [--graph <id>] [--config <path>] [--db <path>] [--json]\n\
+     \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\

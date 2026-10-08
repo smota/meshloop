@@ -1766,3 +1766,162 @@ fn doctor_has_no_warnings_when_verify_command_is_set() {
     let warnings = doctor_warnings("doctor-verify-set", r#"verify_command = ["true"]"#);
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+fn watch_lines(out: &std::process::Output) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("NDJSON line {l:?}: {e}")))
+        .collect()
+}
+
+fn run_fixture_plan(dir: &Path, config: &Path, db: &Path, graph_id: &str) {
+    let plan_path = dir.join("plan.json");
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"{graph_id}","nodes":[{{"id":1,"description":"first","depends_on":[],"tier":null}}]}}"#
+        ),
+    )
+    .unwrap();
+    meshloop()
+        .current_dir(dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--fixture-only", "--config"])
+        .arg(config)
+        .arg("--db")
+        .arg(db)
+        .arg("--worktree-base")
+        .arg(dir.join("worktrees"))
+        .output()
+        .expect("run");
+}
+
+#[test]
+fn watch_exits_zero_when_a_node_awaits_review() {
+    let dir = disposable_repo("watch-review");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let db_path = dir.join("state.sqlite");
+    run_fixture_plan(&dir, &config_path, &db_path, "gwatch");
+
+    let elsewhere = empty_temp_dir("watch-review-cwd");
+    let out = meshloop()
+        .current_dir(&elsewhere)
+        .args(["watch", "--graph", "gwatch", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .output()
+        .expect("watch");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let lines = watch_lines(&out);
+    let last = lines.last().expect("lines");
+    assert_eq!(
+        *last,
+        serde_json::json!({"exit":"awaiting_review","nodes":[1]})
+    );
+    let first = &lines[0];
+    assert_eq!(first["node"], 1);
+    assert_eq!(first["from"], serde_json::Value::Null);
+    assert_eq!(first["to"], "AwaitingReview");
+    assert_eq!(first["waiting_for"], "acceptance");
+    assert_eq!(first["graph_id"], "gwatch");
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&elsewhere).ok();
+}
+
+#[test]
+fn watch_exits_nonzero_naming_a_failed_node() {
+    let dir = disposable_repo("watch-failed");
+    let config_path = write_config(&dir, r#"["--fail"]"#);
+    let db_path = dir.join("state.sqlite");
+    run_fixture_plan(&dir, &config_path, &db_path, "gfail");
+
+    let out = meshloop()
+        .current_dir(&dir)
+        .args(["watch", "--graph", "gfail", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .output()
+        .expect("watch");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let lines = watch_lines(&out);
+    assert_eq!(
+        *lines.last().expect("lines"),
+        serde_json::json!({"exit":"failed","nodes":[1]})
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn watch_with_unknown_graph_is_an_error_naming_it() {
+    let dir = disposable_repo("watch-unknown");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let out = meshloop()
+        .current_dir(&dir)
+        .args(["watch", "--graph", "nope", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(dir.join("state.sqlite"))
+        .output()
+        .expect("watch");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed.to_string().contains("nope"), "{parsed}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn watch_times_out_when_the_run_does_not_change() {
+    let dir = disposable_repo("watch-timeout");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join("state.sqlite");
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gidle","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    // Accepted but never run: node state stays put.
+    let reviewed = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept", "--as", "sam", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .output()
+        .expect("review-plan");
+    assert!(reviewed.status.success(), "{reviewed:?}");
+
+    let started = std::time::Instant::now();
+    let out = meshloop()
+        .current_dir(&dir)
+        .args([
+            "watch",
+            "--graph",
+            "gidle",
+            "--timeout",
+            "1",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .output()
+        .expect("watch");
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(started.elapsed().as_secs() < 5);
+    let lines = watch_lines(&out);
+    assert_eq!(
+        *lines.last().expect("lines"),
+        serde_json::json!({"exit":"timeout","nodes":[]})
+    );
+    fs::remove_dir_all(&dir).ok();
+}
