@@ -123,9 +123,31 @@ pub struct RunLoop<'a> {
     pub active_graph: Option<String>,
 }
 
+/// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingFor {
+    Acceptance,
+    Dependency,
+    PlanAcceptance,
+    RetryBudgetExhausted,
+}
+
+impl WaitingFor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WaitingFor::Acceptance => "acceptance",
+            WaitingFor::Dependency => "dependency",
+            WaitingFor::PlanAcceptance => "plan_acceptance",
+            WaitingFor::RetryBudgetExhausted => "retry_budget_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeStatus {
     pub task_id: TaskId,
+    pub waiting_for: Option<WaitingFor>,
+    pub blocked_by: Vec<TaskId>,
     pub description: String,
     pub state: TaskState,
     pub note: Option<String>,
@@ -1951,8 +1973,48 @@ impl<'a> RunLoop<'a> {
             } else {
                 None
             };
+            let mut blocked_by: Vec<TaskId> = n
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|d| {
+                    !matches!(
+                        tasks.get(d).copied().unwrap_or(TaskState::Pending),
+                        TaskState::Accepted | TaskState::Integrated
+                    )
+                })
+                .collect();
+            blocked_by.sort();
+            blocked_by.dedup();
+            let terminal = matches!(
+                state,
+                TaskState::Accepted | TaskState::Integrated | TaskState::Cancelled
+            );
+            let waiting_for = if row.plan_state == PlanState::AwaitingPlanReview && !terminal {
+                Some(WaitingFor::PlanAcceptance)
+            } else if state == TaskState::AwaitingReview {
+                Some(WaitingFor::Acceptance)
+            } else if matches!(
+                state,
+                TaskState::Pending | TaskState::Ready | TaskState::Blocked
+            ) && !blocked_by.is_empty()
+            {
+                Some(WaitingFor::Dependency)
+            } else if state == TaskState::Failed
+                && self.store.attempts_for_task(graph_id, n.id)?.len() as u32
+                    >= self.limits.max_retries
+            {
+                Some(WaitingFor::RetryBudgetExhausted)
+            } else {
+                None
+            };
+            if waiting_for != Some(WaitingFor::Dependency) {
+                blocked_by.clear();
+            }
             nodes.push(NodeStatus {
                 task_id: n.id,
+                waiting_for,
+                blocked_by,
                 description: n.description.clone(),
                 state,
                 note,

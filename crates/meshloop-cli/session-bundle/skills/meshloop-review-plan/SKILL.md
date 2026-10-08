@@ -36,3 +36,6 @@ meshloop review-plan --plan meshloop-plan.json --adjust --objective "<changes>" 
 | Adjust | still `AwaitingPlanReview` | refuses; ask again after the new graph |
 
 Do not call `run --accept-plan` to skip this question.
+
+R1 rule: every node stops for `meshloop accept`; the tier selects harness/model only.
+The review-plan JSON lists them under `acceptance_required`.

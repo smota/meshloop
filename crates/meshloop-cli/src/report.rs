@@ -4,6 +4,9 @@ use meshloop_domain::state::TaskState;
 use meshloop_domain::task_graph::TaskGraph;
 use meshloop_engine::run_loop::{IdleReason, RunStatus};
 
+pub const ACCEPTANCE_RULE: &str =
+    "R1: every node stops for meshloop accept; tier selects harness/model only";
+
 pub fn format_plan(graph: &TaskGraph) -> String {
     let mut out = format!(
         "Plan '{}': {} task(s) — awaiting-plan-review (ADR 0009).\n\
@@ -73,6 +76,14 @@ pub fn format_status(status: &RunStatus) -> String {
             n.pane_id.as_deref().unwrap_or("-"),
             n.live.as_deref().unwrap_or("-")
         );
+        if let Some(w) = n.waiting_for {
+            if n.blocked_by.is_empty() {
+                out += &format!("      waiting: {}\n", w.as_str());
+            } else {
+                let ids: Vec<String> = n.blocked_by.iter().map(|d| d.0.to_string()).collect();
+                out += &format!("      waiting: {} {}\n", w.as_str(), ids.join(","));
+            }
+        }
         if let Some(note) = &n.note {
             out += &format!("      note: {note}\n");
         }
