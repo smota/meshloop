@@ -164,6 +164,68 @@ pub struct RunStatus {
     pub nodes: Vec<NodeStatus>,
 }
 
+/// One evidence row as shown to operators: only the already-redacted summary is carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceView {
+    pub kind: &'static str,
+    pub tool: Option<String>,
+    pub exit_code: Option<i32>,
+    pub summary_redacted: String,
+}
+
+impl EvidenceView {
+    fn from_evidence(e: &Evidence) -> Self {
+        match e {
+            Evidence::Deterministic(d) => Self {
+                kind: "deterministic",
+                tool: Some(d.tool.clone()),
+                exit_code: Some(d.exit_code),
+                summary_redacted: d.output_redacted.clone(),
+            },
+            Evidence::ModelReview(m) => Self {
+                kind: "model_review",
+                tool: Some(format!("{}/{}", m.harness, m.model_ref)),
+                exit_code: None,
+                summary_redacted: format!("{:?}: {}", m.verdict, m.rationale_redacted),
+            },
+            Evidence::HumanAcceptance(h) => Self {
+                kind: "human_acceptance",
+                tool: None,
+                exit_code: None,
+                summary_redacted: format!("accepted by {} at {}", h.accepted_by, h.accepted_at),
+            },
+        }
+    }
+}
+
+/// One attempt as shown to operators (`inspect`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptView {
+    pub attempt_id: AttemptId,
+    pub harness: Option<String>,
+    pub model_ref: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_s: Option<u64>,
+    pub outcome: Option<String>,
+    pub evidence: Vec<EvidenceView>,
+}
+
+/// Run-level totals for `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunSummary {
+    pub attempts: u32,
+    /// Attempts beyond the first per task.
+    pub retries: u32,
+    pub worker_wall_seconds: u64,
+}
+
+fn duration_secs(started: &Option<String>, ended: &Option<String>) -> Option<u64> {
+    let s = started.as_deref()?.parse::<u64>().ok()?;
+    let e = ended.as_deref()?.parse::<u64>().ok()?;
+    Some(e.saturating_sub(s))
+}
+
 fn stamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1943,6 +2005,51 @@ impl<'a> RunLoop<'a> {
             self.workspace.merge_no_ff(&integrate_head)?;
         }
         Ok(())
+    }
+
+    /// Attempts for a task, oldest first, with their (redacted) evidence rows.
+    pub fn attempts(
+        &self,
+        graph_id: &str,
+        task_id: TaskId,
+    ) -> Result<Vec<AttemptView>, OrchestratorError> {
+        let mut rows = self.store.attempts_for_task(graph_id, task_id)?;
+        rows.sort_by_key(|a| a.attempt_id.0);
+        rows.into_iter()
+            .map(|a| {
+                let evidence = self
+                    .store
+                    .evidence_for_attempt(a.task_id, a.attempt_id)?
+                    .iter()
+                    .map(EvidenceView::from_evidence)
+                    .collect();
+                Ok(AttemptView {
+                    attempt_id: a.attempt_id,
+                    duration_s: duration_secs(&a.started_at, &a.ended_at),
+                    harness: a.harness,
+                    model_ref: a.model_ref,
+                    started_at: a.started_at,
+                    ended_at: a.ended_at,
+                    outcome: a.outcome,
+                    evidence,
+                })
+            })
+            .collect()
+    }
+
+    pub fn run_summary(&self, graph_id: &str) -> Result<RunSummary, OrchestratorError> {
+        let rows = self.store.attempts_for_graph(graph_id)?;
+        let mut per_task: HashMap<TaskId, u32> = HashMap::new();
+        let mut wall = 0u64;
+        for a in &rows {
+            *per_task.entry(a.task_id).or_default() += 1;
+            wall += duration_secs(&a.started_at, &a.ended_at).unwrap_or(0);
+        }
+        Ok(RunSummary {
+            attempts: rows.len() as u32,
+            retries: per_task.values().map(|c| c - 1).sum(),
+            worker_wall_seconds: wall,
+        })
     }
 
     pub fn status(&mut self, graph_id: &str) -> Result<RunStatus, OrchestratorError> {

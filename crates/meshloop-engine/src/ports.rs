@@ -226,6 +226,13 @@ pub struct AttemptRow {
 pub trait EvidenceStore {
     fn record(&mut self, evidence: Evidence) -> Result<(), StoreError>;
     fn evidence_for(&self, candidate: &CandidateRef) -> Result<Vec<Evidence>, StoreError>;
+    /// Every evidence row recorded for an attempt, whatever revision it was bound to
+    /// (read-only display; gating still uses the exact-candidate `evidence_for`).
+    fn evidence_for_attempt(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+    ) -> Result<Vec<Evidence>, StoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -366,6 +373,22 @@ impl EvidenceStore for InMemoryEvidenceStore {
             .evidence
             .iter()
             .filter(|e| e.candidate() == candidate)
+            .cloned()
+            .collect())
+    }
+
+    fn evidence_for_attempt(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+    ) -> Result<Vec<Evidence>, StoreError> {
+        Ok(self
+            .evidence
+            .iter()
+            .filter(|e| {
+                let c = e.candidate();
+                c.task_id == task_id && c.attempt_id == attempt_id
+            })
             .cloned()
             .collect())
     }
