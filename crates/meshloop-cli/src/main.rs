@@ -193,6 +193,23 @@ fn dispatch(inv: Invocation) -> ExitCode {
             config,
             db,
         } => cmd_inspect(task, graph, session_id, config, db, inv.json, inv.origin),
+        Command::Watch {
+            graph,
+            session_id,
+            config,
+            db,
+            interval_secs,
+            timeout_secs,
+        } => cmd_watch(
+            graph,
+            session_id,
+            config,
+            db,
+            interval_secs,
+            timeout_secs,
+            inv.json,
+            inv.origin,
+        ),
         Command::Accept {
             task,
             identity,
@@ -1280,6 +1297,149 @@ fn cmd_inspect(
                 }
                 ExitCode::from(1)
             }
+        }
+    })
+}
+
+/// Why a `watch` stopped, and the nodes responsible. Returns `None` while the run is still moving.
+fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str, Vec<u32>)> {
+    let ids = |state: TaskState| -> Vec<u32> {
+        s.nodes
+            .iter()
+            .filter(|n| n.state == state)
+            .map(|n| n.task_id.0)
+            .collect()
+    };
+    let review = ids(TaskState::AwaitingReview);
+    if !review.is_empty() {
+        return Some(("awaiting_review", review));
+    }
+    if s.plan_state == PlanState::AwaitingPlanReview {
+        return Some((
+            "awaiting_plan_acceptance",
+            s.nodes.iter().map(|n| n.task_id.0).collect(),
+        ));
+    }
+    if compute_overall_status(s) == "completed" {
+        return Some(("completed", Vec::new()));
+    }
+    let failed = ids(TaskState::Failed);
+    if !failed.is_empty() {
+        return Some(("failed", failed));
+    }
+    let cancelled = ids(TaskState::Cancelled);
+    if !cancelled.is_empty() {
+        return Some(("cancelled", cancelled));
+    }
+    None
+}
+
+/// Reads the store only (never owns workers), so it also works on `run --detach`.
+#[allow(clippy::too_many_arguments)]
+fn cmd_watch(
+    graph: Option<String>,
+    session_id: Option<String>,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    interval_secs: u64,
+    timeout_secs: u64,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let resolved_id = graph.or(session_id);
+    with_saga(config, db, None, false, origin.clone(), |saga| {
+        let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
+            Ok(id) => id,
+            Err(e) => {
+                let msg = format!("graph not found: {e:?}");
+                if json {
+                    println!("{}", json_out::err("meshloop:watch", origin, msg));
+                } else {
+                    eprintln!("{msg}");
+                }
+                return ExitCode::from(2);
+            }
+        };
+        let started = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let interval = std::time::Duration::from_secs(interval_secs);
+        let mut seen: HashMap<u32, TaskState> = HashMap::new();
+        loop {
+            let s = match saga.status(&id) {
+                Ok(s) => s,
+                Err(e) => {
+                    let missing = matches!(e, OrchestratorError::MissingGraph(_));
+                    let msg = if missing {
+                        format!("graph '{id}' not found: {e:?}")
+                    } else {
+                        format!("{e:?}")
+                    };
+                    if json {
+                        println!("{}", json_out::err("meshloop:watch", origin, msg));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                    return ExitCode::from(if missing { 2 } else { 1 });
+                }
+            };
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for n in &s.nodes {
+                let prev = seen.insert(n.task_id.0, n.state);
+                if prev == Some(n.state) {
+                    continue;
+                }
+                let waiting = n.waiting_for.map(|w| w.as_str());
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ts": ts,
+                            "graph_id": s.graph_id,
+                            "node": n.task_id.0,
+                            "from": prev.map(|p| format!("{p:?}")),
+                            "to": format!("{:?}", n.state),
+                            "waiting_for": waiting,
+                        })
+                    );
+                } else {
+                    let from = prev.map_or("-".to_string(), |p| format!("{p:?}"));
+                    let wait = waiting.map_or(String::new(), |w| format!(" (waiting: {w})"));
+                    println!(
+                        "[{ts}] {} node {}: {from} -> {:?}{wait}",
+                        s.graph_id, n.task_id.0, n.state
+                    );
+                }
+            }
+            let (reason, nodes, code) = match watch_exit(&s) {
+                Some((reason, nodes)) => {
+                    let code = match reason {
+                        "failed" | "cancelled" => 1,
+                        _ => 0,
+                    };
+                    (reason, nodes, code)
+                }
+                None if timeout_secs > 0 && started.elapsed() >= timeout => {
+                    ("timeout", Vec::new(), 3)
+                }
+                None => {
+                    let mut nap = interval;
+                    if timeout_secs > 0 {
+                        nap = nap.min(timeout.saturating_sub(started.elapsed()));
+                    }
+                    std::thread::sleep(nap);
+                    continue;
+                }
+            };
+            if json {
+                println!("{}", serde_json::json!({ "exit": reason, "nodes": nodes }));
+            } else {
+                let ids: Vec<String> = nodes.iter().map(u32::to_string).collect();
+                println!("exit: {reason} nodes=[{}]", ids.join(","));
+            }
+            return ExitCode::from(code);
         }
     })
 }
