@@ -82,6 +82,7 @@ pub enum Command {
         session_id: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
+        attempts: bool,
     },
     Accept {
         task: u32,
@@ -304,6 +305,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 session_id,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
+                attempts: has_flag(rest, "--attempts"),
             })
         }
         Some(v) if v == "accept" => {

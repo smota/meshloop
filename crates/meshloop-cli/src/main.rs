@@ -192,7 +192,10 @@ fn dispatch(inv: Invocation) -> ExitCode {
             session_id,
             config,
             db,
-        } => cmd_inspect(task, graph, session_id, config, db, inv.json, inv.origin),
+            attempts,
+        } => cmd_inspect(
+            task, graph, session_id, config, db, attempts, inv.json, inv.origin,
+        ),
         Command::Accept {
             task,
             identity,
@@ -999,6 +1002,16 @@ fn cmd_status(
         match saga.status(&id) {
             Ok(s) => {
                 if json {
+                    let summary = match saga.run_summary(&id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!(
+                                "{}",
+                                json_out::err("meshloop:status", origin.clone(), format!("{e:?}"))
+                            );
+                            return ExitCode::from(2);
+                        }
+                    };
                     println!(
                         "{}",
                         json_out::ok(
@@ -1006,6 +1019,11 @@ fn cmd_status(
                             origin.clone(),
                             serde_json::json!({
                                 "graph_id": s.graph_id,
+                                "summary": {
+                                    "attempts": summary.attempts,
+                                    "retries": summary.retries,
+                                    "worker_wall_seconds": summary.worker_wall_seconds,
+                                },
                                 "plan_state": format!("{:?}", s.plan_state),
                                 "nodes": s.nodes.iter().map(|n| serde_json::json!({
                                     "id": n.task_id.0,
@@ -1176,6 +1194,7 @@ fn cmd_inspect(
     session_id: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
+    with_attempts: bool,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
@@ -1199,6 +1218,20 @@ fn cmd_inspect(
             Ok(s) => {
                 if let Some(t) = task {
                     if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == t) {
+                        let attempts = match saga.attempts(&id, n.task_id) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                if json {
+                                    println!(
+                                        "{}",
+                                        json_out::err("meshloop:inspect", origin, format!("{e:?}"))
+                                    );
+                                } else {
+                                    eprintln!("{e:?}");
+                                }
+                                return ExitCode::from(1);
+                            }
+                        };
                         if json {
                             println!(
                                 "{}",
@@ -1216,6 +1249,7 @@ fn cmd_inspect(
                                         "note": n.note,
                                         "waiting_for": n.waiting_for.map(|w| w.as_str()),
                                         "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
+                                        "attempts": attempts.iter().map(report::attempt_json).collect::<Vec<_>>(),
                                     }),
                                 )
                             );
@@ -1224,6 +1258,9 @@ fn cmd_inspect(
                                 "task {} state={:?} {} worktree={:?}",
                                 n.task_id.0, n.state, n.description, n.worktree
                             );
+                            for a in &attempts {
+                                println!("{}", report::format_attempt(a));
+                            }
                         }
                         ExitCode::SUCCESS
                     } else {
@@ -1258,6 +1295,29 @@ fn cmd_inspect(
                                 "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
+                        if with_attempts {
+                            for node in data["nodes"].as_array_mut().into_iter().flatten() {
+                                let tid = TaskId(node["id"].as_u64().unwrap_or(0) as u32);
+                                match saga.attempts(&id, tid) {
+                                    Ok(a) => {
+                                        node["attempts"] = serde_json::Value::Array(
+                                            a.iter().map(report::attempt_json).collect(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        println!(
+                                            "{}",
+                                            json_out::err(
+                                                "meshloop:inspect",
+                                                origin,
+                                                format!("{e:?}")
+                                            )
+                                        );
+                                        return ExitCode::from(1);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(export) = git_export {
                             data["git_export"] =
                                 serde_json::to_value(export).unwrap_or(serde_json::Value::Null);
