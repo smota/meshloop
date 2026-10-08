@@ -95,6 +95,8 @@ meshloop accept --task 1 --as your-name
 meshloop resume
 ```
 
+**R1 acceptance rule:** every node stops for `meshloop accept`; the tier selects the harness/model only (ADR 0007 requires human acceptance at Tier 3, and ADR 0016's R1 subset applies it to every node). `meshloop status` / `inspect` show why each node is blocked in `waiting_for` (`acceptance`, `dependency`, `plan_acceptance`, `retry_budget_exhausted`) and `blocked_by`.
+
 ### 5. Integrate — Land Changes on Target Branch
 Only explicit integration merges verified commits into your active branch:
 ```bash

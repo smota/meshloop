@@ -812,6 +812,116 @@ fn review_plan_adjust_rewrites_and_stays_awaiting_review() {
     fs::remove_dir_all(&dir).ok();
 }
 
+fn status_json(dir: &Path, config: &Path, db: &Path) -> serde_json::Value {
+    let out = meshloop()
+        .current_dir(dir)
+        .args(["status", "--json", "--config"])
+        .arg(config)
+        .args(["--db"])
+        .arg(db)
+        .output()
+        .expect("status");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "status stdout: {stdout}");
+    serde_json::from_str(&stdout).expect("status json")
+}
+
+#[test]
+fn status_reports_waiting_for_acceptance_and_dependency() {
+    let dir = disposable_repo("waiting-for");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gw","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null},{"id":2,"description":"second","depends_on":[1],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("run");
+    assert!(
+        output.status.success(),
+        "run stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let parsed = status_json(&dir, &config_path, &db_path);
+    let nodes = parsed["data"]["nodes"].as_array().expect("nodes");
+    let n1 = nodes.iter().find(|n| n["id"] == 1).expect("node 1");
+    let n2 = nodes.iter().find(|n| n["id"] == 2).expect("node 2");
+    assert_eq!(n1["waiting_for"], "acceptance", "{parsed}");
+    assert_eq!(n1["blocked_by"], serde_json::json!([]));
+    assert_eq!(n2["waiting_for"], "dependency", "{parsed}");
+    assert_eq!(n2["blocked_by"], serde_json::json!([1]));
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn review_plan_lists_acceptance_required_and_nodes_wait_for_plan_acceptance() {
+    let dir = disposable_repo("plan-acceptance");
+    let config_path = write_config(&dir, r#"["--emit-graph"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gpa","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let reviewed = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args(["--adjust", "--objective", "tweak", "--json", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .output()
+        .expect("review-plan");
+    let stdout = String::from_utf8_lossy(&reviewed.stdout);
+    assert!(reviewed.status.success(), "stdout={stdout}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let graph_ids: Vec<serde_json::Value> = parsed["data"]["graph"]["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .map(|n| n["id"].clone())
+        .collect();
+    assert!(!graph_ids.is_empty());
+    assert_eq!(
+        parsed["data"]["acceptance_required"],
+        serde_json::Value::Array(graph_ids)
+    );
+    assert_eq!(
+        parsed["data"]["acceptance_rule"],
+        "R1: every node stops for meshloop accept; tier selects harness/model only"
+    );
+
+    let status = status_json(&dir, &config_path, &db_path);
+    let nodes = status["data"]["nodes"].as_array().expect("nodes");
+    assert!(!nodes.is_empty());
+    for n in nodes {
+        assert_eq!(n["waiting_for"], "plan_acceptance", "{status}");
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn bundle_emits_version_locked_session_pack() {
     let dest = std::env::temp_dir().join(format!(

@@ -614,6 +614,8 @@ fn cmd_review_plan(
                     "reason": reason,
                     "as": identity,
                     "graph": graph,
+                    "acceptance_required": graph.nodes.iter().map(|n| n.id.0).collect::<Vec<_>>(),
+                    "acceptance_rule": report::ACCEPTANCE_RULE,
                     "next": next,
                 }),
             )
@@ -624,6 +626,16 @@ fn cmd_review_plan(
             println!("  note: {n}");
         }
         println!("  next: {next}");
+        println!(
+            "  acceptance required (meshloop accept): {}",
+            graph
+                .nodes
+                .iter()
+                .map(|n| n.id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        println!("  {}", report::ACCEPTANCE_RULE);
         if decision == PlanDecision::Adjust {
             print!("{}", report::format_plan(&graph));
         }
@@ -1003,6 +1015,8 @@ fn cmd_status(
                                     "live": n.live,
                                     "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                     "note": n.note,
+                                    "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                    "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                 })).collect::<Vec<_>>(),
                             }),
                         )
@@ -1200,6 +1214,8 @@ fn cmd_inspect(
                                         "pane_id": n.pane_id,
                                         "live": n.live,
                                         "note": n.note,
+                                        "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                        "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                     }),
                                 )
                             );
@@ -1238,6 +1254,8 @@ fn cmd_inspect(
                                 "live": n.live,
                                 "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                 "note": n.note,
+                                "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
                         if let Some(export) = git_export {
