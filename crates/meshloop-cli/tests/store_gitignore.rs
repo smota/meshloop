@@ -95,7 +95,7 @@ fn plan_in_fresh_repo_never_shows_store_as_untracked() {
     let dir = temp_repo("plan");
     let cfg = write_config(&dir);
     let out = meshloop(&dir)
-        .args(["plan", "--fixture-only", "--objective", "x", "--config"])
+        .args(["plan", "--objective", "x", "--config"])
         .arg(&cfg)
         .output()
         .unwrap();
