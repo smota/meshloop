@@ -1370,6 +1370,15 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
             .map(|n| n.task_id.0)
             .collect()
     };
+    // A failure outranks a review stop: exiting 0 on `awaiting_review` would hide it.
+    let failed = ids(TaskState::Failed);
+    if !failed.is_empty() {
+        return Some(("failed", failed));
+    }
+    let cancelled = ids(TaskState::Cancelled);
+    if !cancelled.is_empty() {
+        return Some(("cancelled", cancelled));
+    }
     let review = ids(TaskState::AwaitingReview);
     if !review.is_empty() {
         return Some(("awaiting_review", review));
@@ -1382,14 +1391,6 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
     }
     if compute_overall_status(s) == "completed" {
         return Some(("completed", Vec::new()));
-    }
-    let failed = ids(TaskState::Failed);
-    if !failed.is_empty() {
-        return Some(("failed", failed));
-    }
-    let cancelled = ids(TaskState::Cancelled);
-    if !cancelled.is_empty() {
-        return Some(("cancelled", cancelled));
     }
     None
 }
@@ -2177,4 +2178,39 @@ fn cmd_mutate_plan(
         );
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod watch_exit_tests {
+    use super::*;
+    use meshloop_engine::run_loop::{NodeStatus, RunStatus};
+
+    fn node(id: u32, state: TaskState) -> NodeStatus {
+        NodeStatus {
+            task_id: TaskId(id),
+            waiting_for: None,
+            blocked_by: Vec::new(),
+            description: String::new(),
+            state,
+            note: None,
+            worktree: None,
+            revision: None,
+            pane_id: None,
+            live: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_node_outranks_one_awaiting_review() {
+        let s = RunStatus {
+            graph_id: "g".into(),
+            plan_state: PlanState::PlanAccepted,
+            nodes: vec![
+                node(1, TaskState::Integrated),
+                node(2, TaskState::Failed),
+                node(3, TaskState::AwaitingReview),
+            ],
+        };
+        assert_eq!(watch_exit(&s), Some(("failed", vec![2])));
+    }
 }
