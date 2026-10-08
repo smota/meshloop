@@ -7,7 +7,9 @@ description: Ask the origin user to accept, decline, or adjust a Meshloop graph.
 
 You are `meshloop:origin`. Do not implement. Do not start workers yet.
 
-If `MESHLOOP_ORIGIN_SESSION` is unset, run `/meshloop:doctor` first.
+Pass your origin explicitly (`--origin-harness`, `--origin-session`, or
+`MESHLOOP_ORIGIN_HARNESS` / `MESHLOOP_ORIGIN_SESSION`); `/meshloop:doctor` only echoes
+them back.
 
 **Ask once, in English**, then wait:
 
@@ -16,18 +18,23 @@ If `MESHLOOP_ORIGIN_SESSION` is unset, run `/meshloop:doctor` first.
 
 Treat Portuguese `aceitar` / `recusar` / `ajustar` (and close synonyms) as the
 same three intents. Do **not** show CLI flags until they have chosen. Then run
-**exactly one**:
+**exactly one**, with the values at the start of the line replaced and `--as` naming
+the person who answered:
 
-```text
-meshloop review-plan --plan meshloop-plan.json --accept --as <identity> --json \
-  --origin-harness <h> --origin-session <id>
+```bash
+h=claude; s=0f1e2d3c-session-id; p="/home/me/runs/issue-12/meshloop-plan.json"; meshloop review-plan --plan "$p" --accept --as "Sam" --json --origin-harness "$h" --origin-session "$s"
 
-meshloop review-plan --plan meshloop-plan.json --decline --reason "<why>" --json \
-  --origin-harness <h> --origin-session <id>
+h=claude; s=0f1e2d3c-session-id; p="/home/me/runs/issue-12/meshloop-plan.json"; meshloop review-plan --plan "$p" --decline --reason "Splits issue 12 too finely" --json --origin-harness "$h" --origin-session "$s"
 
-meshloop review-plan --plan meshloop-plan.json --adjust --objective "<changes>" --json \
-  --origin-harness <h> --origin-session <id>
+h=claude; s=0f1e2d3c-session-id; p="/home/me/runs/issue-12/meshloop-plan.json"; meshloop review-plan --plan "$p" --adjust --objective "Merge nodes 2 and 3" --json --origin-harness "$h" --origin-session "$s"
 ```
+
+Accept and Decline start nothing, so you can run them yourself once the user has
+answered. **Adjust runs the planner again**, which starts a worker: your harness may
+refuse to let you run it, and that refusal is correct. Do not route around it. Hand the
+user one line to paste instead (PowerShell form: `$p = "C:\..."; meshloop review-plan
+--plan "$p" ...`), with every value substituted and no `<...>` placeholders, which
+PowerShell parses as redirection.
 
 | Reply | Stored | `run` |
 |---|---|---|

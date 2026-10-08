@@ -104,6 +104,43 @@ meshloop integrate --graph <id> --into main --accept-integrate
 ```
 Without `--accept-integrate`, integration is refused.
 
+When one graph delivers several issues, tag each node with `"deliverable": "issue-12"` in
+the plan and land each issue on its own branch. Without `--accept-integrate` this builds the
+deliverable's worktree for review instead of refusing:
+```bash
+meshloop integrate --graph sprint-4 --deliverable issue-12 --into work/issue-12
+meshloop integrate --graph sprint-4 --deliverable issue-12 --into work/issue-12 --accept-integrate
+```
+
+---
+
+## Supervising from an Agent Session
+
+The origin agent (Claude Code, Codex, ...) supervises; it never implements the work.
+
+- **Origin identity.** Pass `--origin-harness` and `--origin-session`, or set
+  `MESHLOOP_ORIGIN_HARNESS` / `MESHLOOP_ORIGIN_SESSION`. `meshloop doctor --json` only echoes
+  these back as `origin_harness` / `origin_session`; it cannot detect them.
+- **Commands that start workers:** `plan`, `run`, `resume`, `review-plan --adjust`, and
+  `orchestrate` with an origin session (live reviewers). They launch unattended agents that
+  write files, so an agent harness's permission check may refuse them. That is the intended
+  default. Either you run the command yourself, or you add a permission rule that allows
+  these Meshloop commands for the agent. The agent must not route around a refusal.
+- **Commands an agent can always run:** `doctor`, `status`, `inspect`, `watch` and `roles`
+  start nothing. `review-plan --accept|--decline` and `accept` record a person's decision, so
+  the agent runs them only after that person answers, naming them with `--as`.
+- **Paste-ready commands.** When the agent hands you a command, it should be one line with
+  every value filled in and absolute paths quoted. A `<...>` placeholder breaks PowerShell,
+  which parses `<` as redirection:
+  ```powershell
+  $d = "C:\Users\me\runs\issue-12"; meshloop run --plan "$d\meshloop-plan.json" --config "$d\meshloop.toml" --detach --json --origin-harness claude --origin-session 0f1e2d3c-session-id
+  ```
+  ```bash
+  d="/home/me/runs/issue-12"; meshloop run --plan "$d/meshloop-plan.json" --config "$d/meshloop.toml" --detach --json --origin-harness claude --origin-session 0f1e2d3c-session-id
+  ```
+- **Waiting.** After a detached `run`, the agent blocks on `meshloop watch --graph` with the graph id
+  instead of polling `inspect`.
+
 ---
 
 ## CI / Fixture Mode (Offline Testing)
