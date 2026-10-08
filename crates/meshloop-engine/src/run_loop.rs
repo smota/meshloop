@@ -123,9 +123,31 @@ pub struct RunLoop<'a> {
     pub active_graph: Option<String>,
 }
 
+/// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingFor {
+    Acceptance,
+    Dependency,
+    PlanAcceptance,
+    RetryBudgetExhausted,
+}
+
+impl WaitingFor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WaitingFor::Acceptance => "acceptance",
+            WaitingFor::Dependency => "dependency",
+            WaitingFor::PlanAcceptance => "plan_acceptance",
+            WaitingFor::RetryBudgetExhausted => "retry_budget_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeStatus {
     pub task_id: TaskId,
+    pub waiting_for: Option<WaitingFor>,
+    pub blocked_by: Vec<TaskId>,
     pub description: String,
     pub state: TaskState,
     pub note: Option<String>,
@@ -140,6 +162,71 @@ pub struct RunStatus {
     pub graph_id: String,
     pub plan_state: PlanState,
     pub nodes: Vec<NodeStatus>,
+}
+
+/// One evidence row as shown to operators: only the already-redacted summary is carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceView {
+    pub kind: &'static str,
+    pub tool: Option<String>,
+    pub exit_code: Option<i32>,
+    pub summary_redacted: String,
+}
+
+impl EvidenceView {
+    fn from_evidence(e: &Evidence) -> Self {
+        match e {
+            Evidence::Deterministic(d) => Self {
+                kind: "deterministic",
+                tool: Some(d.tool.clone()),
+                exit_code: Some(d.exit_code),
+                summary_redacted: d.output_redacted.clone(),
+            },
+            Evidence::ModelReview(m) => Self {
+                kind: "model_review",
+                tool: Some(format!("{}/{}", m.harness, m.model_ref)),
+                exit_code: None,
+                summary_redacted: format!("{:?}: {}", m.verdict, m.rationale_redacted),
+            },
+            Evidence::HumanAcceptance(h) => Self {
+                kind: "human_acceptance",
+                tool: None,
+                exit_code: None,
+                summary_redacted: format!("accepted by {} at {}", h.accepted_by, h.accepted_at),
+            },
+        }
+    }
+}
+
+/// One attempt as shown to operators (`inspect`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptView {
+    pub attempt_id: AttemptId,
+    pub harness: Option<String>,
+    pub model_ref: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_s: Option<u64>,
+    /// The attempt's last ledger event (e.g. `DeterministicChecksPassed`).
+    pub outcome: Option<String>,
+    /// Revision the attempt's worktree started from.
+    pub base_revision: Option<String>,
+    pub evidence: Vec<EvidenceView>,
+}
+
+/// Run-level totals for `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunSummary {
+    pub attempts: u32,
+    /// Attempts beyond the first per task.
+    pub retries: u32,
+    pub worker_wall_seconds: u64,
+}
+
+fn duration_secs(started: &Option<String>, ended: &Option<String>) -> Option<u64> {
+    let s = started.as_deref()?.parse::<u64>().ok()?;
+    let e = ended.as_deref()?.parse::<u64>().ok()?;
+    Some(e.saturating_sub(s))
 }
 
 fn stamp() -> String {
@@ -240,6 +327,16 @@ impl<'a> RunLoop<'a> {
             occurred_at: stamp(),
         };
         self.store.append(rec.clone())?;
+        // A normal exit ends the attempt. Crash/timeout leaves `ended_at` unset: a live pane
+        // may still be harvested, and liveness treats any ended attempt as Dead.
+        if event == Event::HarnessExited
+            && let Some(id) = attempt
+            && let Some(mut row) = self.store.load_attempt(id)?
+            && row.ended_at.is_none()
+        {
+            row.ended_at = Some(rec.occurred_at.clone());
+            self.store.save_attempt(&row)?;
+        }
         Ok(rec)
     }
 
@@ -1923,6 +2020,70 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
+    /// Attempts for a task, oldest first, with their (redacted) evidence rows.
+    pub fn attempts(
+        &self,
+        graph_id: &str,
+        task_id: TaskId,
+    ) -> Result<Vec<AttemptView>, OrchestratorError> {
+        let mut rows = self.store.attempts_for_task(graph_id, task_id)?;
+        rows.sort_by_key(|a| a.attempt_id.0);
+        // The attempt row's `outcome` column holds the attempt's base revision ("base:<sha>"),
+        // which recovery reads; the outcome shown is the attempt's last ledger event instead.
+        let mut last_event: HashMap<AttemptId, Event> = HashMap::new();
+        for r in self.store.records_for_graph(graph_id)? {
+            if let Some(id) = r.attempt_id {
+                last_event.insert(id, r.event);
+            }
+        }
+        rows.into_iter()
+            .map(|a| {
+                let base_revision = a
+                    .outcome
+                    .as_deref()
+                    .and_then(|o| o.strip_prefix("base:"))
+                    .map(String::from);
+                let outcome = match last_event.get(&a.attempt_id) {
+                    Some(e) => Some(format!("{e:?}")),
+                    None if base_revision.is_none() => a.outcome.clone(),
+                    None => None,
+                };
+                let evidence = self
+                    .store
+                    .evidence_for_attempt(a.task_id, a.attempt_id)?
+                    .iter()
+                    .map(EvidenceView::from_evidence)
+                    .collect();
+                Ok(AttemptView {
+                    attempt_id: a.attempt_id,
+                    duration_s: duration_secs(&a.started_at, &a.ended_at),
+                    harness: a.harness,
+                    model_ref: a.model_ref,
+                    started_at: a.started_at,
+                    ended_at: a.ended_at,
+                    outcome,
+                    base_revision,
+                    evidence,
+                })
+            })
+            .collect()
+    }
+
+    pub fn run_summary(&self, graph_id: &str) -> Result<RunSummary, OrchestratorError> {
+        let rows = self.store.attempts_for_graph(graph_id)?;
+        let mut per_task: HashMap<TaskId, u32> = HashMap::new();
+        let mut wall = 0u64;
+        for a in &rows {
+            *per_task.entry(a.task_id).or_default() += 1;
+            wall += duration_secs(&a.started_at, &a.ended_at).unwrap_or(0);
+        }
+        Ok(RunSummary {
+            attempts: rows.len() as u32,
+            retries: per_task.values().map(|c| c - 1).sum(),
+            worker_wall_seconds: wall,
+        })
+    }
+
     pub fn status(&mut self, graph_id: &str) -> Result<RunStatus, OrchestratorError> {
         let row = self
             .store
@@ -1951,8 +2112,48 @@ impl<'a> RunLoop<'a> {
             } else {
                 None
             };
+            let mut blocked_by: Vec<TaskId> = n
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|d| {
+                    !matches!(
+                        tasks.get(d).copied().unwrap_or(TaskState::Pending),
+                        TaskState::Accepted | TaskState::Integrated
+                    )
+                })
+                .collect();
+            blocked_by.sort();
+            blocked_by.dedup();
+            let terminal = matches!(
+                state,
+                TaskState::Accepted | TaskState::Integrated | TaskState::Cancelled
+            );
+            let waiting_for = if row.plan_state == PlanState::AwaitingPlanReview && !terminal {
+                Some(WaitingFor::PlanAcceptance)
+            } else if state == TaskState::AwaitingReview {
+                Some(WaitingFor::Acceptance)
+            } else if matches!(
+                state,
+                TaskState::Pending | TaskState::Ready | TaskState::Blocked
+            ) && !blocked_by.is_empty()
+            {
+                Some(WaitingFor::Dependency)
+            } else if state == TaskState::Failed
+                && self.store.attempts_for_task(graph_id, n.id)?.len() as u32
+                    >= self.limits.max_retries
+            {
+                Some(WaitingFor::RetryBudgetExhausted)
+            } else {
+                None
+            };
+            if waiting_for != Some(WaitingFor::Dependency) {
+                blocked_by.clear();
+            }
             nodes.push(NodeStatus {
                 task_id: n.id,
+                waiting_for,
+                blocked_by,
                 description: n.description.clone(),
                 state,
                 note,

@@ -192,7 +192,27 @@ fn dispatch(inv: Invocation) -> ExitCode {
             session_id,
             config,
             db,
-        } => cmd_inspect(task, graph, session_id, config, db, inv.json, inv.origin),
+            attempts,
+        } => cmd_inspect(
+            task, graph, session_id, config, db, attempts, inv.json, inv.origin,
+        ),
+        Command::Watch {
+            graph,
+            session_id,
+            config,
+            db,
+            interval_secs,
+            timeout_secs,
+        } => cmd_watch(
+            graph,
+            session_id,
+            config,
+            db,
+            interval_secs,
+            timeout_secs,
+            inv.json,
+            inv.origin,
+        ),
         Command::Accept {
             task,
             identity,
@@ -614,6 +634,8 @@ fn cmd_review_plan(
                     "reason": reason,
                     "as": identity,
                     "graph": graph,
+                    "acceptance_required": graph.nodes.iter().map(|n| n.id.0).collect::<Vec<_>>(),
+                    "acceptance_rule": report::ACCEPTANCE_RULE,
                     "next": next,
                 }),
             )
@@ -624,6 +646,16 @@ fn cmd_review_plan(
             println!("  note: {n}");
         }
         println!("  next: {next}");
+        println!(
+            "  acceptance required (meshloop accept): {}",
+            graph
+                .nodes
+                .iter()
+                .map(|n| n.id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        println!("  {}", report::ACCEPTANCE_RULE);
         if decision == PlanDecision::Adjust {
             print!("{}", report::format_plan(&graph));
         }
@@ -987,6 +1019,16 @@ fn cmd_status(
         match saga.status(&id) {
             Ok(s) => {
                 if json {
+                    let summary = match saga.run_summary(&id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!(
+                                "{}",
+                                json_out::err("meshloop:status", origin.clone(), format!("{e:?}"))
+                            );
+                            return ExitCode::from(2);
+                        }
+                    };
                     println!(
                         "{}",
                         json_out::ok(
@@ -994,6 +1036,11 @@ fn cmd_status(
                             origin.clone(),
                             serde_json::json!({
                                 "graph_id": s.graph_id,
+                                "summary": {
+                                    "attempts": summary.attempts,
+                                    "retries": summary.retries,
+                                    "worker_wall_seconds": summary.worker_wall_seconds,
+                                },
                                 "plan_state": format!("{:?}", s.plan_state),
                                 "nodes": s.nodes.iter().map(|n| serde_json::json!({
                                     "id": n.task_id.0,
@@ -1003,6 +1050,8 @@ fn cmd_status(
                                     "live": n.live,
                                     "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                     "note": n.note,
+                                    "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                    "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                 })).collect::<Vec<_>>(),
                             }),
                         )
@@ -1162,6 +1211,7 @@ fn cmd_inspect(
     session_id: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
+    with_attempts: bool,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
@@ -1185,6 +1235,20 @@ fn cmd_inspect(
             Ok(s) => {
                 if let Some(t) = task {
                     if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == t) {
+                        let attempts = match saga.attempts(&id, n.task_id) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                if json {
+                                    println!(
+                                        "{}",
+                                        json_out::err("meshloop:inspect", origin, format!("{e:?}"))
+                                    );
+                                } else {
+                                    eprintln!("{e:?}");
+                                }
+                                return ExitCode::from(1);
+                            }
+                        };
                         if json {
                             println!(
                                 "{}",
@@ -1200,6 +1264,9 @@ fn cmd_inspect(
                                         "pane_id": n.pane_id,
                                         "live": n.live,
                                         "note": n.note,
+                                        "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                        "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
+                                        "attempts": attempts.iter().map(report::attempt_json).collect::<Vec<_>>(),
                                     }),
                                 )
                             );
@@ -1208,6 +1275,9 @@ fn cmd_inspect(
                                 "task {} state={:?} {} worktree={:?}",
                                 n.task_id.0, n.state, n.description, n.worktree
                             );
+                            for a in &attempts {
+                                println!("{}", report::format_attempt(a));
+                            }
                         }
                         ExitCode::SUCCESS
                     } else {
@@ -1238,8 +1308,33 @@ fn cmd_inspect(
                                 "live": n.live,
                                 "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                 "note": n.note,
+                                "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
+                        if with_attempts {
+                            for node in data["nodes"].as_array_mut().into_iter().flatten() {
+                                let tid = TaskId(node["id"].as_u64().unwrap_or(0) as u32);
+                                match saga.attempts(&id, tid) {
+                                    Ok(a) => {
+                                        node["attempts"] = serde_json::Value::Array(
+                                            a.iter().map(report::attempt_json).collect(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        println!(
+                                            "{}",
+                                            json_out::err(
+                                                "meshloop:inspect",
+                                                origin,
+                                                format!("{e:?}")
+                                            )
+                                        );
+                                        return ExitCode::from(1);
+                                    }
+                                }
+                            }
+                        }
                         if let Some(export) = git_export {
                             data["git_export"] =
                                 serde_json::to_value(export).unwrap_or(serde_json::Value::Null);
@@ -1262,6 +1357,150 @@ fn cmd_inspect(
                 }
                 ExitCode::from(1)
             }
+        }
+    })
+}
+
+/// Why a `watch` stopped, and the nodes responsible. Returns `None` while the run is still moving.
+fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str, Vec<u32>)> {
+    let ids = |state: TaskState| -> Vec<u32> {
+        s.nodes
+            .iter()
+            .filter(|n| n.state == state)
+            .map(|n| n.task_id.0)
+            .collect()
+    };
+    // A failure outranks a review stop: exiting 0 on `awaiting_review` would hide it.
+    let failed = ids(TaskState::Failed);
+    if !failed.is_empty() {
+        return Some(("failed", failed));
+    }
+    let cancelled = ids(TaskState::Cancelled);
+    if !cancelled.is_empty() {
+        return Some(("cancelled", cancelled));
+    }
+    let review = ids(TaskState::AwaitingReview);
+    if !review.is_empty() {
+        return Some(("awaiting_review", review));
+    }
+    if s.plan_state == PlanState::AwaitingPlanReview {
+        return Some((
+            "awaiting_plan_acceptance",
+            s.nodes.iter().map(|n| n.task_id.0).collect(),
+        ));
+    }
+    if compute_overall_status(s) == "completed" {
+        return Some(("completed", Vec::new()));
+    }
+    None
+}
+
+/// Reads the store only (never owns workers), so it also works on `run --detach`.
+#[allow(clippy::too_many_arguments)]
+fn cmd_watch(
+    graph: Option<String>,
+    session_id: Option<String>,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    interval_secs: u64,
+    timeout_secs: u64,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let resolved_id = graph.or(session_id);
+    with_saga(config, db, None, false, origin.clone(), |saga| {
+        let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
+            Ok(id) => id,
+            Err(e) => {
+                let msg = format!("graph not found: {e:?}");
+                if json {
+                    println!("{}", json_out::err("meshloop:watch", origin, msg));
+                } else {
+                    eprintln!("{msg}");
+                }
+                return ExitCode::from(2);
+            }
+        };
+        let started = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let interval = std::time::Duration::from_secs(interval_secs);
+        let mut seen: HashMap<u32, TaskState> = HashMap::new();
+        loop {
+            let s = match saga.status(&id) {
+                Ok(s) => s,
+                Err(e) => {
+                    let missing = matches!(e, OrchestratorError::MissingGraph(_));
+                    let msg = if missing {
+                        format!("graph '{id}' not found: {e:?}")
+                    } else {
+                        format!("{e:?}")
+                    };
+                    if json {
+                        println!("{}", json_out::err("meshloop:watch", origin, msg));
+                    } else {
+                        eprintln!("{msg}");
+                    }
+                    return ExitCode::from(if missing { 2 } else { 1 });
+                }
+            };
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            for n in &s.nodes {
+                let prev = seen.insert(n.task_id.0, n.state);
+                if prev == Some(n.state) {
+                    continue;
+                }
+                let waiting = n.waiting_for.map(|w| w.as_str());
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ts": ts,
+                            "graph_id": s.graph_id,
+                            "node": n.task_id.0,
+                            "from": prev.map(|p| format!("{p:?}")),
+                            "to": format!("{:?}", n.state),
+                            "waiting_for": waiting,
+                        })
+                    );
+                } else {
+                    let from = prev.map_or("-".to_string(), |p| format!("{p:?}"));
+                    let wait = waiting.map_or(String::new(), |w| format!(" (waiting: {w})"));
+                    println!(
+                        "[{ts}] {} node {}: {from} -> {:?}{wait}",
+                        s.graph_id, n.task_id.0, n.state
+                    );
+                }
+            }
+            let (reason, nodes, code) = match watch_exit(&s) {
+                Some((reason, nodes)) => {
+                    let code = match reason {
+                        "failed" | "cancelled" => 1,
+                        _ => 0,
+                    };
+                    (reason, nodes, code)
+                }
+                None if timeout_secs > 0 && started.elapsed() >= timeout => {
+                    ("timeout", Vec::new(), 3)
+                }
+                None => {
+                    let mut nap = interval;
+                    if timeout_secs > 0 {
+                        nap = nap.min(timeout.saturating_sub(started.elapsed()));
+                    }
+                    std::thread::sleep(nap);
+                    continue;
+                }
+            };
+            if json {
+                println!("{}", serde_json::json!({ "exit": reason, "nodes": nodes }));
+            } else {
+                let ids: Vec<String> = nodes.iter().map(u32::to_string).collect();
+                println!("exit: {reason} nodes=[{}]", ids.join(","));
+            }
+            return ExitCode::from(code);
         }
     })
 }
@@ -1939,4 +2178,39 @@ fn cmd_mutate_plan(
         );
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod watch_exit_tests {
+    use super::*;
+    use meshloop_engine::run_loop::{NodeStatus, RunStatus};
+
+    fn node(id: u32, state: TaskState) -> NodeStatus {
+        NodeStatus {
+            task_id: TaskId(id),
+            waiting_for: None,
+            blocked_by: Vec::new(),
+            description: String::new(),
+            state,
+            note: None,
+            worktree: None,
+            revision: None,
+            pane_id: None,
+            live: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_node_outranks_one_awaiting_review() {
+        let s = RunStatus {
+            graph_id: "g".into(),
+            plan_state: PlanState::PlanAccepted,
+            nodes: vec![
+                node(1, TaskState::Integrated),
+                node(2, TaskState::Failed),
+                node(3, TaskState::AwaitingReview),
+            ],
+        };
+        assert_eq!(watch_exit(&s), Some(("failed", vec![2])));
+    }
 }

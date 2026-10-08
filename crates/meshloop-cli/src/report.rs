@@ -2,7 +2,10 @@
 
 use meshloop_domain::state::TaskState;
 use meshloop_domain::task_graph::TaskGraph;
-use meshloop_engine::run_loop::{IdleReason, RunStatus};
+use meshloop_engine::run_loop::{AttemptView, IdleReason, RunStatus};
+
+pub const ACCEPTANCE_RULE: &str =
+    "R1: every node stops for meshloop accept; tier selects harness/model only";
 
 pub fn format_plan(graph: &TaskGraph) -> String {
     let mut out = format!(
@@ -73,6 +76,14 @@ pub fn format_status(status: &RunStatus) -> String {
             n.pane_id.as_deref().unwrap_or("-"),
             n.live.as_deref().unwrap_or("-")
         );
+        if let Some(w) = n.waiting_for {
+            if n.blocked_by.is_empty() {
+                out += &format!("      waiting: {}\n", w.as_str());
+            } else {
+                let ids: Vec<String> = n.blocked_by.iter().map(|d| d.0.to_string()).collect();
+                out += &format!("      waiting: {} {}\n", w.as_str(), ids.join(","));
+            }
+        }
         if let Some(note) = &n.note {
             out += &format!("      note: {note}\n");
         }
@@ -84,6 +95,39 @@ pub fn format_status(status: &RunStatus) -> String {
         }
     }
     out
+}
+
+pub fn attempt_json(a: &AttemptView) -> serde_json::Value {
+    serde_json::json!({
+        "attempt_id": a.attempt_id.0,
+        "harness": a.harness,
+        "model_ref": a.model_ref,
+        "started_at": a.started_at,
+        "ended_at": a.ended_at,
+        "duration_s": a.duration_s,
+        "outcome": a.outcome,
+        "base_revision": a.base_revision,
+        "evidence": a.evidence.iter().map(|e| serde_json::json!({
+            "kind": e.kind,
+            "tool": e.tool,
+            "exit_code": e.exit_code,
+            "summary_redacted": e.summary_redacted,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+pub fn format_attempt(a: &AttemptView) -> String {
+    format!(
+        "  attempt {} harness={} model={} duration={} outcome={} evidence={}",
+        a.attempt_id.0,
+        a.harness.as_deref().unwrap_or("-"),
+        a.model_ref.as_deref().unwrap_or("-"),
+        a.duration_s
+            .map(|d| format!("{d}s"))
+            .unwrap_or_else(|| "-".into()),
+        a.outcome.as_deref().unwrap_or("-"),
+        a.evidence.len()
+    )
 }
 
 pub fn banner() -> String {

@@ -370,6 +370,30 @@ impl EvidenceStore for SqliteStore {
         }
         Ok(out)
     }
+
+    fn evidence_for_attempt(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+    ) -> Result<Vec<Evidence>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT payload_json FROM evidence WHERE task_id = ?1 AND attempt_id = ?2 ORDER BY rowid",
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![task_id.0, attempt_id.0], |r| r.get::<_, String>(0))
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let json = row.map_err(|e| StoreError::Io(e.to_string()))?;
+            let ev: Evidence =
+                serde_json::from_str(&json).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
 }
 
 impl RoutingFeedbackStore for SqliteStore {
