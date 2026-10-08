@@ -21,11 +21,15 @@ pub fn format_plan(graph: &TaskGraph) -> String {
     for node in &graph.nodes {
         let deps: Vec<String> = node.depends_on.iter().map(|d| d.0.to_string()).collect();
         out += &format!(
-            "  [{}] {} (tier: {:?}, depends_on: [{}])\n",
+            "  [{}] {} (tier: {:?}, depends_on: [{}]{})\n",
             node.id.0,
             node.description,
             node.tier,
-            deps.join(", ")
+            deps.join(", "),
+            node.deliverable
+                .as_deref()
+                .map(|d| format!(", deliverable: {d}"))
+                .unwrap_or_default()
         );
     }
     out += "Next: `meshloop review-plan --plan <file> --accept|--decline|--adjust`.\n\
@@ -79,6 +83,12 @@ pub fn format_status(status: &RunStatus) -> String {
             n.pane_id.as_deref().unwrap_or("-"),
             n.live.as_deref().unwrap_or("-")
         );
+        if let Some(d) = &n.deliverable {
+            out += &format!(
+                "      deliverable: {d}
+"
+            );
+        }
         if let Some(w) = n.waiting_for {
             if n.blocked_by.is_empty() {
                 out += &format!("      waiting: {}\n", w.as_str());
@@ -157,6 +167,7 @@ mod tests {
                 tier: Some(Tier::Tier1),
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             }],
         };
         let rendered = format_plan(&graph);

@@ -188,6 +188,26 @@ impl WorkspacePort for GitWorktreeAdapter {
         }
     }
 
+    fn cherry_pick_range(
+        &self,
+        worktree: &Path,
+        base: &str,
+        head: &str,
+    ) -> Result<(), WorkspaceError> {
+        let range = format!("{base}..{head}");
+        let count = self.run_in(worktree, &["rev-list", "--count", &range])?;
+        if count.trim() == "0" {
+            return Ok(());
+        }
+        match self.run_in(worktree, &["cherry-pick", &range]) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let _ = self.run_in(worktree, &["cherry-pick", "--abort"]);
+                Err(WorkspaceError::Conflict)
+            }
+        }
+    }
+
     fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError> {
         match self.run(&["rev-parse", "--verify", branch]) {
             Ok(_) => Ok(true),

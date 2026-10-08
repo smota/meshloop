@@ -465,6 +465,7 @@ mod tests {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(2),
@@ -473,6 +474,7 @@ mod tests {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(3),
@@ -481,6 +483,7 @@ mod tests {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 },
             ],
         };
@@ -500,6 +503,7 @@ mod tests {
                 tier: Some(Tier::Tier3),
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             }],
         };
         assign_tiers(&mut graph, &DefaultTierAssigner);

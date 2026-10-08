@@ -225,6 +225,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             graph,
             into,
             accept_integrate,
+            deliverable,
             config,
             db,
             worktree_base,
@@ -232,9 +233,11 @@ fn dispatch(inv: Invocation) -> ExitCode {
             graph,
             into,
             accept_integrate,
+            deliverable,
             config,
             db,
             worktree_base,
+            inv.json,
             inv.origin,
         ),
         Command::Orchestrate {
@@ -1070,6 +1073,7 @@ fn cmd_status(
                                     "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                     "note": n.note,
                                     "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                    "deliverable": n.deliverable,
                                     "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                 })).collect::<Vec<_>>(),
                             }),
@@ -1284,6 +1288,7 @@ fn cmd_inspect(
                                         "live": n.live,
                                         "note": n.note,
                                         "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                        "deliverable": n.deliverable,
                                         "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                         "attempts": attempts.iter().map(report::attempt_json).collect::<Vec<_>>(),
                                     }),
@@ -1328,6 +1333,7 @@ fn cmd_inspect(
                                 "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                 "note": n.note,
                                 "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                "deliverable": n.deliverable,
                                 "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
@@ -1555,15 +1561,31 @@ fn cmd_accept(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_integrate(
     graph: String,
     into: String,
     accept_integrate: bool,
+    deliverable: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
+    json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
+    if let Some(tag) = deliverable {
+        return cmd_integrate_deliverable(
+            graph,
+            tag,
+            into,
+            accept_integrate,
+            config,
+            db,
+            worktree_base,
+            json,
+            origin,
+        );
+    }
     if !accept_integrate {
         eprintln!("integrate requires --accept-integrate after reviewing the integrate worktree");
         return ExitCode::from(2);
@@ -1578,6 +1600,99 @@ fn cmd_integrate(
         Err(e) => {
             eprintln!("{e:?}");
             ExitCode::from(1)
+        }
+    })
+}
+
+/// `integrate --deliverable`: without `--accept-integrate`, (re)build the deliverable
+/// worktree for review; with it, land the reviewed worktree (building it if absent).
+#[allow(clippy::too_many_arguments)]
+fn cmd_integrate_deliverable(
+    graph: String,
+    tag: String,
+    into: String,
+    accept_integrate: bool,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    worktree_base: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let cmd = "meshloop:integrate";
+    with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
+        let result = if accept_integrate {
+            saga.integrate_deliverable_into(&graph, &tag, &into)
+                .map(|()| None)
+        } else {
+            saga.prepare_deliverable(&graph, &tag).map(Some)
+        };
+        match result {
+            Ok(Some(view)) => {
+                let ids = |v: &[TaskId]| v.iter().map(|t| t.0).collect::<Vec<_>>();
+                if json {
+                    let data = serde_json::json!({
+                        "graph_id": graph,
+                        "deliverable": view.tag,
+                        "worktree": view.worktree.display().to_string(),
+                        "branch": view.branch,
+                        "head": view.head,
+                        "nodes": ids(&view.nodes),
+                        "outside_dependencies": ids(&view.outside_dependencies),
+                        "next": format!(
+                            "review the worktree, then: meshloop integrate --graph {graph} --deliverable {tag} --into {into} --accept-integrate"
+                        ),
+                    });
+                    println!("{}", json_out::ok(cmd, origin.clone(), data));
+                } else {
+                    println!(
+                        "deliverable {tag}: nodes {:?} replayed onto {} ({})",
+                        ids(&view.nodes),
+                        view.worktree.display(),
+                        view.head
+                    );
+                    if !view.outside_dependencies.is_empty() {
+                        println!(
+                            "  includes dependencies outside {tag}: {:?}",
+                            ids(&view.outside_dependencies)
+                        );
+                    }
+                    println!("review it, then rerun with --accept-integrate to land it on {into}");
+                }
+                ExitCode::SUCCESS
+            }
+            Ok(None) => {
+                if json {
+                    let data = serde_json::json!({
+                        "graph_id": graph, "deliverable": tag, "into": into,
+                    });
+                    println!("{}", json_out::ok(cmd, origin.clone(), data));
+                } else {
+                    println!("integrated deliverable {tag} of graph {graph} into {into}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let msg = match &e {
+                    OrchestratorError::UnknownDeliverable(t) => {
+                        format!("no node in graph {graph} has deliverable '{t}'")
+                    }
+                    OrchestratorError::DeliverableNotReady { task, state } => format!(
+                        "deliverable {tag} needs task {} accepted first (it is {state:?})",
+                        task.0
+                    ),
+                    OrchestratorError::DeliverableConflict(task) => format!(
+                        "replaying task {}'s commits onto deliverable {tag} conflicted; its changes depend on work outside this deliverable",
+                        task.0
+                    ),
+                    other => format!("{other:?}"),
+                };
+                if json {
+                    println!("{}", json_out::err(cmd, origin.clone(), &msg));
+                } else {
+                    eprintln!("{msg}");
+                }
+                ExitCode::from(1)
+            }
         }
     })
 }
@@ -2264,6 +2379,7 @@ mod watch_exit_tests {
             revision: None,
             pane_id: None,
             live: None,
+            deliverable: None,
         }
     }
 

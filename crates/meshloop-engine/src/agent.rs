@@ -193,6 +193,7 @@ fn planning_output_contract() -> String {
             tier: Some(Tier::Tier1),
             allowed_paths: vec!["crates/widgets/src/".into()],
             empty_diff_ok: false,
+            deliverable: Some("issue-12".into()),
         }],
     };
     let example = serde_json::to_string_pretty(&example).unwrap_or_default();
@@ -210,6 +211,9 @@ fn planning_output_contract() -> String {
          (e.g. \"crates/foo/src/\"); omit or [] for no restriction.\n\
          - empty_diff_ok: boolean, default false. Set true only for a node that legitimately \
          produces no diff (e.g. a pure analysis or verification step); otherwise leave false.\n\
+         - deliverable: optional string matching [A-Za-z0-9._-]+ naming what the node ships \
+         with, e.g. \"issue-12\" when one graph delivers several issues. Nodes that share it \
+         are integrated together. Omit it when the graph has one deliverable.\n\
          Example of a valid one-node graph:\n{example}\n\
          No other files unless required to produce that graph. Do not print prose."
     )
@@ -256,6 +260,7 @@ mod tests {
             tier: Some(Tier::Tier1),
             allowed_paths: vec![],
             empty_diff_ok: false,
+            deliverable: None,
         }
     }
 
@@ -363,6 +368,7 @@ mod tests {
         }
         assert!(spec.prompt.contains("[A-Za-z0-9._-]+"));
         assert!(spec.prompt.contains("empty_diff_ok"));
+        assert!(spec.prompt.contains("deliverable"));
         assert!(spec.prompt.contains("\"graph_id\": \"example-graph\""));
     }
 

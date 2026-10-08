@@ -39,6 +39,10 @@ pub struct TaskNode {
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub empty_diff_ok: bool,
+    /// Groups nodes that ship together (for example one issue's PR). `integrate
+    /// --deliverable <tag>` lands only that group. Same character set as `graph_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +59,7 @@ pub enum GraphError {
     Empty,
     IllegalGraphId(String),
     ReservedTaskId(TaskId),
+    IllegalDeliverable { node: TaskId, tag: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +121,14 @@ impl TaskGraph {
 
         let mut seen = HashSet::new();
         for node in &self.nodes {
+            if let Some(tag) = &node.deliverable
+                && !graph_id_is_legal(tag)
+            {
+                return Err(GraphError::IllegalDeliverable {
+                    node: node.id,
+                    tag: tag.clone(),
+                });
+            }
             if node.id.0 == 0 {
                 return Err(GraphError::ReservedTaskId(node.id));
             }
@@ -289,6 +302,7 @@ mod tests {
             tier: None,
             allowed_paths: vec![],
             empty_diff_ok: false,
+            deliverable: None,
         }
     }
 

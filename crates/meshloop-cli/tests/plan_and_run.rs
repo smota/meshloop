@@ -2264,3 +2264,235 @@ tier = \"Tier2\"",
     }
     fs::remove_dir_all(&dir).ok();
 }
+
+/// Subjects of the commits on `rev` that are not on `base`, in `repo`.
+fn commit_subjects(repo: &Path, base: &str, rev: &str) -> Vec<String> {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["log", "--format=%s", &format!("{base}..{rev}")])
+        .output()
+        .expect("git log");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn tasks_in(subjects: &[String]) -> Vec<u32> {
+    let mut ids: Vec<u32> = subjects
+        .iter()
+        .filter_map(|s| s.rsplit("for task ").next()?.trim().parse().ok())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[test]
+fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
+    // Issue #55: one PR per issue from a multi-issue graph. Attempts start from the shared
+    // integrate head, so the deliverable must replay each node's own commits only.
+    let dir = disposable_repo("deliverable");
+    // Keep config, plan, store and worktrees outside the repo so it stays clean for landing.
+    let aux = dir.with_file_name(format!(
+        "{}-aux",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = fs::remove_dir_all(&aux);
+    fs::create_dir_all(&aux).unwrap();
+    let config_path = write_config(&aux, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = aux.join("plan.json");
+    let db_path = aux.join("state.sqlite");
+    let worktree_base = aux.join("worktrees");
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gd","nodes":[
+            {"id":1,"description":"a1","depends_on":[],"tier":null,"deliverable":"issue-a"},
+            {"id":2,"description":"b1","depends_on":[],"tier":null,"deliverable":"issue-b"},
+            {"id":3,"description":"b2","depends_on":[1],"tier":null,"deliverable":"issue-b"},
+            {"id":4,"description":"c1","depends_on":[],"tier":null,"deliverable":"issue-c"}]}"#,
+    )
+    .unwrap();
+    // `run` writes .meshloop/plan.json into the repo; consuming repos ignore it (#44).
+    fs::write(dir.join(".gitignore"), "/.meshloop/\n").unwrap();
+    for args in [
+        &["add", ".gitignore"][..],
+        &["commit", "-q", "-m", "ignore store"],
+    ] {
+        Command::new("git")
+            .current_dir(&dir)
+            .args(args)
+            .status()
+            .unwrap();
+    }
+    let seed = String::from_utf8_lossy(
+        &Command::new("git")
+            .current_dir(&dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    let common = |cmd: &mut Command| {
+        cmd.arg("--config")
+            .arg(&config_path)
+            .arg("--db")
+            .arg(&db_path)
+            .arg("--worktree-base")
+            .arg(&worktree_base);
+    };
+
+    let mut run = meshloop();
+    run.current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .arg("--accept-plan");
+    common(&mut run);
+    let out = run.output().expect("run");
+    assert!(
+        out.status.success(),
+        "run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Accept whatever awaits review and resume until every node is accepted.
+    for _ in 0..12 {
+        let status = status_json(&dir, &config_path, &db_path);
+        let nodes = status["data"]["nodes"].as_array().unwrap().clone();
+        if nodes
+            .iter()
+            .all(|n| n["state"] == "Accepted" || n["state"] == "Integrated")
+        {
+            break;
+        }
+        for n in nodes.iter().filter(|n| n["state"] == "AwaitingReview") {
+            let mut accept = meshloop();
+            accept.current_dir(&dir).args([
+                "accept",
+                "--task",
+                &n["id"].to_string(),
+                "--as",
+                "tester",
+            ]);
+            common(&mut accept);
+            assert!(accept.output().unwrap().status.success());
+        }
+        let mut resume = meshloop();
+        resume.current_dir(&dir).arg("resume");
+        common(&mut resume);
+        resume.output().expect("resume");
+    }
+    let status = status_json(&dir, &config_path, &db_path);
+    let nodes = status["data"]["nodes"].as_array().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n["state"] == "Accepted" || n["state"] == "Integrated"),
+        "{status}"
+    );
+    assert_eq!(nodes[2]["deliverable"], "issue-b", "{status}");
+
+    let prepare = |tag: &str| {
+        let mut cmd = meshloop();
+        cmd.current_dir(&dir).args([
+            "integrate",
+            "--graph",
+            "gd",
+            "--deliverable",
+            tag,
+            "--into",
+            "main",
+            "--json",
+        ]);
+        common(&mut cmd);
+        let out = cmd.output().expect("integrate --deliverable");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        (out.status.success(), stdout)
+    };
+
+    let (ok, stdout) = prepare("issue-a");
+    assert!(ok, "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["data"]["nodes"], serde_json::json!([1]), "{stdout}");
+    assert_eq!(v["data"]["outside_dependencies"], serde_json::json!([]));
+    let wt_a = PathBuf::from(v["data"]["worktree"].as_str().unwrap());
+    assert_eq!(tasks_in(&commit_subjects(&wt_a, &seed, "HEAD")), vec![1]);
+
+    let (ok, stdout) = prepare("issue-b");
+    assert!(ok, "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["data"]["outside_dependencies"], serde_json::json!([1]));
+    let wt_b = PathBuf::from(v["data"]["worktree"].as_str().unwrap());
+    assert_eq!(
+        tasks_in(&commit_subjects(&wt_b, &seed, "HEAD")),
+        vec![1, 2, 3],
+        "issue-b must not carry issue-c's node 4"
+    );
+
+    let (ok, stdout) = prepare("issue-z");
+    assert!(!ok, "{stdout}");
+    assert!(stdout.contains("issue-z"), "{stdout}");
+
+    // Land issue-a on its own branch, cut from the seed.
+    Command::new("git")
+        .current_dir(&dir)
+        .args(["branch", "work/issue-a", &seed])
+        .status()
+        .unwrap();
+    let mut land = meshloop();
+    land.current_dir(&dir).args([
+        "integrate",
+        "--graph",
+        "gd",
+        "--deliverable",
+        "issue-a",
+        "--into",
+        "work/issue-a",
+        "--accept-integrate",
+    ]);
+    common(&mut land);
+    let out = land.output().expect("land");
+    assert!(
+        out.status.success(),
+        "land: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        tasks_in(&commit_subjects(&dir, &seed, "work/issue-a")),
+        vec![1]
+    );
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&aux).ok();
+}
+
+#[test]
+fn plan_rejects_an_illegal_deliverable_tag() {
+    let dir = disposable_repo("deliverable-illegal");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"gi","nodes":[{"id":1,"description":"x","depends_on":[],"tier":null,"deliverable":"issue a/b"}]}"#,
+    )
+    .unwrap();
+    let out = meshloop()
+        .current_dir(&dir)
+        .args(["review-plan", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("review-plan");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("IllegalDeliverable"), "{all}");
+    fs::remove_dir_all(&dir).ok();
+}

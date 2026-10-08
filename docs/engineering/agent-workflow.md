@@ -93,7 +93,11 @@ When an issue splits into independent nodes, the developer role drives Meshloop:
    `meshloop accept --task <id> --as <identity>`, naming whoever actually accepted. Tier 3
    nodes always need human acceptance.
 4. Integrate explicitly with `meshloop integrate --graph <id> --into work/<slug>`, then
-   rerun the workspace check on the combined candidate.
+   rerun the workspace check on the combined candidate. When one graph delivers several
+   issues, tag each node with `"deliverable": "issue-<n>"` in the plan and land each issue on
+   its own branch with `meshloop integrate --graph <id> --deliverable issue-<n> --into
+   work/<slug>`: run it once without `--accept-integrate` to build the worktree for review,
+   then again with it.
 
 Meshloop owns its technical plan, worktrees, workers, and technical acceptance. AgentFlow
 owns SDLC acceptance. A Meshloop completion receipt (`git_export`) is evidence, not a merge
