@@ -84,6 +84,29 @@ impl RunLimits {
     }
 }
 
+/// How `plan` picks the harness that runs `meshloop:planner`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerSelection {
+    /// Route across every candidate as a task of this tier would be routed.
+    Route(Tier),
+    /// Use this configured harness regardless of its `model_tier`. It must still pass its
+    /// probe, be dispatchable and be out of quota cooldown.
+    Harness(String),
+}
+
+impl Default for PlannerSelection {
+    fn default() -> Self {
+        Self::Route(Tier::Tier3)
+    }
+}
+
+/// A produced graph and the candidate that planned it, as configured (real `model_tier`).
+#[derive(Debug, Clone)]
+pub struct Planned {
+    pub graph: TaskGraph,
+    pub planner: Candidate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleReason {
     GraphComplete,
@@ -121,6 +144,7 @@ pub struct RunLoop<'a> {
     pub verify_command: Vec<String>,
     pub worktree_base: PathBuf,
     pub active_graph: Option<String>,
+    pub planner: PlannerSelection,
 }
 
 /// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
@@ -349,34 +373,49 @@ impl<'a> RunLoop<'a> {
         self.store.graph_from_run(graph_id).map_err(Into::into)
     }
 
-    pub fn plan(&mut self, objective: &str, scope: &str) -> Result<TaskGraph, OrchestratorError> {
+    /// The candidates planning may use and the tier they are routed at. An explicit planner
+    /// harness is routed as Tier1, which every model tier fits, so only its probe, dispatch
+    /// readiness and quota decide.
+    fn planner_pool(&self) -> Result<(Vec<Candidate>, Tier), OrchestratorError> {
+        match &self.planner {
+            PlannerSelection::Route(tier) => Ok((self.candidates.clone(), *tier)),
+            PlannerSelection::Harness(name) => {
+                let c = self
+                    .candidates
+                    .iter()
+                    .find(|c| &c.harness == name)
+                    .ok_or_else(|| OrchestratorError::UnknownHarness(name.clone()))?;
+                Ok((vec![c.clone()], Tier::Tier1))
+            }
+        }
+    }
+
+    pub fn plan(&mut self, objective: &str, scope: &str) -> Result<Planned, OrchestratorError> {
         let scratch = "planning";
+        let (pool, tier) = self.planner_pool()?;
         let profiles = self.probe_all();
         let quotas = self.load_quotas();
         let feedback_store = &*self.store;
         let ctx = RoutingContext {
-            task_tier: Tier::Tier3,
+            task_tier: tier,
             coupling_penalty: CouplingPenalty(0),
             preferred_harness: None,
             headroom: &HashMap::new(),
             feedback: feedback_store,
         };
-        let selected = self.router.select(
-            &self.candidates,
-            &profiles,
-            &quotas,
-            SystemTime::now(),
-            &ctx,
-        );
+        let selected = self
+            .router
+            .select(&pool, &profiles, &quotas, SystemTime::now(), &ctx);
         let top = selected.first().ok_or_else(|| {
             OrchestratorError::NoCandidate(Router::rejections(
-                &self.candidates,
+                &pool,
                 &profiles,
                 &quotas,
                 SystemTime::now(),
-                Tier::Tier3,
+                tier,
             ))
         })?;
+        let planner = (*top).clone();
         self.require_dispatch_ok(&top.harness)?;
         let harness = *self
             .harnesses
@@ -416,7 +455,7 @@ impl<'a> RunLoop<'a> {
             decompose_with_retry(harness, &spec, self.limits.max_retries, &rejected_dir)
                 .map_err(OrchestratorError::Plan)?;
         assign_tiers(&mut graph, &DefaultTierAssigner);
-        Ok(graph)
+        Ok(Planned { graph, planner })
     }
 
     pub fn start(

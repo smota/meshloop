@@ -2140,3 +2140,127 @@ fn watch_times_out_when_the_run_does_not_change() {
     );
     fs::remove_dir_all(&dir).ok();
 }
+
+/// A fixture config whose only harness is mid-tier, with optional extra TOML (issue #54).
+fn write_mid_tier_config(dir: &Path, extra: &str) -> PathBuf {
+    let config_path = dir.join("meshloop.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 1
+task_timeout_seconds = 30
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "{}"
+version_args = ["--version"]
+invoke_args_template = ["--emit-graph"]
+model_ref = "fixture-model"
+model_tier = "mid"
+
+{extra}
+"#,
+            fixture_path().replace('\\', "\\\\")
+        ),
+    )
+    .unwrap();
+    config_path
+}
+
+#[test]
+fn plan_with_only_a_mid_tier_harness_names_the_planner_override() {
+    let dir = disposable_repo("plan-mid-default");
+    let config_path = write_mid_tier_config(&dir, "");
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["plan", "--objective", "x", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("plan");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("does not fit task Tier3"), "{stderr}");
+    assert!(stderr.contains("[planner] harness"), "{stderr}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn plan_uses_the_configured_planner_harness_and_reports_its_real_tier() {
+    let dir = disposable_repo("plan-mid-configured");
+    let config_path = write_mid_tier_config(
+        &dir,
+        "[planner]
+harness = \"fixture\"",
+    );
+    let out_path = dir.join("plan.json");
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["plan", "--objective", "x", "--json", "--config"])
+        .arg(&config_path)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .expect("plan");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}
+{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("plan json");
+    let planner = &v["data"]["planner"];
+    assert_eq!(planner["harness"], "fixture", "{stdout}");
+    assert_eq!(planner["model_tier"], "MidTier", "{stdout}");
+    assert_eq!(planner["selected_by"], "config", "{stdout}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doctor_reports_which_harnesses_can_plan() {
+    let dir = disposable_repo("doctor-planner");
+    for (extra, selected_by, eligible, warns) in [
+        ("", "routing", serde_json::json!([]), true),
+        (
+            "[planner]
+harness = \"fixture\"",
+            "config",
+            serde_json::json!(["fixture"]),
+            false,
+        ),
+        (
+            "[planner]
+tier = \"Tier2\"",
+            "routing",
+            serde_json::json!(["fixture"]),
+            false,
+        ),
+    ] {
+        let config_path = write_mid_tier_config(&dir, extra);
+        let output = meshloop()
+            .current_dir(&dir)
+            .args(["doctor", "--json", "--config"])
+            .arg(&config_path)
+            .output()
+            .expect("doctor");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor json");
+        let planner = &v["data"]["planner"];
+        assert_eq!(planner["selected_by"], selected_by, "{extra}: {stdout}");
+        assert_eq!(planner["eligible"], eligible, "{extra}: {stdout}");
+        let warned = v["data"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("planner"));
+        assert_eq!(warned, warns, "{extra}: {stdout}");
+    }
+    fs::remove_dir_all(&dir).ok();
+}

@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use meshloop_domain::task_graph::Tier;
+use meshloop_engine::run_loop::PlannerSelection;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -25,6 +27,8 @@ pub struct Config {
     pub harnesses: HashMap<String, HarnessConfig>,
     #[serde(default)]
     pub verify: VerifyConfig,
+    #[serde(default)]
+    pub planner: PlannerConfig,
     /// When true, Meshloop runs standalone without Herdr daemon, dispatching direct CLI harnesses into Git worktrees.
     #[serde(default)]
     #[allow(dead_code)]
@@ -54,6 +58,44 @@ fn default_probe_timeout_seconds() -> u64 {
 pub struct VerifyConfig {
     #[serde(default)]
     pub verify_command: Vec<String>,
+}
+
+/// `[planner]`: which harness runs `meshloop:planner`. Without either key, planning is
+/// routed as a Tier3 task, so it needs a harness with `model_tier = "top"`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PlannerConfig {
+    /// A selected harness to plan with, whatever its `model_tier`.
+    #[serde(default)]
+    pub harness: Option<String>,
+    /// The tier planning is routed at: "Tier1", "Tier2" or "Tier3" (default).
+    #[serde(default)]
+    pub tier: Option<String>,
+}
+
+impl PlannerConfig {
+    pub fn selection(&self) -> Result<PlannerSelection, ConfigError> {
+        if let Some(name) = &self.harness {
+            if self.tier.is_some() {
+                return Err(ConfigError::Parse(
+                    "planner: set either harness or tier, not both".into(),
+                ));
+            }
+            return Ok(PlannerSelection::Harness(name.clone()));
+        }
+        match self.tier.as_deref() {
+            None => Ok(PlannerSelection::default()),
+            Some(t) => Tier::ALL
+                .into_iter()
+                .find(|v| v.name() == t)
+                .map(PlannerSelection::Route)
+                .ok_or_else(|| {
+                    ConfigError::Parse(format!(
+                        "planner.tier '{t}' must be one of Tier1, Tier2, Tier3"
+                    ))
+                }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -118,6 +160,14 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
             )));
         }
     }
+    if let Some(name) = &config.planner.harness
+        && !config.selected_harnesses.contains(name)
+    {
+        return Err(ConfigError::Parse(format!(
+            "planner.harness '{name}' is not in selected_harnesses"
+        )));
+    }
+    config.planner.selection()?;
     if config.limits.probe_timeout_seconds == 0 {
         return Err(ConfigError::Parse(
             "limits.probe_timeout_seconds must be greater than 0".into(),
@@ -240,6 +290,82 @@ mod tests {
         model_ref = "grok"
         model_tier = "top"
     "#;
+
+    fn load_with(tag: &str, extra: &str) -> Result<Config, ConfigError> {
+        load(&write_temp(
+            tag,
+            &format!(
+                "{MINIMAL}
+{extra}"
+            ),
+        ))
+    }
+
+    #[test]
+    fn planner_section_selects_harness_or_tier_and_defaults_to_tier3() {
+        // Issue #54: planning was hardcoded to Tier3, which only model_tier = "top" fits.
+        let c = load_with("planner-none", "").expect("no [planner]");
+        assert_eq!(
+            c.planner.selection().unwrap(),
+            PlannerSelection::Route(Tier::Tier3)
+        );
+        let c = load_with(
+            "planner-harness",
+            "[planner]
+harness = \"grok\"",
+        )
+        .expect("harness");
+        assert_eq!(
+            c.planner.selection().unwrap(),
+            PlannerSelection::Harness("grok".into())
+        );
+        let c = load_with(
+            "planner-tier",
+            "[planner]
+tier = \"Tier2\"",
+        )
+        .expect("tier");
+        assert_eq!(
+            c.planner.selection().unwrap(),
+            PlannerSelection::Route(Tier::Tier2)
+        );
+    }
+
+    #[test]
+    fn planner_section_rejects_bad_values() {
+        for (tag, extra, needle) in [
+            (
+                "p-unsel",
+                "[planner]
+harness = \"codex\"",
+                "not in selected_harnesses",
+            ),
+            (
+                "p-tier",
+                "[planner]
+tier = \"top\"",
+                "must be one of Tier1, Tier2, Tier3",
+            ),
+            (
+                "p-both",
+                "[planner]
+harness = \"grok\"
+tier = \"Tier1\"",
+                "either harness or tier",
+            ),
+            (
+                "p-key",
+                "[planner]
+model = \"x\"",
+                "unknown field",
+            ),
+        ] {
+            match load_with(tag, extra) {
+                Err(ConfigError::Parse(msg)) => assert!(msg.contains(needle), "{tag}: {msg}"),
+                other => panic!("{tag}: expected a parse error, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn omitted_version_args_default_to_version_flag_and_probe_timeout_is_bounded() {

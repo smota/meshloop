@@ -1615,6 +1615,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         verify_command: vec![],
         worktree_base: tmp_repo.join("worktrees"),
         active_graph: None,
+        planner: Default::default(),
     };
 
     #[derive(PartialEq, Eq, Debug)]

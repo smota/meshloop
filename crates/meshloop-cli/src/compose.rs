@@ -16,7 +16,7 @@ use meshloop_engine::agent::AgentSpec;
 use meshloop_engine::origin::Origin;
 use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome, StoreError};
 use meshloop_engine::router::Candidate;
-use meshloop_engine::run_loop::RunLimits;
+use meshloop_engine::run_loop::{PlannerSelection, RunLimits};
 
 use crate::config::{Config, HarnessConfig, Limits, resolve_executable};
 
@@ -79,9 +79,10 @@ pub struct Composed {
     pub limits: RunLimits,
     pub verify_command: Vec<String>,
     pub worktree_base: PathBuf,
+    pub planner: PlannerSelection,
 }
 
-fn parse_model_tier(s: &str) -> ModelCapabilityTier {
+pub(crate) fn parse_model_tier(s: &str) -> ModelCapabilityTier {
     match s {
         "top" => ModelCapabilityTier::TopTier,
         "mid" => ModelCapabilityTier::MidTier,
@@ -177,6 +178,11 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
         .clamped(),
         verify_command: req.config.verify.verify_command.clone(),
         worktree_base: wt,
+        planner: req
+            .config
+            .planner
+            .selection()
+            .map_err(|e| format!("{e:?}"))?,
     })
 }
 

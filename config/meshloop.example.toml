@@ -23,6 +23,12 @@ probe_timeout_seconds = 15
 # Optional structured argv run in the attempt worktree after git-diff. Empty = git-diff only.
 verify_command = []
 
+# Optional. The planner is routed as a Tier3 task, which only model_tier = "top" fits.
+# Name a harness to plan with whatever its tier, or lower the routing tier; not both.
+# [planner]
+# harness = "claude"
+# tier = "Tier2"
+
 [harnesses.grok]
 kind = "grok"
 executable = "grok"

@@ -7,6 +7,9 @@ use meshloop_engine::run_loop::{AttemptView, IdleReason, RunStatus};
 pub const ACCEPTANCE_RULE: &str =
     "R1: every node stops for meshloop accept; tier selects harness/model only";
 
+/// Shown when routing finds no planner and `[planner]` names no harness.
+pub const PLANNER_ROUTING_HINT: &str = "The planner is routed as a Tier3 task by default, which needs a harness with      model_tier = \"top\". To plan with another harness, set `[planner] harness = \"<name>\"`      (or `[planner] tier`) in meshloop.toml.";
+
 pub fn format_plan(graph: &TaskGraph) -> String {
     let mut out = format!(
         "Plan '{}': {} task(s) — awaiting-plan-review (ADR 0009).\n\
