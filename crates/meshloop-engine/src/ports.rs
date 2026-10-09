@@ -157,6 +157,14 @@ pub trait WorkspacePort {
     fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
     fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
     fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
+    /// Replays the commits in `base..head` onto `worktree`'s HEAD, oldest first. An empty
+    /// range is a no-op. On conflict the cherry-pick is aborted and `Conflict` returned.
+    fn cherry_pick_range(
+        &self,
+        worktree: &Path,
+        base: &str,
+        head: &str,
+    ) -> Result<(), WorkspaceError>;
     fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
     fn worktree_exists(&self, path: &Path) -> bool;
     fn prune(&self) -> Result<(), WorkspaceError>;

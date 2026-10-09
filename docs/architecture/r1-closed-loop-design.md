@@ -450,6 +450,24 @@ flowchart LR
   IW -.->|meshloop integrate --into --accept-integrate| Op
 ```
 
+**Per-deliverable integrate (#55).** A node may carry an optional `deliverable` tag (same
+character set as `graph_id`). `meshloop integrate --graph <id> --deliverable <tag> --into <ref>`
+lands only that group, for one PR per issue from a multi-issue graph:
+
+- Without `--accept-integrate` it builds a fresh worktree `<graph>/integrate-<tag>` (branch
+  `meshloop/<gid>/integrate-<tag>`) from `run_base` and prints it for review. It never touches
+  `repo_root`. Rebuilding replaces the previous build of that tag.
+- The worktree holds the tagged nodes plus their transitive dependencies (reported as
+  `outside_dependencies` when they carry another tag), in topological order. Every one must be
+  `Accepted` or `Integrated`.
+- Attempts start from the shared integrate head, so an attempt branch also carries the commits
+  of nodes integrated before it. Only each node's own commits are replayed:
+  `git cherry-pick <attempt base>..<attempt branch>`, with the base taken from the attempt's
+  recorded `base:<sha>`. A conflict aborts the cherry-pick and names the node; it means that
+  node's change depends on work outside the deliverable without declaring it.
+- With `--accept-integrate` it lands the reviewed worktree (building it first if absent) with
+  the same dirty check and fast-forward-or-`--no-ff` rule as the graph-level integrate.
+
 **One writer.** At most one `Running` attempt. `max_concurrent_workers > 1` logs a warning and is clamped to 1.
 
 **Leftover Git state after crash:**

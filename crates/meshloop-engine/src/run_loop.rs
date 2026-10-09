@@ -53,6 +53,15 @@ pub enum OrchestratorError {
     SnapshotMismatch,
     /// No configured harness passed routing; one entry per configured candidate.
     NoCandidate(Vec<crate::router::Rejection>),
+    /// No node in the graph carries this `deliverable` tag.
+    UnknownDeliverable(String),
+    /// A node a deliverable needs is not accepted yet.
+    DeliverableNotReady {
+        task: TaskId,
+        state: TaskState,
+    },
+    /// Replaying this node's commits onto the deliverable worktree conflicted.
+    DeliverableConflict(TaskId),
 }
 
 impl From<StoreError> for OrchestratorError {
@@ -82,6 +91,42 @@ impl RunLimits {
         }
         self
     }
+}
+
+/// How `plan` picks the harness that runs `meshloop:planner`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerSelection {
+    /// Route across every candidate as a task of this tier would be routed.
+    Route(Tier),
+    /// Use this configured harness regardless of its `model_tier`. It must still pass its
+    /// probe, be dispatchable and be out of quota cooldown.
+    Harness(String),
+}
+
+impl Default for PlannerSelection {
+    fn default() -> Self {
+        Self::Route(Tier::Tier3)
+    }
+}
+
+/// What `integrate --deliverable` assembled for review.
+#[derive(Debug, Clone)]
+pub struct DeliverableView {
+    pub tag: String,
+    pub worktree: PathBuf,
+    pub branch: String,
+    pub head: String,
+    /// Every replayed node, in the order its commits were applied.
+    pub nodes: Vec<TaskId>,
+    /// Replayed nodes that the tagged nodes depend on but that carry another tag or none.
+    pub outside_dependencies: Vec<TaskId>,
+}
+
+/// A produced graph and the candidate that planned it, as configured (real `model_tier`).
+#[derive(Debug, Clone)]
+pub struct Planned {
+    pub graph: TaskGraph,
+    pub planner: Candidate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +166,7 @@ pub struct RunLoop<'a> {
     pub verify_command: Vec<String>,
     pub worktree_base: PathBuf,
     pub active_graph: Option<String>,
+    pub planner: PlannerSelection,
 }
 
 /// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
@@ -155,6 +201,7 @@ pub struct NodeStatus {
     pub revision: Option<String>,
     pub pane_id: Option<String>,
     pub live: Option<String>,
+    pub deliverable: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +340,14 @@ impl<'a> RunLoop<'a> {
         format!("meshloop/{graph_id}/task-{}/attempt-{}", task.0, attempt.0)
     }
 
+    fn deliverable_path(&self, graph_id: &str, tag: &str) -> PathBuf {
+        self.graph_dir(graph_id).join(format!("integrate-{tag}"))
+    }
+
+    fn deliverable_branch(&self, graph_id: &str, tag: &str) -> String {
+        format!("meshloop/{graph_id}/integrate-{tag}")
+    }
+
     fn plan_branch(&self, graph_id: &str) -> String {
         format!("meshloop/{graph_id}/plan")
     }
@@ -349,34 +404,49 @@ impl<'a> RunLoop<'a> {
         self.store.graph_from_run(graph_id).map_err(Into::into)
     }
 
-    pub fn plan(&mut self, objective: &str, scope: &str) -> Result<TaskGraph, OrchestratorError> {
+    /// The candidates planning may use and the tier they are routed at. An explicit planner
+    /// harness is routed as Tier1, which every model tier fits, so only its probe, dispatch
+    /// readiness and quota decide.
+    fn planner_pool(&self) -> Result<(Vec<Candidate>, Tier), OrchestratorError> {
+        match &self.planner {
+            PlannerSelection::Route(tier) => Ok((self.candidates.clone(), *tier)),
+            PlannerSelection::Harness(name) => {
+                let c = self
+                    .candidates
+                    .iter()
+                    .find(|c| &c.harness == name)
+                    .ok_or_else(|| OrchestratorError::UnknownHarness(name.clone()))?;
+                Ok((vec![c.clone()], Tier::Tier1))
+            }
+        }
+    }
+
+    pub fn plan(&mut self, objective: &str, scope: &str) -> Result<Planned, OrchestratorError> {
         let scratch = "planning";
+        let (pool, tier) = self.planner_pool()?;
         let profiles = self.probe_all();
         let quotas = self.load_quotas();
         let feedback_store = &*self.store;
         let ctx = RoutingContext {
-            task_tier: Tier::Tier3,
+            task_tier: tier,
             coupling_penalty: CouplingPenalty(0),
             preferred_harness: None,
             headroom: &HashMap::new(),
             feedback: feedback_store,
         };
-        let selected = self.router.select(
-            &self.candidates,
-            &profiles,
-            &quotas,
-            SystemTime::now(),
-            &ctx,
-        );
+        let selected = self
+            .router
+            .select(&pool, &profiles, &quotas, SystemTime::now(), &ctx);
         let top = selected.first().ok_or_else(|| {
             OrchestratorError::NoCandidate(Router::rejections(
-                &self.candidates,
+                &pool,
                 &profiles,
                 &quotas,
                 SystemTime::now(),
-                Tier::Tier3,
+                tier,
             ))
         })?;
+        let planner = (*top).clone();
         self.require_dispatch_ok(&top.harness)?;
         let harness = *self
             .harnesses
@@ -416,7 +486,7 @@ impl<'a> RunLoop<'a> {
             decompose_with_retry(harness, &spec, self.limits.max_retries, &rejected_dir)
                 .map_err(OrchestratorError::Plan)?;
         assign_tiers(&mut graph, &DefaultTierAssigner);
-        Ok(graph)
+        Ok(Planned { graph, planner })
     }
 
     pub fn start(
@@ -2003,21 +2073,152 @@ impl<'a> RunLoop<'a> {
         graph_id: &str,
         git_ref: &str,
     ) -> Result<(), OrchestratorError> {
+        let integrate = self.integrate_path(graph_id);
+        self.land_worktree(&integrate, git_ref)
+    }
+
+    /// Merges `worktree`'s HEAD into `git_ref` in the repository checkout.
+    fn land_worktree(&self, worktree: &Path, git_ref: &str) -> Result<(), OrchestratorError> {
         let dirty = self
             .workspace
             .status_porcelain(self.workspace.repo_root())?;
         if !dirty.trim().is_empty() {
             return Err(OrchestratorError::Workspace(WorkspaceError::Dirty));
         }
-        let integrate = self.integrate_path(graph_id);
-        let integrate_head = self.workspace.head(&integrate)?;
+        let head = self.workspace.head(worktree)?;
         self.workspace.checkout_ref(git_ref)?;
-        if self.workspace.is_ancestor(git_ref, &integrate_head)? {
-            self.workspace.merge_ff_only(&integrate_head)?;
+        if self.workspace.is_ancestor(git_ref, &head)? {
+            self.workspace.merge_ff_only(&head)?;
         } else {
-            self.workspace.merge_no_ff(&integrate_head)?;
+            self.workspace.merge_no_ff(&head)?;
         }
         Ok(())
+    }
+
+    /// The nodes tagged `tag` plus everything they transitively depend on, in topological
+    /// order, and which of those carry a different tag.
+    fn deliverable_closure(
+        graph: &TaskGraph,
+        tag: &str,
+    ) -> Result<(Vec<TaskId>, Vec<TaskId>), OrchestratorError> {
+        let tagged: HashSet<TaskId> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.deliverable.as_deref() == Some(tag))
+            .map(|n| n.id)
+            .collect();
+        if tagged.is_empty() {
+            return Err(OrchestratorError::UnknownDeliverable(tag.into()));
+        }
+        let deps: HashMap<TaskId, &Vec<TaskId>> =
+            graph.nodes.iter().map(|n| (n.id, &n.depends_on)).collect();
+        let mut needed = tagged.clone();
+        let mut stack: Vec<TaskId> = tagged.iter().copied().collect();
+        while let Some(id) = stack.pop() {
+            for d in deps.get(&id).copied().into_iter().flatten() {
+                if needed.insert(*d) {
+                    stack.push(*d);
+                }
+            }
+        }
+        let order: Vec<TaskId> = graph
+            .try_topological_order()
+            .map_err(|e| OrchestratorError::Illegal(format!("{e:?}")))?
+            .into_iter()
+            .filter(|id| needed.contains(id))
+            .collect();
+        let outside = order
+            .iter()
+            .copied()
+            .filter(|id| !tagged.contains(id))
+            .collect();
+        Ok((order, outside))
+    }
+
+    /// Builds a fresh worktree from the run base holding only the work of the nodes tagged
+    /// `tag` and their dependencies. Attempts start from the shared integrate head, so an
+    /// attempt branch also carries the commits of nodes integrated before it; only each
+    /// node's own commits (`<attempt base>..<attempt branch>`) are replayed. Replaces any
+    /// earlier build of the same tag.
+    pub fn prepare_deliverable(
+        &mut self,
+        graph_id: &str,
+        tag: &str,
+    ) -> Result<DeliverableView, OrchestratorError> {
+        if !meshloop_domain::task_graph::graph_id_is_legal(tag) {
+            return Err(OrchestratorError::UnknownDeliverable(tag.into()));
+        }
+        let run = self
+            .store
+            .load_run(graph_id)?
+            .ok_or_else(|| OrchestratorError::MissingGraph(graph_id.into()))?;
+        let graph = self.graph(graph_id)?;
+        let (order, outside_dependencies) = Self::deliverable_closure(&graph, tag)?;
+        let tasks = self.tasks(graph_id)?;
+        for id in &order {
+            let state = tasks.get(id).copied().unwrap_or(TaskState::Pending);
+            if !matches!(state, TaskState::Accepted | TaskState::Integrated) {
+                return Err(OrchestratorError::DeliverableNotReady { task: *id, state });
+            }
+        }
+
+        let wt = self.deliverable_path(graph_id, tag);
+        let branch = self.deliverable_branch(graph_id, tag);
+        self.workspace.remove_worktree(&wt)?;
+        self.workspace.prune()?;
+        self.workspace.delete_branch(&branch)?;
+        let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
+        self.workspace
+            .add_worktree_from(&wt, &branch, &run.run_base)?;
+
+        for id in &order {
+            let attempt = self
+                .store
+                .latest_attempt_for_task(graph_id, *id)?
+                .ok_or_else(|| {
+                    OrchestratorError::Illegal(format!("task {} has no attempt", id.0))
+                })?;
+            let base = attempt
+                .outcome
+                .as_deref()
+                .and_then(|o| o.strip_prefix("base:"))
+                .ok_or_else(|| {
+                    OrchestratorError::Illegal(format!(
+                        "task {} attempt {} has no recorded base revision",
+                        id.0, attempt.attempt_id.0
+                    ))
+                })?;
+            let head = self.attempt_branch(graph_id, *id, attempt.attempt_id);
+            self.workspace
+                .cherry_pick_range(&wt, base, &head)
+                .map_err(|e| match e {
+                    WorkspaceError::Conflict => OrchestratorError::DeliverableConflict(*id),
+                    other => OrchestratorError::Workspace(other),
+                })?;
+        }
+
+        Ok(DeliverableView {
+            tag: tag.into(),
+            head: self.workspace.head(&wt)?,
+            worktree: wt,
+            branch,
+            nodes: order,
+            outside_dependencies,
+        })
+    }
+
+    /// Lands the reviewed deliverable worktree into `git_ref`, building it first if absent.
+    pub fn integrate_deliverable_into(
+        &mut self,
+        graph_id: &str,
+        tag: &str,
+        git_ref: &str,
+    ) -> Result<(), OrchestratorError> {
+        let wt = self.deliverable_path(graph_id, tag);
+        if !self.workspace.worktree_exists(&wt) {
+            self.prepare_deliverable(graph_id, tag)?;
+        }
+        self.land_worktree(&wt, git_ref)
     }
 
     /// Attempts for a task, oldest first, with their (redacted) evidence rows.
@@ -2161,6 +2362,7 @@ impl<'a> RunLoop<'a> {
                 revision: None,
                 pane_id,
                 live,
+                deliverable: n.deliverable.clone(),
             });
         }
         Ok(RunStatus {

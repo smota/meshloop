@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use meshloop_domain::state::{PlanDecision, PlanState, TaskState};
-use meshloop_domain::task_graph::{TaskGraph, TaskId};
+use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
 use meshloop_engine::ports::{HarnessCapabilities, RunStore, WorkspacePort};
 use meshloop_engine::router::Router;
 use meshloop_engine::run_loop::{OrchestratorError, RunLoop, idle_exit_code};
@@ -225,6 +225,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             graph,
             into,
             accept_integrate,
+            deliverable,
             config,
             db,
             worktree_base,
@@ -232,9 +233,11 @@ fn dispatch(inv: Invocation) -> ExitCode {
             graph,
             into,
             accept_integrate,
+            deliverable,
             config,
             db,
             worktree_base,
+            inv.json,
             inv.origin,
         ),
         Command::Orchestrate {
@@ -307,6 +310,16 @@ fn load_cfg(config: Option<PathBuf>) -> Result<(crate::config::Config, PathBuf),
     }
 }
 
+/// The harness that ran (or would run) the planner, with its configured `model_tier`.
+fn planner_json(c: &meshloop_engine::router::Candidate, configured: bool) -> serde_json::Value {
+    serde_json::json!({
+        "harness": c.harness,
+        "model_ref": c.model_ref,
+        "model_tier": format!("{:?}", c.model_tier),
+        "selected_by": if configured { "config" } else { "routing" },
+    })
+}
+
 fn repo_root() -> PathBuf {
     env::current_dir().expect("current directory")
 }
@@ -374,21 +387,25 @@ fn cmd_plan(
         verify_command: composed.verify_command.clone(),
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
+        planner: composed.planner.clone(),
     };
     eprintln!(
         "meshloop:plan probing {} harness(es) in parallel (timeout {}s)",
         cfg.selected_harnesses.len(),
         cfg.limits.probe_timeout_seconds
     );
-    let graph = match saga.plan(
+    let (graph, planner) = match saga.plan(
         &objective,
         scope.as_deref().unwrap_or("scope: this repository only"),
     ) {
-        Ok(g) => g,
+        Ok(p) => (p.graph, p.planner),
         Err(OrchestratorError::NoCandidate(rejections)) => {
             eprintln!("Decomposition failed: no harness can run the planner.");
             for r in &rejections {
                 eprintln!("  {}: {}", r.harness, r.reason);
+            }
+            if cfg.planner.harness.is_none() {
+                eprintln!("{}", report::PLANNER_ROUTING_HINT);
             }
             eprintln!("Run `meshloop doctor --config <path>` for per-harness readiness.");
             return ExitCode::from(1);
@@ -425,6 +442,7 @@ fn cmd_plan(
                         origin,
                         serde_json::json!({
                             "role": "meshloop:planner",
+                            "planner": planner_json(&planner, cfg.planner.harness.is_some()),
                             "path": out_path,
                             "graph": graph,
                             "loop_space": loop_space,
@@ -537,6 +555,7 @@ fn cmd_review_plan(
         verify_command: composed.verify_command.clone(),
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
+        planner: composed.planner.clone(),
     };
 
     let mut graph = graph;
@@ -567,7 +586,7 @@ fn cmd_review_plan(
             &prompt,
             scope.as_deref().unwrap_or("scope: this repository only"),
         ) {
-            Ok(g) => graph = g,
+            Ok(p) => graph = p.graph,
             Err(e) => {
                 match &e {
                     OrchestratorError::Plan(p) => {
@@ -664,6 +683,7 @@ fn cmd_review_plan(
 }
 
 const EMPTY_VERIFY_WARNING: &str = "verify_command is empty: nodes are not checked beyond git diff";
+const NO_PLANNER_WARNING: &str = "no dispatchable harness can run the planner; see data.planner and set [planner] harness or tier";
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
@@ -749,6 +769,7 @@ fn cmd_run(
         verify_command: composed.verify_command.clone(),
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
+        planner: composed.planner.clone(),
     };
     if json {
         eprintln!(
@@ -968,6 +989,7 @@ fn with_saga(
         verify_command: composed.verify_command.clone(),
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
+        planner: composed.planner.clone(),
     };
     f(&mut saga)
 }
@@ -1051,6 +1073,7 @@ fn cmd_status(
                                     "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                     "note": n.note,
                                     "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                    "deliverable": n.deliverable,
                                     "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                 })).collect::<Vec<_>>(),
                             }),
@@ -1265,6 +1288,7 @@ fn cmd_inspect(
                                         "live": n.live,
                                         "note": n.note,
                                         "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                        "deliverable": n.deliverable,
                                         "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                                         "attempts": attempts.iter().map(report::attempt_json).collect::<Vec<_>>(),
                                     }),
@@ -1309,6 +1333,7 @@ fn cmd_inspect(
                                 "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                 "note": n.note,
                                 "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                "deliverable": n.deliverable,
                                 "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
@@ -1536,15 +1561,31 @@ fn cmd_accept(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_integrate(
     graph: String,
     into: String,
     accept_integrate: bool,
+    deliverable: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
+    json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
+    if let Some(tag) = deliverable {
+        return cmd_integrate_deliverable(
+            graph,
+            tag,
+            into,
+            accept_integrate,
+            config,
+            db,
+            worktree_base,
+            json,
+            origin,
+        );
+    }
     if !accept_integrate {
         eprintln!("integrate requires --accept-integrate after reviewing the integrate worktree");
         return ExitCode::from(2);
@@ -1559,6 +1600,99 @@ fn cmd_integrate(
         Err(e) => {
             eprintln!("{e:?}");
             ExitCode::from(1)
+        }
+    })
+}
+
+/// `integrate --deliverable`: without `--accept-integrate`, (re)build the deliverable
+/// worktree for review; with it, land the reviewed worktree (building it if absent).
+#[allow(clippy::too_many_arguments)]
+fn cmd_integrate_deliverable(
+    graph: String,
+    tag: String,
+    into: String,
+    accept_integrate: bool,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    worktree_base: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let cmd = "meshloop:integrate";
+    with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
+        let result = if accept_integrate {
+            saga.integrate_deliverable_into(&graph, &tag, &into)
+                .map(|()| None)
+        } else {
+            saga.prepare_deliverable(&graph, &tag).map(Some)
+        };
+        match result {
+            Ok(Some(view)) => {
+                let ids = |v: &[TaskId]| v.iter().map(|t| t.0).collect::<Vec<_>>();
+                if json {
+                    let data = serde_json::json!({
+                        "graph_id": graph,
+                        "deliverable": view.tag,
+                        "worktree": view.worktree.display().to_string(),
+                        "branch": view.branch,
+                        "head": view.head,
+                        "nodes": ids(&view.nodes),
+                        "outside_dependencies": ids(&view.outside_dependencies),
+                        "next": format!(
+                            "review the worktree, then: meshloop integrate --graph {graph} --deliverable {tag} --into {into} --accept-integrate"
+                        ),
+                    });
+                    println!("{}", json_out::ok(cmd, origin.clone(), data));
+                } else {
+                    println!(
+                        "deliverable {tag}: nodes {:?} replayed onto {} ({})",
+                        ids(&view.nodes),
+                        view.worktree.display(),
+                        view.head
+                    );
+                    if !view.outside_dependencies.is_empty() {
+                        println!(
+                            "  includes dependencies outside {tag}: {:?}",
+                            ids(&view.outside_dependencies)
+                        );
+                    }
+                    println!("review it, then rerun with --accept-integrate to land it on {into}");
+                }
+                ExitCode::SUCCESS
+            }
+            Ok(None) => {
+                if json {
+                    let data = serde_json::json!({
+                        "graph_id": graph, "deliverable": tag, "into": into,
+                    });
+                    println!("{}", json_out::ok(cmd, origin.clone(), data));
+                } else {
+                    println!("integrated deliverable {tag} of graph {graph} into {into}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let msg = match &e {
+                    OrchestratorError::UnknownDeliverable(t) => {
+                        format!("no node in graph {graph} has deliverable '{t}'")
+                    }
+                    OrchestratorError::DeliverableNotReady { task, state } => format!(
+                        "deliverable {tag} needs task {} accepted first (it is {state:?})",
+                        task.0
+                    ),
+                    OrchestratorError::DeliverableConflict(task) => format!(
+                        "replaying task {}'s commits onto deliverable {tag} conflicted; its changes depend on work outside this deliverable",
+                        task.0
+                    ),
+                    other => format!("{other:?}"),
+                };
+                if json {
+                    println!("{}", json_out::err(cmd, origin.clone(), &msg));
+                } else {
+                    eprintln!("{msg}");
+                }
+                ExitCode::from(1)
+            }
         }
     })
 }
@@ -1736,6 +1870,7 @@ fn cmd_doctor(
     let origin_harness = origin.harness.clone();
 
     let mut warnings: Vec<&str> = Vec::new();
+    let mut planner = serde_json::Value::Null;
     let (config_path, harnesses, error) = match crate::config::discover(config.as_deref()) {
         Err(_) => (
             None,
@@ -1753,6 +1888,10 @@ fn cmd_doctor(
                     warnings.push(EMPTY_VERIFY_WARNING);
                 }
                 let rows = doctor_probe(&cfg);
+                planner = doctor_planner(&cfg, &rows);
+                if planner["eligible"].as_array().is_some_and(|e| e.is_empty()) {
+                    warnings.push(NO_PLANNER_WARNING);
+                }
                 let error = (!rows.iter().any(|r| r["dispatchable"] == true)).then(|| {
                     "no selected harness is dispatchable; see data.harnesses[].reason".to_string()
                 });
@@ -1779,6 +1918,7 @@ fn cmd_doctor(
         "harnesses_ready": harnesses_ready,
         "harnesses": harnesses,
         "store_ignored": store_ignored,
+        "planner": planner,
         "warnings": warnings,
         "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
@@ -1806,6 +1946,19 @@ fn cmd_doctor(
             };
             println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
         }
+        if let Some(eligible) = planner["eligible"].as_array() {
+            let names: Vec<&str> = eligible.iter().filter_map(|v| v.as_str()).collect();
+            println!(
+                "  planner: {} at {} -> {}",
+                planner["selected_by"].as_str().unwrap_or("?"),
+                planner["tier"].as_str().unwrap_or("?"),
+                if names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    names.join(", ")
+                }
+            );
+        }
         println!("  store_ignored: {store_ignored}");
         for w in &warnings {
             println!("  warning: {w}");
@@ -1825,6 +1978,34 @@ fn cmd_doctor(
     } else {
         ExitCode::from(1)
     }
+}
+
+/// Which harnesses `plan` could use, from the config and the probe rows. Routing scores
+/// the eligible ones at plan time, so doctor lists them rather than predicting the pick.
+fn doctor_planner(cfg: &crate::config::Config, rows: &[serde_json::Value]) -> serde_json::Value {
+    use meshloop_engine::run_loop::PlannerSelection;
+    let selection = cfg.planner.selection().unwrap_or_default();
+    let (selected_by, tier) = match &selection {
+        PlannerSelection::Harness(_) => ("config", Tier::Tier1),
+        PlannerSelection::Route(t) => ("routing", *t),
+    };
+    let eligible: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["dispatchable"] == true)
+        .filter_map(|r| r["name"].as_str())
+        .filter(|name| match &selection {
+            PlannerSelection::Harness(h) => h == name,
+            PlannerSelection::Route(_) => cfg.harnesses.get(*name).is_some_and(|hc| {
+                meshloop_domain::policy::tier_fits(tier, compose::parse_model_tier(&hc.model_tier))
+            }),
+        })
+        .collect();
+    serde_json::json!({
+        "selected_by": selected_by,
+        "harness": cfg.planner.harness,
+        "tier": tier.name(),
+        "eligible": eligible,
+    })
 }
 
 /// Runs every selected harness's bounded probe concurrently and reports per-harness
@@ -2102,6 +2283,7 @@ fn cmd_mutate_plan(
         verify_command: composed.verify_command.clone(),
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
+        planner: composed.planner.clone(),
     };
 
     let graph_id = match graph_arg {
@@ -2197,6 +2379,7 @@ mod watch_exit_tests {
             revision: None,
             pane_id: None,
             live: None,
+            deliverable: None,
         }
     }
 

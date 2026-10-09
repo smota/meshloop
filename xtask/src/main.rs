@@ -1460,6 +1460,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 tier: None,
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1485,6 +1486,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 tier: None,
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1556,6 +1558,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 tier: None,
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             },
             TaskNode {
                 id: TaskId(2),
@@ -1564,6 +1567,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 tier: None,
                 allowed_paths: vec![],
                 empty_diff_ok: false,
+                deliverable: None,
             },
         ],
     };
@@ -1615,6 +1619,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         verify_command: vec![],
         worktree_base: tmp_repo.join("worktrees"),
         active_graph: None,
+        planner: Default::default(),
     };
 
     #[derive(PartialEq, Eq, Debug)]
@@ -1667,6 +1672,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 }],
             },
         ),
@@ -1682,6 +1688,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 }],
             },
         ),
@@ -1697,6 +1704,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 }],
             },
         ),
@@ -1712,6 +1720,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 }],
             },
         ),
@@ -1727,6 +1736,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     tier: None,
                     allowed_paths: vec![],
                     empty_diff_ok: false,
+                    deliverable: None,
                 }],
             },
         ),
@@ -1782,6 +1792,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
             tier: None,
             allowed_paths: vec![],
             empty_diff_ok: false,
+            deliverable: None,
         }],
     };
     let res = saga.mutate_plan(graph_id, active_mutation, false);

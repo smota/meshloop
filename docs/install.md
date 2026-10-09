@@ -109,6 +109,20 @@ sample is **not runnable as-is**. Every probe is bounded by `[limits] probe_time
 (default 15); a version call that opens an interactive UI is reported as a probe timeout.
 Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
 
+- **Planner harness:** `plan` routes the planner as a Tier3 task, so by default only a
+  harness with `model_tier = "top"` can plan. To plan with a cheaper model, name it, or
+  lower the routing tier (set one key, not both):
+
+  ```toml
+  [planner]
+  harness = "codex"   # a selected harness, whatever its model_tier
+  # tier = "Tier2"    # or: route planning as Tier1, Tier2 or Tier3 (default)
+  ```
+
+  Keep `model_tier` honest: it is recorded with the plan (`plan --json` reports
+  `data.planner`), and `doctor --json` lists the harnesses that can plan under
+  `data.planner.eligible`.
+
 - **Database:** Local execution state is stored in `.meshloop/state.sqlite` (SQLite WAL mode).
   **Ignore it in Git:** add `/.meshloop/` to your repository's `.gitignore`, or run
   `meshloop bundle --dest . --gitignore` to append a marked, idempotent block
