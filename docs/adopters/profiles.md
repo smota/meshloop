@@ -13,13 +13,13 @@ agentflow-sdlc adopt profiles --json
 | `github`   | Standard plus GitHub source adapters                          | External writes remain preview-bound   |
 | `cockpit`  | GitHub plus the optional Cockpit projection                   | Cockpit owns no unique domain state    |
 
-Preview a minimal adoption:
+Preview a minimal adoption with the [adoption journey](../get-started.md#preview):
 
 ```bash
-agentflow-sdlc adopt plan --profile minimal --target /path/to/project --json
+agentflow-sdlc onboarding plan --profile minimal --target /path/to/project
 ```
 
-The preview is byte-for-byte read-only. It reports `create`, `update`, `unchanged`, `conflict`,
+The preview is byte-for-byte read-only. Its transaction plan reports `create`, `update`, `unchanged`, `conflict`,
 `preserve-removed`, `seed`, and `seed-skip` actions plus a content-derived token.
 Do not approve a blocked plan.
 

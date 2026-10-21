@@ -9,7 +9,7 @@ flowchart LR
   Core["AgentFlow core\nroles · lifecycle · evidence · gates"]
   Intent["CollaborationIntent"]
   Binding["ProviderBinding"]
-  Provider["Provider\nmanual · CLI · AFD facets"]
+  Provider["Provider\nmanual · CLI · API facets"]
   Receipt["ExecutionReceipt"]
   Source["SourceAdapter\nGitHub first"]
   Cockpit["Cockpit\noptional projection"]
@@ -26,15 +26,15 @@ state.
 
 ## Responsibility matrix
 
-| Responsibility                                                                | Owner                                                     | Not owned here                                   |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------ |
-| Roles, paths, transitions, evidence meaning, action boundaries, readiness     | AgentFlow core                                            | Provider launch mechanics                        |
-| Collaboration mode, required roles, single-writer policy, fallback permission | `CollaborationIntent`                                     | Executable, model, transport, or worktree choice |
-| Availability, execution target, transport, delegation, provider facets        | Provider layer                                            | SDLC lifecycle policy                            |
-| Project-instruction audit, staging, apply, verification, rollback             | Optional project-harness provider such as AI Foundry Desk | AgentFlow roles or readiness                     |
-| Issues, comments, pull requests, and lifecycle mutations                      | `SourceAdapter`; GitHub is first                          | Core vocabulary                                  |
-| Goal and readiness visualization                                              | Optional Cockpit projection                               | Authoritative workflow state                     |
-| Preview, apply, lockfile, rollback, composition profile                       | AgentFlow adoption layer                                  | Workstation or global tool management            |
+| Responsibility                                                                | Owner                                                           | Not owned here                                   |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------ |
+| Roles, paths, transitions, evidence meaning, action boundaries, readiness     | AgentFlow core                                                  | Provider launch mechanics                        |
+| Collaboration mode, required roles, single-writer policy, fallback permission | `CollaborationIntent`                                           | Executable, model, transport, or worktree choice |
+| Availability, execution target, transport, delegation, provider facets        | Provider layer                                                  | SDLC lifecycle policy                            |
+| Project-instruction audit, staging, apply, verification, rollback             | Optional project-harness provider, when a project registers one | AgentFlow roles or readiness                     |
+| Issues, comments, pull requests, and lifecycle mutations                      | `SourceAdapter`; GitHub is first                                | Core vocabulary                                  |
+| Goal and readiness visualization                                              | Optional Cockpit projection                                     | Authoritative workflow state                     |
+| Preview, apply, lockfile, rollback, composition profile                       | AgentFlow adoption layer                                        | Workstation or global tool management            |
 
 ## Contract boundaries
 
@@ -73,8 +73,8 @@ plan token for apply. This is a one-time cleanup tool, not runtime legacy compat
 `minimal`, `standard`, `github`, and `cockpit` expose logical boundaries before physical npm
 package splitting. `standard` is the default reusable product surface.
 Retired install/update commands and v1 lockfiles are unsupported, as explicitly requested by the
-product owner for this single-adopter platform. The supported path is `adopt plan -> apply -> verify`,
-with a v2 lock written last and an external rollback receipt. There is no implicit legacy migration.
+product owner for this single-adopter platform. The supported path is `onboarding plan -> apply -> verify`
+over the adoption transaction, with a v2 lock written last and a rollback receipt. There is no implicit legacy migration.
 
 These are breaking changes on the unpublished issue #188 work branch. The existing package version
 is not a publication approval: a separately approved release/version decision must precede any tag,

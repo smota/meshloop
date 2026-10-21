@@ -1,0 +1,10 @@
+{
+  "name": "meshloop-agentflow-tooling",
+  "private": true,
+  "type": "module",
+  "description": "Project-scoped Node dependencies for the vendored AgentFlow workflow tools.",
+  "dependencies": {
+    "ajv": "8.20.0",
+    "yaml": "2.9.1"
+  }
+}

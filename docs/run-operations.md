@@ -66,7 +66,7 @@ For a GitHub source, `--goal` must be `issue:<number>` or an issue URL in the co
 
 ### Prepare a GitHub acceptance revision without importing package internals
 
-After `init` has seeded a meaningful project check, keep its criterion definition digest unchanged
+After adoption has seeded a meaningful project check, keep its criterion definition digest unchanged
 unless the check or candidate inputs change. Switching to a GitHub source requires replacing the
 starter acceptance file's `goalRevision` with the exact issue revision. Read the issue through
 `gh api repos/OWNER/REPO/issues/NUMBER` and save its JSON outside candidate inputs. Use the returned
@@ -197,7 +197,7 @@ and merge commit. GitHub's conditional merge protects the head SHA, not an atomi
 base-branch comparison; cooperative deployments must exclude concurrent retargeting.
 A human candidate-release gate blocks this cooperative merge path.
 
-The `edit` action reaches a configured engineering provider and records its bounded receipt/output, but this command path does not establish a qualified end-to-end autonomous coding model. A provider must pass its actual target, model, capability, boundary and receipt checks. Default models have no qualification claim. The optional Meshloop path requires the explicitly pinned binary and configuration in [minimal Meshloop integration](process-autonomy/meshloop-minimal-integration.md); that qualification uses a deterministic worker and does not qualify arbitrary LLM models. A returned edit result is not proof that the integrated workflow, tests, review, or final candidate were accepted. Keep human high-assurance security and acceptance review on the open PR before merge.
+The `edit` action reaches a configured engineering provider and records its bounded receipt/output, but this command path does not establish a qualified end-to-end autonomous coding model. A provider must pass its actual target, model, capability, boundary and receipt checks. Default models have no qualification claim. A returned edit result is not proof that the integrated workflow, tests, review, or final candidate were accepted. Keep human high-assurance security and acceptance review on the open PR before merge.
 
 For a durable GitHub run, the engineering checkpoint can contain provider output and inline artifact bytes. It is withheld by default. To authorize publishing this bounded evidence to the configured coordination branch, set the exact `sourceEvidenceDisclosure` value below before issuing an edit operation:
 
@@ -285,6 +285,10 @@ Domain constraints belong in `sdlc.config.json.deliveryPolicy`. Set `requiredJou
 A compact acceptance file can include `journeys: [{"id":"search","required":true,"criteria":["query"]}]`. Every required journey must reference currently verified criteria. Non-UI changes can omit journeys. Coverage keeps verified, accepted and deployed states separate.
 
 ## Adoption storage and recovery
+
+These are the low-level transaction commands under the [adoption journey](get-started.md). Use the
+journey's own [undo](get-started.md#undo) and [recover](get-started.md#recover-an-interrupted-apply)
+commands, which its readiness report prints; the commands below are for scripts and maintainers.
 
 ```text
 agentflow-sdlc adopt plan --profile standard --storage project --target <project> --json

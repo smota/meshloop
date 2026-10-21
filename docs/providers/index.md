@@ -13,14 +13,12 @@ Then use:
 
 - [Provider matrix](provider-matrix.md) for current facets and limitations.
 - [Authoring](authoring.md) for the descriptor, inspection, binding, and receipt contracts.
-- [AI Foundry Desk](ai-foundry-desk.md) for the pinned optional project-harness mapping.
 - [Modular architecture](../modular-architecture.md) for ownership rules.
 
 Provider availability is evidence, not configuration truth. Local CLI providers use a bare
 executable plus argument array with `shell: false`; arbitrary shell command strings are deprecated
 and never executed by routing.
 
-The execution registry remains independent from optional harness providers. The shipped CLI uses a
-separate provider catalog so `providers list` and `providers inspect ai-foundry-desk` can discover
-the capability-limited AFD adapter. Discovery does not install, configure, or grant execution to
-AFD; library consumers opt in with `additionalProviders`.
+The execution registry remains independent from optional harness providers. The shipped CLI
+discovers only the built-in providers. Discovery does not install, configure, or grant execution to
+any provider. Library consumers register their own providers with `additionalProviders`.

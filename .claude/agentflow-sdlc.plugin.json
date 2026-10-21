@@ -12,9 +12,12 @@
     "agentflow-scanner",
     "agentflow-designer",
     "agentflow-migrator",
-    "agentflow-auditor"
+    "agentflow-auditor",
+    "agentflow-steerer",
+    "agentflow-maintainer"
   ],
   "roles": [
+    "requester",
     "product-manager",
     "analyst",
     "architect",
