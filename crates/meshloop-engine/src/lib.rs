@@ -16,3 +16,4 @@ pub mod router;
 pub mod run_loop;
 pub mod slice;
 pub mod verify;
+pub mod workspace;

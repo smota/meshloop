@@ -1,0 +1,257 @@
+{
+  "version": 1,
+  "kind": "behavioral-oracle",
+  "oracleId": "workspace-lifecycle-s2",
+  "title": "S2 workspace identity and ledger behavioral oracle",
+  "issue": "https://github.com/smota/meshloop/issues/73",
+  "acceptedAdr": "docs/architecture/adr/0033-workspace-lifecycle.md",
+  "scope": {
+    "phase": "S2 identity, repository fence, and durable ledger foundations",
+    "productCode": false,
+    "permittedBehavior": [
+      "Pure domain validation for typed identifiers, root aliases, and relative paths",
+      "Engine contracts for repository identity and exclusive fencing",
+      "Adapter identity resolution and authoritative ledger binding",
+      "Forward-only transactional schema migration and additive ledger persistence"
+    ],
+    "excludedBehavior": [
+      "Changing the default worktree root or selecting a root without explicit configuration",
+      "Deleting, relocating, or rewriting existing runs, events, attempts, evidence, or Git state",
+      "Guessing ownership for legacy paths or automatically binding legacy records to a repository",
+      "Activating runtime producers, cleanup, restart, recovery, retention, or destructive lifecycle behavior"
+    ]
+  },
+  "cases": [
+    {
+      "oracleId": "migration-v4-preserves-legacy-unbound",
+      "test": {"rustTestName": "migration_v4_preserves_legacy_unbound", "command": "cargo test -p meshloop-adapters migration_v4_preserves_legacy_unbound", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A valid v4 database contains multiple run rows, events, attempts, evidence payloads, feedback, and quota state.",
+        "Legacy worktree paths cannot be authoritatively associated with a repository identity."
+      ],
+      "action": "Open the database using the S2 adapter and migrate to v5.",
+      "expected": [
+        "Migration commits schema version 5 and only adds the lifecycle schema required by S2.",
+        "Every preexisting row and payload in runs, events, attempts, evidence, routing_feedback, and quota_state is preserved byte-for-byte where stored as text and value-for-value otherwise.",
+        "Legacy ownership/path rows remain explicitly unbound or unresolved; no repository identity, root alias, or owner is inferred from path strings, basenames, branch names, or configuration.",
+        "Existing run roots and worktree paths are not rewritten or relocated."
+      ],
+      "noSideEffects": [
+        "No deletes, updates, or replacements of existing history rows.",
+        "No filesystem or Git mutations outside the database migration."
+      ],
+      "failureInvariants": ["Any unpreservable legacy value aborts migration without partial v5 state."]
+    },
+    {
+      "oracleId": "migration-v1-v3-explicit-compatibility",
+      "test": {"rustTestName": "migration_v1_v3_explicit_compatibility", "command": "cargo test -p meshloop-adapters migration_v1_v3_explicit_compatibility", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "Separate fixture databases represent each supported legacy schema version 1, 2, and 3.",
+        "The implementation declares an explicit compatibility path and preservation mapping for each version it supports."
+      ],
+      "action": "Open each fixture and request migration to v5.",
+      "expected": [
+        "Each version with a declared migration path follows that exact path transactionally and preserves all data represented by that source schema.",
+        "Any version without a declared and implemented compatibility path is rejected before writes; it is never promoted by changing only a version number.",
+        "The result for versions 1, 2, and 3 is individually observable and deterministic."
+      ],
+      "noSideEffects": ["Unsupported-version refusal leaves schema, rows, and database identity unchanged."],
+      "failureInvariants": ["No implicit compatibility assumption or destructive downgrade/upgrade guessing."]
+    },
+    {
+      "oracleId": "migration-newer-schema-no-write",
+      "test": {"rustTestName": "migration_newer_schema_no_write", "command": "cargo test -p meshloop-adapters migration_newer_schema_no_write", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A database has a schema version greater than 5 and contains sentinel schema objects and rows.",
+        "Capture a logical snapshot of schema objects, metadata, all table rows, and relevant database identity before opening."
+      ],
+      "action": "Attempt to open the database with the S2 adapter.",
+      "expected": ["The adapter refuses the database as newer/incompatible before applying migration DDL."],
+      "noSideEffects": [
+        "The captured logical schema and data snapshot is unchanged.",
+        "No WAL/journal-mode transition, schema write, version update, or replacement database is created as a side effect of the refusal."
+      ],
+      "failureInvariants": ["A refusal after any persistent schema/data mutation fails this oracle."]
+    },
+    {
+      "oracleId": "migration-transaction-rollback",
+      "test": {"rustTestName": "migration_transaction_rollback", "command": "cargo test -p meshloop-adapters migration_transaction_rollback", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A valid v4 fixture has sentinel rows in every existing table and a captured logical snapshot.",
+        "A deterministic fault injection point can fail after at least one v5 DDL statement and before migration commit."
+      ],
+      "action": "Run migration with the injected failure.",
+      "expected": ["Migration reports failure and the database remains a valid v4 database."],
+      "noSideEffects": [
+        "No v5 tables/indexes/constraints or schema-version change persist.",
+        "All preexisting rows and database identity match the pre-migration snapshot."
+      ],
+      "failureInvariants": ["No partial migration state is accepted or silently retried as success."]
+    },
+    {
+      "oracleId": "identity-common-dir-and-linked-worktree",
+      "test": {"rustTestName": "identity_common_dir_and_linked_worktree", "command": "cargo test -p meshloop-adapters identity_common_dir_and_linked_worktree", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A main checkout and at least one linked worktree resolve through the same Git common directory and underlying directory file identity.",
+        "Both use one stored repository UUID and one authoritative ledger binding."
+      ],
+      "action": "Resolve identity independently from the main checkout and linked worktree, then request writable ledger access from both.",
+      "expected": [
+        "Both resolve to the same repository identity based on common-directory filesystem identity plus UUID.",
+        "Both attach to the same authoritative ledger and the repository-scoped fence.",
+        "Their distinct worktree locations remain locations under one repository; they do not become separate repositories."
+      ],
+      "noSideEffects": ["Resolution does not move worktrees or rewrite Git metadata."],
+      "failureInvariants": ["Path-string equality alone cannot establish identity or authority."]
+    },
+    {
+      "oracleId": "identity-same-basename-distinct-filesystems",
+      "test": {"rustTestName": "identity_same_basename_distinct_filesystems", "command": "cargo test -p meshloop-adapters identity_same_basename_distinct_filesystems", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "Two repositories have the same final directory name and may have the same configured UUID, but their canonical common-directory filesystem identities differ.",
+        "Each repository has a separate legitimate ledger binding."
+      ],
+      "action": "Resolve both repositories and request writable access.",
+      "expected": ["The repositories remain distinct; equal basenames do not merge identity, history, or ledger authority."],
+      "noSideEffects": ["Neither repository's identity or history is overwritten by the other."],
+      "failureInvariants": ["Basename, branch prefix, or path suffix matching is never sufficient identity evidence."]
+    },
+    {
+      "oracleId": "identity-copied-uuid-conflict",
+      "test": {"rustTestName": "identity_copied_uuid_conflict", "command": "cargo test -p meshloop-adapters identity_copied_uuid_conflict", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A repository directory is copied to a different filesystem identity while retaining the original UUID.",
+        "The original repository and ledger remain available."
+      ],
+      "action": "Resolve and request writable ownership for the copied repository, then verify the original repository remains accessible.",
+      "expected": [
+        "The copied UUID plus mismatching filesystem identity is classified as a conflict/ambiguous copy and fails closed for writable ownership.",
+        "The original repository keeps its identity, ledger binding, and writable access."
+      ],
+      "noSideEffects": ["No UUID rotation, ledger fork, rebinding, or mutation of either repository is automatic."],
+      "failureInvariants": ["The conflict must not strand or silently transfer the original authority."]
+    },
+    {
+      "oracleId": "ledger-alternate-database-and-replacement",
+      "test": {"rustTestName": "ledger_alternate_database_and_replacement", "command": "cargo test -p meshloop-adapters ledger_alternate_database_and_replacement", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A repository already has one authoritative ledger binding recorded in protected local operational state.",
+        "An alternate database path or a replacement database file is presented for the same repository identity."
+      ],
+      "action": "Request writable ownership using the alternate path and then using the replacement database.",
+      "expected": [
+        "The alternate path attaches only when it is proven to be the same authoritative database; otherwise writable ownership/lineage is refused.",
+        "A replacement database with matching repository metadata but no authoritative binding is refused for independent writable history.",
+        "The established authority remains intact and usable."
+      ],
+      "noSideEffects": ["No parallel history is initialized and no binding is silently replaced."],
+      "failureInvariants": ["Database path equality or copied metadata alone is not proof of shared authority."]
+    },
+    {
+      "oracleId": "fence-cross-process-and-unknown-filesystem",
+      "test": {"rustTestName": "fence_cross_process_and_unknown_filesystem", "command": "cargo test -p meshloop-adapters fence_cross_process_and_unknown_filesystem", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "Two independent processes target the same repository fence.",
+        "The test runs on a filesystem with supported exclusive-lock semantics; a separate fixture simulates or detects unsupported/unknown locking semantics."
+      ],
+      "action": "Have process A acquire the repository fence while process B attempts acquisition; repeat with an unsupported/unknown filesystem result.",
+      "expected": [
+        "While A holds the fence, B cannot acquire writable ownership.",
+        "After A releases it, B may acquire it, subject to a fresh authority and liveness check.",
+        "Unknown or unsupported lock semantics fail closed for writable ownership; no lock-file-exists heuristic is treated as an exclusive lock."
+      ],
+      "noSideEffects": ["Lock contention does not create independent ledgers or alter repository identity."],
+      "failureInvariants": ["Concurrent processes must never both observe successful exclusive ownership."]
+    },
+    {
+      "oracleId": "identity-native-file-id-unavailable",
+      "test": {"rustTestName": "identity_unavailable_common_or_ledger_file_id_refuses_without_mutation", "command": "cargo test -p meshloop-adapters identity_unavailable_common_or_ledger_file_id_refuses_without_mutation", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "Two independent fixtures inject an unavailable or unsupported native file-ID observation: one for the canonical Git common directory, and one for the authoritative ledger file.",
+        "Capture current registry existence/bytes, ledger binding, and relevant logical database state before each attempt."
+      ],
+      "action": "Attempt repository identity resolution and writable ledger binding for each fixture.",
+      "expected": [
+        "Unavailable native file identity for either the common directory or ledger refuses writable ownership before a repository binding is created or changed.",
+        "Neither path equality nor a stored UUID alone is accepted as an identity fallback.",
+        "The original repository and authoritative ledger remain usable when the observation is restored."
+      ],
+      "noSideEffects": [
+        "The common-directory failure creates or modifies no registry/manifest and no ledger binding.",
+        "The ledger-file failure leaves the existing protected registry bytes/binding and database rows/identity unchanged.",
+        "No fallback identity or ownership is written to errors, logs, events, evidence, or exported/default JSON."
+      ],
+      "failureInvariants": ["Unknown native identity fails closed before writable binding or registry mutation; no path-only or UUID-only fallback is permitted."]
+    },
+    {
+      "oracleId": "domain-identifiers-aliases-and-relative-paths",
+      "test": {"rustTestName": "workspace_types_validate_identifiers_aliases_and_relative_paths", "command": "cargo test -p meshloop-domain workspace_types_validate_identifiers_aliases_and_relative_paths", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "Fixtures include valid and invalid typed IDs, canonical root aliases, relative paths, traversal paths, absolute paths, separator variants, and ambiguous alias mappings."
+      ],
+      "action": "Validate each value and serialize accepted lifecycle records, events, evidence, and default JSON.",
+      "expected": [
+        "Valid IDs, registered aliases, and contained relative paths round-trip without normalization changing identity unexpectedly.",
+        "Traversal, absolute path, malformed ID, unknown/ambiguous alias, and root escape inputs are rejected before persistence.",
+        "Events, evidence, and default JSON use root aliases and relative paths and contain no absolute external root.",
+        "Only the protected local operational root registry may retain the canonical external root needed for reconciliation."
+      ],
+      "noSideEffects": ["Rejected values do not create or update lifecycle rows or leak paths to logs/errors/exports."],
+      "failureInvariants": ["No absolute external path is emitted in default serialized records or telemetry."]
+    },
+    {
+      "oracleId": "generation-plan-hash-and-history-retention",
+      "test": {"rustTestName": "ledger_generation_records_pin_plan_hash_and_preserve_history", "command": "cargo test -p meshloop-adapters ledger_generation_records_pin_plan_hash_and_preserve_history", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A ledger has an accepted plan content hash and existing immutable generation, event, attempt, evidence, artifact, and dependency rows.",
+        "A candidate generation record is prepared with the accepted plan hash, and a second candidate record is prepared with a changed hash without a newly accepted plan."
+      ],
+      "action": "Append/store the candidate generation record with the accepted plan hash, then separately attempt to append/store a generation record with the changed plan hash against the same accepted plan binding.",
+      "expected": [
+        "The ledger accepts a new distinct immutable generation record pinned to the accepted plan hash.",
+        "The ledger rejects a generation record with a changed plan hash when no newly accepted plan authorizes that hash.",
+        "Earlier generation rows and their event, attempt, evidence, artifact, and dependency references remain available and unchanged after both operations."
+      ],
+      "noSideEffects": ["No run-loop, restart, or CLI action is invoked; a rejected changed-hash append changes no rows and no history is reset/deleted."],
+      "failureInvariants": ["Graph, generation, attempt, and artifact identities remain distinct and cannot be conflated."]
+    },
+    {
+      "oracleId": "artifact-dependency-roundtrip-and-foreign-keys",
+      "test": {"rustTestName": "ledger_artifact_dependency_roundtrip_and_foreign_keys", "command": "cargo test -p meshloop-adapters ledger_artifact_dependency_roundtrip_and_foreign_keys", "expectedExecutedCountWhenRun": 1},
+      "preconditions": [
+        "A ledger fixture has valid artifacts across at least two generations, explicit artifact identities, locations by alias/relative path, and dependency edges including shared references.",
+        "The schema declares foreign-key relationships required by the ledger and enables enforcement on each connection."
+      ],
+      "action": "Insert records transactionally, close and reopen the store, load them, and attempt dangling artifact and dependency references.",
+      "expected": [
+        "Valid artifacts and dependency edges round-trip exactly, including identity, generation, state, and portable location fields.",
+        "Dangling graph/generation/artifact/dependency references are rejected by enforced constraints.",
+        "A failed insert transaction leaves no partially inserted artifact/dependency graph."
+      ],
+      "noSideEffects": ["Round-trip does not collapse shared dependencies or rewrite artifact identity."],
+      "failureInvariants": ["No orphan or cross-generation association is accepted silently."]
+    }
+  ],
+  "validation": {
+    "status": "planned-not-run",
+    "plannedCommands": [
+      "cargo test -p meshloop-domain workspace_lifecycle",
+      "cargo test -p meshloop-adapters workspace_ledger",
+      "cargo test -p meshloop-adapters migration_v4_preserves_legacy_unbound",
+      "cargo test -p meshloop-adapters migration_v1_v3_explicit_compatibility",
+      "cargo test -p meshloop-adapters migration_newer_schema_no_write",
+      "cargo test -p meshloop-adapters migration_transaction_rollback",
+      "cargo test -p meshloop-adapters identity_common_dir_and_linked_worktree",
+      "cargo test -p meshloop-adapters identity_same_basename_distinct_filesystems",
+      "cargo test -p meshloop-adapters identity_copied_uuid_conflict",
+      "cargo test -p meshloop-adapters ledger_alternate_database_and_replacement",
+      "cargo test -p meshloop-adapters fence_cross_process_and_unknown_filesystem",
+      "cargo test -p meshloop-adapters identity_unavailable_common_or_ledger_file_id_refuses_without_mutation",
+      "cargo test -p meshloop-domain workspace_types_validate_identifiers_aliases_and_relative_paths",
+      "cargo test -p meshloop-adapters ledger_generation_records_pin_plan_hash_and_preserve_history",
+      "cargo test -p meshloop-adapters ledger_artifact_dependency_roundtrip_and_foreign_keys"
+    ],
+    "requiredExecutedTestCount": {"minimum": 13, "perCaseMinimum": 1, "criterion": "At least one test implementing every oracle case must execute; record per-case counts and outcomes in evidence. This is a future implementation gate, not a current execution claim."},
+    "actualCargoCheck": {"status": "not-run", "command": "cargo check --workspace", "reason": "This artifact freezes expected behavior before implementation; it makes no validation claim."}
+  }
+}

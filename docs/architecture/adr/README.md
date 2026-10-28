@@ -48,6 +48,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0029 | Deterministic loop algorithms and quantized signature retrieval | Proposed |
 | 0030 | Internalized petgraph DAG engine, parametric manifests, and scheduling latency gates | Accepted |
 | 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
+| 0033 | Workspace lifecycle and durable history | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

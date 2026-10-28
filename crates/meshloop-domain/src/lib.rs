@@ -12,3 +12,4 @@ pub mod policy;
 pub mod role;
 pub mod state;
 pub mod task_graph;
+pub mod workspace;

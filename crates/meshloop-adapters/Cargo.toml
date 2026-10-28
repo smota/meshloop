@@ -21,6 +21,13 @@ workspace = true
 meshloop-domain = { workspace = true }
 meshloop-engine = { workspace = true }
 serde_json = "1"
+# ADR0033: safe native identity, OS-random UUIDs and protected registry encoding.
+serde = { version = "1", features = ["derive"] }
+file-id = { version = "=0.2.3", features = ["serde"] }
+uuid = { version = "1.29", features = ["v4"] }
+sha2 = { workspace = true }
+# Safe handle-to-path identity comparison for the actually locked registry file.
+same-file = "1.0.6"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]

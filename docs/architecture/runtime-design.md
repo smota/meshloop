@@ -194,7 +194,15 @@ once this ADR is accepted, per `schemas/README.md`):
   aggregate counters only, feeding §5's routing scores.
 
 **Redaction.** No raw prompt text, no full model completions, no file contents, no
-credentials or tokens, no paths outside the target repository, ever persisted.
+credentials or tokens are persisted. [ADR 0033](adr/0033-workspace-lifecycle.md),
+accepted 2026-10-28 with implementation not-started, narrowly permits absolute
+external roots only in a protected local operational root registry needed for
+reconciliation, including the canonical common-directory location. Use stable root
+aliases and relative paths in the ledger, evidence, events and default JSON; never
+include absolute external roots in events, evidence, logs or exports. Root aliases
+are operational references, not public identities. Durability bundles may contain
+source; keep them local and uncommitted, excluded from evidence, telemetry, log and
+report exports. This accepted exception does not claim a runtime implementation.
 `summary_redacted` fields pass a redaction step (secret-pattern scan plus a length cap)
 before being written. Retention: `events`/`evidence` retained indefinitely by default
 (small, audit-relevant); time-based pruning is a future decision if the store grows
