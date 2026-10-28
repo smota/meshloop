@@ -17,6 +17,7 @@ use meshloop_engine::ports::{
 
 pub struct SqliteStore {
     pub(crate) conn: Connection,
+    pub(crate) read_only: bool,
     pub(crate) database_handle: Option<same_file::Handle>,
     pub(crate) database_identity: Option<meshloop_domain::workspace::NativeIdentity>,
 }
@@ -29,6 +30,7 @@ impl SqliteStore {
         Self::migrate(&conn)?;
         Ok(Self {
             conn,
+            read_only: false,
             database_handle: None,
             database_identity: None,
         })
@@ -51,6 +53,7 @@ impl SqliteStore {
         crate::workspace::verify_handle(&database_handle, path)?;
         Ok(Self {
             conn,
+            read_only: false,
             database_handle: Some(database_handle),
             database_identity: Some(database_identity),
         })
@@ -63,6 +66,7 @@ impl SqliteStore {
         record: TransitionRecord,
         attempt: Option<&AttemptRow>,
     ) -> Result<(), StoreError> {
+        self.reject_bound_graph(&record.graph_id)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -222,6 +226,18 @@ fn parse_plan_state(s: &str) -> Result<PlanState, StoreError> {
 
 impl EvidenceStore for SqliteStore {
     fn record(&mut self, evidence: Evidence) -> Result<(), StoreError> {
+        let bound_graph: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT graph_id FROM attempts WHERE attempt_id=?1",
+                [evidence.candidate().attempt_id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| StoreError::Corrupt("attempt lookup failed".into()))?;
+        if let Some(graph) = bound_graph {
+            self.reject_bound_graph(&graph)?;
+        }
         let candidate = evidence.candidate().clone();
         let kind = match &evidence {
             Evidence::Deterministic(_) => "deterministic",
@@ -336,6 +352,7 @@ impl RoutingFeedbackStore for SqliteStore {
 
 impl EventLog for SqliteStore {
     fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
+        self.reject_bound_graph(&record.graph_id)?;
         self.conn
             .execute(
                 "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
@@ -454,6 +471,7 @@ impl QuotaStore for SqliteStore {
 
 impl RunStore for SqliteStore {
     fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError> {
+        self.reject_bound_graph(&row.graph_id)?;
         let plan_state = match row.plan_state {
             PlanState::AwaitingPlanReview => "AwaitingPlanReview",
             PlanState::PlanAccepted => "PlanAccepted",
@@ -485,6 +503,7 @@ impl RunStore for SqliteStore {
         row: &RunRow,
         events: &[TransitionRecord],
     ) -> Result<(), StoreError> {
+        self.reject_bound_graph(&row.graph_id)?;
         let plan_state = match row.plan_state {
             PlanState::AwaitingPlanReview => "AwaitingPlanReview",
             PlanState::PlanAccepted => "PlanAccepted",
@@ -619,6 +638,7 @@ impl RunStore for SqliteStore {
     }
 
     fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
+        self.reject_bound_graph(&row.graph_id)?;
         self.conn
             .execute(
                 "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
@@ -727,6 +747,7 @@ impl RunStore for SqliteStore {
     }
 
     fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError> {
+        self.reject_bound_graph(graph_id)?;
         self.conn
             .execute(
                 "DELETE FROM evidence WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE graph_id = ?1)",
@@ -751,6 +772,15 @@ impl RunStore for SqliteStore {
         pid: Option<u32>,
         image_name: Option<&str>,
     ) -> Result<(), StoreError> {
+        let graph: String = self
+            .conn
+            .query_row(
+                "SELECT graph_id FROM attempts WHERE attempt_id=?1",
+                [attempt_id.0],
+                |r| r.get(0),
+            )
+            .map_err(|_| StoreError::Corrupt("attempt missing".into()))?;
+        self.reject_bound_graph(&graph)?;
         self.conn
             .execute(
                 "UPDATE attempts SET pid = ?1, image_name = ?2 WHERE attempt_id = ?3",
@@ -765,6 +795,15 @@ impl RunStore for SqliteStore {
         attempt_id: AttemptId,
         pane_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        let graph: String = self
+            .conn
+            .query_row(
+                "SELECT graph_id FROM attempts WHERE attempt_id=?1",
+                [attempt_id.0],
+                |r| r.get(0),
+            )
+            .map_err(|_| StoreError::Corrupt("attempt missing".into()))?;
+        self.reject_bound_graph(&graph)?;
         self.conn
             .execute(
                 "UPDATE attempts SET pane_id = ?1 WHERE attempt_id = ?2",

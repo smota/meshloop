@@ -1,0 +1,634 @@
+{
+  "version": 1,
+  "kind": "behavioral-oracle",
+  "oracleId": "workspace-lifecycle-s3",
+  "title": "S3 workspace producer ownership, generations, and lifecycle fencing",
+  "issue": "https://github.com/smota/meshloop/issues/74",
+  "acceptedAdr": "docs/architecture/adr/0033-workspace-lifecycle.md",
+  "designInput": ".agent-runs/workspace-lifecycle/s3/design.md",
+  "scope": {
+    "phase": "S3 producer ownership, execution generations, repository fencing, driver control, and recovery",
+    "designAuthority": "Candidate S3 design defines the accepted scope; this oracle pins observable behavior and does not require a particular module layout.",
+    "permittedBehavior": [
+      "Additive transactional schema 5 to 6 migration and lifecycle records for provisional owners, revisions, operations, drivers, and narrow cancellation requests",
+      "Durable ownership and recovery intent before every covered workspace, Git, process, plan, review, check, integration, deliverable, restart, resume, and landing side effect",
+      "Explicit provisional planning ownership before plan acceptance, followed only by accepted-plan-gated generation creation",
+      "Distinct generations, immutable plan revision chains, globally unique attempt identity, generation-scoped projections, pinned roots, and truthful reconciliation",
+      "Repository-scoped cross-process exclusion, durable detached-driver handoff, bounded cancellation request channel, and read-only queries while a driver owns the mutation fence"
+    ],
+    "excludedBehavior": [
+      "Changing the configured default worktree root or activating nested-root default selection",
+      "Implicit adoption or rebinding of legacy runs/artifacts from path strings, graph IDs, branch names, or configuration",
+      "Cleanup, worktree pruning, artifact deletion, force removal, delivery receipts, cleanup eligibility, or retention expiry",
+      "Direct cancellation by killing a persisted PID outside the active driver's verified owned process tree",
+      "Committing, pushing, publishing a PR, merging, releasing, or claiming cross-platform support without execution evidence"
+    ]
+  },
+  "requiredCommandGroups": [
+    {
+      "id": "workspace-producers",
+      "command": "cargo test -p meshloop-engine workspace_producers",
+      "minimumExecutedCount": 12,
+      "minimumNonIgnoredCount": 12,
+      "zeroMatchesAreFailure": true
+    },
+    {
+      "id": "lifecycle-fence",
+      "command": "cargo test -p meshloop-adapters lifecycle_fence",
+      "minimumExecutedCount": 8,
+      "minimumNonIgnoredCount": 8,
+      "zeroMatchesAreFailure": true
+    },
+    {
+      "command": "cargo test -p meshloop-adapters retained_schema5_binary_refuses_schema6_without_mutation -- --ignored",
+      "minimumNonIgnoredCount": 1,
+      "runIgnoredTestsExplicitly": true,
+      "minimumExecutedCount": 1,
+      "requiresExternalFixture": ".agent-runs/workspace-lifecycle/s3/fixtures/schema5-binary-manifest.json",
+      "zeroMatchesAreFailure": true,
+      "id": "retained-schema5-binary-refusal",
+      "expectedIgnoredCount": 0
+    }
+  ],
+  "cases": [
+    {
+      "oracleId": "migration-v5-v6-additive-preserves-legacy",
+      "test": {
+        "rustTestName": "lifecycle_fence_v5_v6_additive_migration_preserves_legacy_rows",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_v5_v6_additive_migration_preserves_legacy_rows",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A representative canonical v5 DB contains all legacy runs, events, attempts, evidence, feedback, quota and S2 lifecycle rows, including unresolved legacy ownership.",
+        "Capture schema/data snapshots and database native identity."
+      ],
+      "action": "Migrate once to v6, close and reopen through current code.",
+      "expected": [
+        "Migration is additive and transactional; all legacy columns, rows and payloads remain value-for-value unchanged.",
+        "Legacy generation/revision bindings remain NULL; no graph, path or branch inference occurs.",
+        "New lifecycle tables and constraints match canonical v6; reopening is idempotent."
+      ],
+      "noSideEffects": [
+        "No deletion, rewrite, implicit generation, adoption, Git change, or external file mutation."
+      ],
+      "failureInvariants": [
+        "Any unpreservable row or schema mismatch refuses without partial v6 state."
+      ]
+    },
+    {
+      "oracleId": "migration-v6-rollback-and-newer-schema-refusal",
+      "test": {
+        "rustTestName": "lifecycle_fence_v6_rollback_and_future_schema_refusal",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_v6_rollback_and_future_schema_refusal",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A v5 fixture has sentinels in every legacy table; deterministic failure can be injected after actual v6 DDL begins.",
+        "A separate DB has a version newer than 6 and sentinel schema/data objects."
+      ],
+      "action": "Inject migration failure, then separately attempt to open the future-version DB through current S3 adapter.",
+      "expected": [
+        "Injected failure leaves a valid v5 schema and exact prior data snapshot.",
+        "Current adapter refuses the unsupported future schema before writes; schema, rows, identity and journal mode remain unchanged."
+      ],
+      "noSideEffects": [
+        "No destructive downgrade, partial migration, data rewrite, or replacement DB."
+      ],
+      "failureInvariants": [
+        "This portable test does not substitute for execution of the external retained v5 binary case."
+      ]
+    },
+    {
+      "oracleId": "graph-identities-dots-and-global-attempt-ids",
+      "test": {
+        "rustTestName": "workspace_producers_graph_identity_preserves_full_grammar_and_attempt_ids",
+        "command": "cargo test -p meshloop-engine workspace_producers_graph_identity_preserves_full_grammar_and_attempt_ids",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Exercise the complete existing graph_id_is_legal grammar: every nonempty ASCII string containing only alphanumeric, dot, underscore and hyphen, including literal \".\", \"..\", dotted IDs, and a long legal ID; lifecycle IDs remain separately opaque/generated.",
+        "Two generations of one graph contain overlapping task IDs and create separate attempts."
+      ],
+      "action": "Roundtrip accepted graph identities through persistence and selectors, then create path/ref records using generated lifecycle IDs; separately validate relative paths.",
+      "expected": [
+        "Every previously legal graph ID, including \".\", \"..\", and long IDs, roundtrips byte-for-byte as an opaque logical identity; no max-length narrowing or normalization is introduced.",
+        "Graph strings are never physical path/ref components: physical names use opaque generated lifecycle IDs. RelativePath rejects absolute/drive/backslash paths, empty components, dot/dotdot components and escapes, while preserving valid contained forward-slash-separated relative paths.",
+        "Distinct attempts have globally distinct AttemptIds even when task and graph repeat across generations; generation, graph, task, artifact and attempt identities remain non-conflated."
+      ],
+      "noSideEffects": [
+        "Only values outside the existing graph_id_is_legal grammar refuse before side effects; legal graph ID \".\" and \"..\" remain accepted as logical IDs without path traversal."
+      ],
+      "failureInvariants": [
+        "No logical-ID validation narrowing, dot stripping, normalization collision, physical path/ref traversal, max-length cap, or ID reuse."
+      ]
+    },
+    {
+      "oracleId": "provisional-plan-before-acceptance",
+      "test": {
+        "rustTestName": "workspace_producers_plan_is_provisional_until_explicit_acceptance",
+        "command": "cargo test -p meshloop-engine workspace_producers_plan_is_provisional_until_explicit_acceptance",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A new planning request is not yet reviewed or accepted; exercise plan success, retry, decline and failure."
+      ],
+      "action": "Start planning, inspect durable records, then separately accept and decline candidate plans.",
+      "expected": [
+        "Every planning attempt has unique provisional ownership and durable output provenance before dispatch or writes.",
+        "No GenerationRecord, accepted hash, or executable attempt exists before explicit PlanAccepted.",
+        "Acceptance creates an immutable plan revision and generation pinned to that exact content; rejection retains discoverable provisional history.",
+        "Public cancellation of pre-graph planning targets an opaque provisional driver ID; status/inspect expose that active provisional driver without inventing a graph ID or generation."
+      ],
+      "noSideEffects": [
+        "Concurrent planners never reset or share a scratch workspace; failure to persist provisional ownership prevents planner dispatch.",
+        "Cancellation does not require or fabricate a graph ID before a plan exists."
+      ],
+      "failureInvariants": [
+        "No provisional artifact is mislabeled accepted; no empty/fabricated accepted hash."
+      ]
+    },
+    {
+      "oracleId": "producer-inventory-intent-before-use",
+      "test": {
+        "rustTestName": "workspace_producers_all_entry_points_journal_before_side_effects",
+        "command": "cargo test -p meshloop-engine workspace_producers_all_entry_points_journal_before_side_effects",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Instrument actual public plan, stage/start, accept/first tick, attempt, repair/check, node integration, deliverable build, landing, restart, resume, review and derived cache entry points with observable fake ports.",
+        "Pre-review start/review remains provisional and does not create the execution integration artifact."
+      ],
+      "action": "Invoke each producer and record event order at storage, filesystem, Git, process, planner, and review-output boundaries.",
+      "expected": [
+        "Each covered effect has a durable typed owner and pending operation intent committed before first use.",
+        "Intent records exact graph/generation/revision/attempt/root/target identity applicable to that producer.",
+        "Integration creation is deferred until PlanAccepted and actual generation creation at accept/first tick. No integration worktree/ref is created pre-review."
+      ],
+      "noSideEffects": [
+        "Missing LifecycleAccess or intent persistence failure causes zero workspace/Git/process/output mutation."
+      ],
+      "failureInvariants": [
+        "No unregistered artifact, shared planning scratch reset, fabricated acceptance, or success recorded before observed effect.",
+        "Pre-review integration must not be created even if it could be provisionally owned; the resolved S3 design defers it."
+      ]
+    },
+    {
+      "oracleId": "producer-failed-intent-no-effect",
+      "test": {
+        "rustTestName": "workspace_producers_intent_write_failure_prevents_external_effects",
+        "command": "cargo test -p meshloop-engine workspace_producers_intent_write_failure_prevents_external_effects",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A faulting lifecycle writer can reject each producer's reservation or completion write."
+      ],
+      "action": "Inject reservation failure and completion-write failure around representative Git creation, process dispatch, check, review output and landing operations.",
+      "expected": [
+        "Reservation failure prevents all corresponding external effects and returns the original error.",
+        "Completion failure leaves the committed operation pending/blocked, returns failure, and allows later reconciliation."
+      ],
+      "noSideEffects": [
+        "No error is swallowed; no duplicate operation is launched to mask failed completion persistence."
+      ],
+      "failureInvariants": [
+        "Durable success is never reported without post-effect observation and completion record."
+      ]
+    },
+    {
+      "oracleId": "restart-retains-generations-history-hash-root",
+      "test": {
+        "rustTestName": "workspace_producers_restart_adds_generation_without_deleting_history",
+        "command": "cargo test -p meshloop-engine workspace_producers_restart_adds_generation_without_deleting_history",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Accepted graph has generation N, plan revision chain, attempts, events, evidence, artifacts, branches and pinned root; include dirt in old integration artifact."
+      ],
+      "action": "Perform two successive explicit restarts; separately attempt restart while unaccepted and after out-of-band plan JSON/hash mutation.",
+      "expected": [
+        "Each successful restart creates a distinct generation pinned to the current explicitly accepted revision/hash and same root alias/layout.",
+        "Every prior generation, event, attempt, evidence, artifact, branch and required object reference remains queryable and unchanged.",
+        "Changed/unaccepted plan refuses before side effects; ADR0028 mutation requires the designed revision authorization and does not rewrite generation's initial accepted hash."
+      ],
+      "noSideEffects": [
+        "No worktree/ref deletion, reset_graph_execution, implicit cancellation, cleanup, or history rewrite."
+      ],
+      "failureInvariants": [
+        "A restart cannot silently select a predecessor generation or move a run after configuration-root change."
+      ]
+    },
+    {
+      "oracleId": "active-generation-projections-and-history",
+      "test": {
+        "rustTestName": "workspace_producers_queries_scope_replay_and_attempts_to_generation",
+        "command": "cargo test -p meshloop-engine workspace_producers_queries_scope_replay_and_attempts_to_generation",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "One graph has at least two generations with overlapping task IDs, different terminal/live states, revisions, attempts and evidence."
+      ],
+      "action": "Query active and explicit historical status, replay, attempts, review selection, export metadata and summary.",
+      "expected": [
+        "Default operational queries resolve active generation once per command and only select its events, attempts, evidence, revision and Git metadata.",
+        "Explicit historical query returns the requested generation; aggregate summary labels generations rather than concatenating state folds.",
+        "Old and new generation projections cannot overwrite or mask one another."
+      ],
+      "noSideEffects": [
+        "Queries do not mutate generation, initialize repository identity, or adopt legacy history."
+      ],
+      "failureInvariants": [
+        "Graph ID alone is never a sufficient query scope for generation-specific state."
+      ]
+    },
+    {
+      "oracleId": "adr0028-plan-revision-chain",
+      "test": {
+        "rustTestName": "workspace_producers_adr0028_mutations_append_authorized_revision_chain",
+        "command": "cargo test -p meshloop-engine workspace_producers_adr0028_mutations_append_authorized_revision_chain",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "An accepted plan revision has canonical JSON/hash, review authorization and linked generation; perform append and prepend mutations with require_review on and off."
+      ],
+      "action": "Mutate plan, review/accept as applicable, dispatch attempt, then tamper with stored JSON/hash out of band.",
+      "expected": [
+        "Every mutation appends an immutable revision with predecessor, exact JSON/hash and truthful authorization; no prior snapshot is overwritten.",
+        "require_review=true blocks execution until reviewed; require_review=false follows ADR0028's explicit inherited mutation authorization.",
+        "Attempts/events reference exact revision; each generation's initial accepted hash remains immutable; out-of-band mismatch refuses before dispatch."
+      ],
+      "noSideEffects": [
+        "Mutation does not synthesize a new execution generation or erase rejected/review history."
+      ],
+      "failureInvariants": [
+        "No forged human approval, lost revision link, or silent hash pinning."
+      ]
+    },
+    {
+      "oracleId": "intent-crash-windows-reconcile",
+      "test": {
+        "rustTestName": "lifecycle_fence_operation_crash_windows_reconcile_idempotently",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_operation_crash_windows_reconcile_idempotently",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Deterministic injected crash checkpoints cover after intent commit, before Git create, after Git create/before registration, after spawn/before child identity persistence, after observed effect/before completion, and during event transaction."
+      ],
+      "action": "Reopen store and invoke reconciliation for each checkpoint with fresh Git/process observations.",
+      "expected": [
+        "No-effect intent may resume only after proving no producer can still act; observed expected effect finalizes idempotently; ambiguous partial state blocks with retained reason and intent.",
+        "No second dispatch or repeated non-idempotent Git operation occurs while outcome is unknown."
+      ],
+      "noSideEffects": [
+        "No automatic cleanup, guessed owner, or history deletion during reconciliation."
+      ],
+      "failureInvariants": [
+        "Fault checkpoints are injected and reported as such; they are not represented as actual power-loss tests."
+      ]
+    },
+    {
+      "oracleId": "drift-and-unknown-intent-blocked",
+      "test": {
+        "rustTestName": "lifecycle_fence_unexpected_git_or_path_drift_blocks_remaining_steps",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_unexpected_git_or_path_drift_blocks_remaining_steps",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A multi-step pending operation has expected before/after refs, path identity and registration; alter each observed component between intent and continuation."
+      ],
+      "action": "Resume an operation after unexpected ref OID, missing/replaced worktree, alias/root identity mismatch, or unclassifiable process state.",
+      "expected": [
+        "Operation transitions to visible blocked state with stable reason; all later steps stop.",
+        "Reconciliation revalidates exact repository, root, target and process facts before any continuation."
+      ],
+      "noSideEffects": [
+        "No broad retry, force Git operation, path-based adoption, or cleanup is attempted."
+      ],
+      "failureInvariants": [
+        "Unknown or drifted state never maps to success, dead, or safe-to-retry by default."
+      ]
+    },
+    {
+      "oracleId": "pinned-root-and-legacy-no-adoption",
+      "test": {
+        "rustTestName": "workspace_producers_keep_bound_root_and_refuse_legacy_mutation",
+        "command": "cargo test -p meshloop-engine workspace_producers_keep_bound_root_and_refuse_legacy_mutation",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "One explicitly bound run pins root alias/path; config later selects a different root. A separate migrated run remains unresolved legacy ownership with events/attempts/evidence and Git fixtures."
+      ],
+      "action": "Run active producers after config drift and attempt resume/restart/accept/review/mutate/integrate on legacy run.",
+      "expected": [
+        "Bound run resolves only its original pinned root; no default/config change relocates it.",
+        "Legacy reads remain available; every mutation refuses with LegacyOwnershipUnresolved and actionable identity guidance."
+      ],
+      "noSideEffects": [
+        "Legacy refusal and reader opens preserve DB rows, files, refs, registry and do not initialize/bind/adopt identity."
+      ],
+      "failureInvariants": [
+        "No inference from path, branch, graph name or configuration; explicit adoption remains S8."
+      ]
+    },
+    {
+      "oracleId": "real-cross-process-lifecycle-fence",
+      "test": {
+        "rustTestName": "lifecycle_fence_independent_processes_share_authority_across_configs",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_independent_processes_share_authority_across_configs",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Use independent OS processes and deterministic barriers. A holds same-repository lifecycle mutation fence while B uses another checkout/config; test same authoritative DB, alternate/copy/replaced DB, and C using another repository."
+      ],
+      "action": "Race start/resume/restart/integrate/mutate across A and B, kill A at a barrier, then let B perform fresh identity and pending-intent reconciliation.",
+      "expected": [
+        "A and B never both own writes; B receives bounded LifecycleBusy while A owns fence.",
+        "Alternate/copy/replaced DB cannot fork ledger authority; other repository remains independent.",
+        "After owner exit, next writer revalidates identity and pending intent before mutation."
+      ],
+      "noSideEffects": [
+        "No spin loop, lock-file-exists heuristic, independent ledger creation, or stale-owner takeover."
+      ],
+      "failureInvariants": [
+        "This is an actual spawned-process race, not a thread mutex test; report host OS and run count."
+      ]
+    },
+    {
+      "oracleId": "driver-liveness-ambiguous-ended-semantics",
+      "test": {
+        "rustTestName": "lifecycle_fence_driver_identity_live_ambiguous_and_ended_attempts",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_driver_identity_live_ambiguous_and_ended_attempts",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Persist PID plus OS creation token and owned process-tree facts; fixtures include actual live child, actual terminated child, PID/image mismatch/reuse, access denied and ended_at with surviving descendant."
+      ],
+      "action": "Resume/cancel/dispatch against each state using actual process observations where available and injected unknown/ambiguous identity results separately.",
+      "expected": [
+        "Live blocks conflicting mutation; confirmed dead allows only designed reconciliation; ambiguous or unsupported identity blocks and surfaces the reason.",
+        "Ended attempt alone does not imply process tree death; descendant liveness is respected."
+      ],
+      "noSideEffects": [
+        "No PID/image-only downgrade and no duplicate worker dispatch."
+      ],
+      "failureInvariants": [
+        "Label native process observations versus injected inaccessible/unknown cases; OS-specific support claims require that OS run."
+      ]
+    },
+    {
+      "oracleId": "narrow-active-driver-cancellation",
+      "test": {
+        "rustTestName": "workspace_producers_cancel_uses_exact_bounded_request_channel",
+        "command": "cargo test -p meshloop-engine workspace_producers_cancel_uses_exact_bounded_request_channel",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A owns active driver and worker; another process has only narrow control client. Requests cover exact repo/graph/generation/driver/task and all-task selectors, duplicate, stale, wrong-driver, wrong-generation and queue-cap boundary.",
+        "For pre-graph planning, the separate provisional-driver case uses typed provisional target; execution task selectors are valid only for generation targets."
+      ],
+      "action": "Queue cancellation while owner is active; exercise 64 outstanding-request cap, duplicate idempotence, stale successor protection, and cancellation with failed kill/uncertain tree.",
+      "expected": [
+        "Control client performs only bounded cancellation-request INSERT; maximum 64 outstanding per driver; no arbitrary payload; provisional-driver and execution-generation targets are distinct types, and task selector is execution-only.",
+        "Owner acknowledges Applied only after killing its verified owned tree and observing termination; otherwise status is Pending, Blocked, Stale or OwnerLost with reason.",
+        "Default acknowledgement wait is bounded to 5 seconds; if owner has not completed by then, CLI returns honest Pending with request ID and current observable status."
+      ],
+      "noSideEffects": [
+        "No direct PID kill, run/event/attempt mutation, lease acquisition, registry read, binding, root registration or adoption through request client."
+      ],
+      "failureInvariants": [
+        "Cancellation request acceptance is not cancellation completion; bounded acknowledgement timeout reports current status honestly.",
+        "No active cancellation request may be directed to a stale provisional driver, successor generation, or wrong target kind."
+      ]
+    },
+    {
+      "oracleId": "blocking-check-and-planner-cancellation-polling",
+      "test": {
+        "rustTestName": "workspace_producers_control_probe_cancels_blocking_check_and_planner",
+        "command": "cargo test -p meshloop-engine workspace_producers_control_probe_cancels_blocking_check_and_planner",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "A blocking check and planner use deterministic controllable child processes; owner retains repository fence while polling."
+      ],
+      "action": "Queue cancellation during each blocking operation and observe owner ControlProbe/heartbeat cadence and process-tree termination.",
+      "expected": [
+        "Owner checks requests at a target cadence of at most 100ms through existing 20ms loops and mandatory ControlProbe, except while a bounded Git operation is executing; use deterministic probe/tick evidence, not a 100ms wall-clock scheduling assertion.",
+        "Cancellation is exercised against actual controllable planner/check child processes; owner observes request, terminates only its owned tree, then commits the legal event/ended_at/ack. The default CLI acknowledgement wait is 5 seconds and returns Pending when exceeded.",
+        "Unrelated child process remains alive."
+      ],
+      "noSideEffects": [
+        "No owner fence release before observed child termination; Git operations remain bounded and report finish/failure before consuming cancellation."
+      ],
+      "failureInvariants": [
+        "Use barriers/monotonic deadline rather than timing sleeps; test cadence budget explicitly without claiming instant interruption.",
+        "Do not count a synthetic token-only unit test as actual public planner/check cancellation."
+      ]
+    },
+    {
+      "oracleId": "detached-driver-handoff-and-owner-loss",
+      "test": {
+        "rustTestName": "lifecycle_fence_detached_driver_handoff_is_durable_and_fail_closed",
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_detached_driver_handoff_is_durable_and_fail_closed",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Independent parent and detached child processes; inject crash before spawn, after spawn before PID/token persistence, before child lease acquisition, and before ready acknowledgement."
+      ],
+      "action": "Perform detach handoff with exact driver nonce; query control state during gap and after each injected crash.",
+      "expected": [
+        "Pending handoff claim prevents another driver from stealing; child must acquire same authority, validate nonce/target, persist process creation identity and acknowledge ready.",
+        "Missing acknowledgement returns bounded pending/failed status; crash before identity is persisted remains ambiguous/blocked, not assumed absent."
+      ],
+      "noSideEffects": [
+        "No hidden child or second driver runs without durable identity and lease."
+      ],
+      "failureInvariants": [
+        "Use actual child processes; each crash window is separately labeled injected and leaves observable durable state."
+      ]
+    },
+    {
+      "oracleId": "public-reads-while-driver-holds-locked-registry",
+      "test": {
+        "rustTestName": "workspace_producers_read_only_status_inspect_watch_do_not_mutate",
+        "command": "cargo test -p meshloop-engine workspace_producers_read_only_status_inspect_watch_do_not_mutate",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Active writer holds lifecycle lease and Windows registry handle; use read-only API session and separate CLI process."
+      ],
+      "action": "Read status, inspect, watch, and doctor while another process owns the lease; snapshot registry/database before and after.",
+      "expected": [
+        "Read-only calls succeed or return bounded read-consistent results without acquiring writer lease; they do not initialize repository or root binding.",
+        "Cancellation request path validates actual common-dir and ledger identity without reading the exclusively locked registry."
+      ],
+      "noSideEffects": [
+        "No WAL initialization, schema migration, registry write, root registration, adoption or lifecycle mutation from reads."
+      ],
+      "failureInvariants": [
+        "Where OS does not support exclusive registry sharing, distinguish lock failure from product liveness behavior and report platform limits."
+      ]
+    },
+    {
+      "oracleId": "cli-live-cancel-read-while-locked-end-to-end",
+      "test": {
+        "rustTestName": "workspace_producers_cli_cancel_and_read_while_owner_holds_fence",
+        "command": "cargo test -p meshloop-cli workspace_producers_cli_cancel_and_read_while_owner_holds_fence",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Launch actual owner CLI with long-running fixture worker, second cancel CLI, and third status/inspect CLI as independent processes."
+      ],
+      "action": "Verify second mutator returns LifecycleBusy, status/inspect remains available, cancel queues exact request, owner acknowledges only after observed owned-tree death.",
+      "expected": [
+        "CLI output exposes Pending then Applied or a truthful Blocked/OwnerLost status and request ID.",
+        "Third-party unrelated process remains alive; second mutator cannot fail/cancel the owner's worker."
+      ],
+      "noSideEffects": [
+        "No persisted-PID kill bypass or mutation from read-only CLI."
+      ],
+      "failureInvariants": [
+        "This end-to-end test is separate from adapter lease tests and from fake ControlProbe unit tests."
+      ]
+    },
+    {
+      "oracleId": "deliverable-rebuild-and-landing-intent-preservation",
+      "test": {
+        "rustTestName": "workspace_producers_deliverable_rebuild_and_landing_preserve_prior_state",
+        "command": "cargo test -p meshloop-engine workspace_producers_deliverable_rebuild_and_landing_preserve_prior_state",
+        "expectedExecutedCountWhenRun": 1
+      },
+      "preconditions": [
+        "Prepare one deliverable build with dirty/untracked output and branch, then prepare a second build; prepare landing with before/after ref snapshots."
+      ],
+      "action": "Rebuild deliverable and inject landing/merge failure before completion, after Git effect and after observation before journal completion.",
+      "expected": [
+        "Every build receives a fresh immutable artifact/path/ref; prior dirty/untracked build and branch remain intact and queryable.",
+        "Landing operation records exact source artifact/head and destination before/after OIDs; ambiguous post-effect state blocks instead of repeating merge."
+      ],
+      "noSideEffects": [
+        "No `remove_dir_all`, worktree prune, branch deletion, delivery receipt, cleanup eligibility or S4 claim."
+      ],
+      "failureInvariants": [
+        "Drift stops remaining steps; successful operation does not claim delivery completion."
+      ]
+    },
+    {
+      "test": {
+        "expectedExecutedCountWhenRun": 1,
+        "rustTestName": "workspace_producers_cli_cancel_provisional_planner_by_driver_id",
+        "command": "cargo test -p meshloop-cli workspace_producers_cli_cancel_provisional_planner_by_driver_id"
+      },
+      "failureInvariants": [
+        "Wrong/stale provisional driver and execution-generation/task selectors do not cancel the planner."
+      ],
+      "expected": [
+        "Cancellation request targets the typed provisional driver, not graph/generation/task.",
+        "Owner observes request within target polling cadence and terminates only its owned planner tree; it records outcome and retains provisional owner/output provenance.",
+        "If acknowledgement has not completed within five seconds, cancel returns Pending truthfully with request ID."
+      ],
+      "noSideEffects": [
+        "No fabricated graph/generation ID, registry adoption, direct PID kill, unrelated child termination, or plan acceptance."
+      ],
+      "oracleId": "cli-cancel-provisional-planner-by-driver-id",
+      "action": "Invoke public cancel --driver <opaqueid> from a separate CLI process; poll through bounded acknowledgement and inspect retained provisional state.",
+      "preconditions": [
+        "Launch actual planning CLI before a graph ID exists and hold a controllable planner child active.",
+        "Status/inspect expose the opaque provisional driver ID."
+      ]
+    },
+    {
+      "action": "Create a v6 database with sentinel schema, rows, native identity and journal mode; invoke the actual retained schema-5 meshloop CLI against that database through a command that opens its store.",
+      "fixture": {
+        "sha256Env": "MESHLOOP_SCHEMA5_SHA256",
+        "binaryEnv": "MESHLOOP_SCHEMA5_BINARY",
+        "provisioning": "Ignored external artifact must be provisioned from manifest on each host/CI; missing or mismatched fixture is a hard failure, never a skip.",
+        "binaryManifestPath": ".agent-runs/workspace-lifecycle/s3/fixtures/meshloop-schema5.exe",
+        "manifest": ".agent-runs/workspace-lifecycle/s3/fixtures/schema5-binary-manifest.json",
+        "sha256": "e6a81cb444e5714e142620995de0efc9768fb5981339f02defe3097cf4d3b233",
+        "sourceCandidate": "29c5d8e23c7feccd0a985d05a0a040150f79567449d3b183541629fc603698d3"
+      },
+      "expected": [
+        "The actual older CLI process refuses the v6 schema with a nonzero exit and a bounded compatibility error.",
+        "The v6 schema/data snapshot, database native identity and journal mode remain unchanged after the process exits."
+      ],
+      "preconditions": [
+        "Test is marked ignored with reason requiring retained exact schema-5 executable; acceptance collector explicitly runs this case with --ignored.",
+        "Resolve external binary path and expected SHA-256 from environment variables and verify both against the ignored manifest before launch."
+      ],
+      "oracleId": "retained-schema5-binary-refuses-schema6-without-mutation",
+      "failureInvariants": [
+        "Missing executable, missing SHA, manifest/environment mismatch, wrong executable hash, or failure to exercise a real CLI store-open path fails the test. It must not skip, silently ignore, or count the portable adapter test as a substitute.",
+        "Observed counts must be one executed, one passed, zero ignored in the explicit --ignored run."
+      ],
+      "test": {
+        "expectedIgnoredCountWhenRun": 0,
+        "expectedPassedCountWhenRun": 1,
+        "rustTestName": "retained_schema5_binary_refuses_schema6_without_mutation",
+        "expectedExecutedCountWhenRun": 1,
+        "command": "cargo test -p meshloop-adapters retained_schema5_binary_refuses_schema6_without_mutation -- --ignored"
+      },
+      "noSideEffects": [
+        "No writes, WAL/journal-mode change, migration, replacement DB, deletion or registry mutation."
+      ]
+    },
+    {
+      "noSideEffects": [
+        "Read-only open never creates/migrates/initializes state; explicit migration is the only allowed write and only changes additive schema as covered by migration case."
+      ],
+      "action": "Read the absent location; attempt read-only open of pre-v6 DB; then explicitly run the writer migration to v6 and repeat legacy read.",
+      "preconditions": [
+        "An absent database/root location is addressed through status/inspect/watch read-only composition.",
+        "A canonical v5 database has sentinel rows and unresolved legacy ownership; capture schema, rows, database native identity, journal mode, and filesystem entries."
+      ],
+      "test": {
+        "expectedExecutedCountWhenRun": 1,
+        "command": "cargo test -p meshloop-adapters lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required",
+        "rustTestName": "lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required"
+      },
+      "failureInvariants": [
+        "Do not let a successful migration test substitute for no-write refusal on the read path; do not silently migrate on read or discard legacy read visibility."
+      ],
+      "oracleId": "readonly-absent-db-and-pre-v6-upgrade-required",
+      "expected": [
+        "Absent DB returns no managed runs and creates no directories, DB, WAL/SHM, registry or other files.",
+        "Pre-v6 read returns bounded SchemaUpgradeRequired before any write or journal-mode transition; all schema/data/identity/filesystem snapshots remain unchanged.",
+        "After explicit writer migration to v6, legacy run/history remains readable while unresolved ownership stays unbound and no adoption or repository/root binding is created."
+      ]
+    }
+  ],
+  "validation": {
+    "status": "planned-not-run",
+    "plannedCommands": [
+      "cargo test -p meshloop-engine workspace_producers",
+      "cargo test -p meshloop-adapters lifecycle_fence",
+      "cargo test -p meshloop-cli workspace_producers_cli_cancel_and_read_while_owner_holds_fence",
+      "cargo run -p xtask -- check",
+      "cargo run -p xtask -- smoke",
+      "cargo test -p meshloop-adapters retained_schema5_binary_refuses_schema6_without_mutation -- --ignored"
+    ],
+    "requiredExecutedTestCount": {
+      "minimum": 23,
+      "perCaseMinimum": 1,
+      "criterion": "Each named case must execute one or more non-ignored tests; required group filters must meet their nonzero minimums. The external retained-schema5 case is separately executed with --ignored and must report one pass and zero ignored. This oracle freezes expected behavior and makes no execution claim."
+    },
+    "platformEvidence": {
+      "requiredHost": "Windows",
+      "unixStatus": "not-run unless separately executed",
+      "networkFilesystem": "no support claim from injected lock failures"
+    },
+    "actualTestClaims": [],
+    "externalFixtureProvisioning": "Provision the exact manifest binary and SHA on every acceptance host/CI; the current manifest is Windows .exe evidence only. No current CI coverage is claimed."
+  },
+  "externalFixtures": [
+    {
+      "currentCiClaim": "none",
+      "binary": ".agent-runs/workspace-lifecycle/s3/fixtures/meshloop-schema5.exe",
+      "sha256": "e6a81cb444e5714e142620995de0efc9768fb5981339f02defe3097cf4d3b233",
+      "missingOrMismatch": "hard failure; never skip",
+      "requiredOn": "each host/CI acceptance run",
+      "id": "schema5-cli",
+      "manifest": ".agent-runs/workspace-lifecycle/s3/fixtures/schema5-binary-manifest.json",
+      "sourceCandidate": "29c5d8e23c7feccd0a985d05a0a040150f79567449d3b183541629fc603698d3"
+    }
+  ]
+}
+

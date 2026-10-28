@@ -92,6 +92,11 @@ pub trait HerdrSessionPort {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
+    ReadOnly,
+    SchemaUpgradeRequired,
+    LegacyOwnershipUnresolved,
+    PlanRevisionMismatch,
+    LifecycleBusy,
     Io(String),
     Corrupt(String),
 }
@@ -290,7 +295,9 @@ pub trait QuotaStore {
     fn save_quota(&mut self, harness: &str, state: &QuotaState) -> Result<(), StoreError>;
 }
 
-pub trait RunStore: EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore {
+pub trait RunStore:
+    EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore + crate::workspace::RuntimeLedger
+{
     fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
     fn save_run_and_events(
         &mut self,

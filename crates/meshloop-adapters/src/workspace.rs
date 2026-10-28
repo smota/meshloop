@@ -58,6 +58,8 @@ struct LocalRoot {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Manifest {
+    #[serde(default)]
+    pending_roots: BTreeMap<RootAlias, PendingRoot>,
     version: u32,
     repository: RepositoryRecord,
     common: LocalRoot,
@@ -139,6 +141,7 @@ impl GitRepositoryIdentity {
             };
             let manifest = Manifest {
                 version: 1,
+                pending_roots: BTreeMap::new(),
                 repository: record,
                 common: LocalRoot {
                     canonical_path: common,
@@ -348,4 +351,108 @@ pub(crate) fn pin_database(path: &Path) -> Result<(same_file::Handle, NativeIden
     verify_handle(&handle, path)?;
     let identity = native_identity(path)?;
     Ok((handle, identity))
+}
+mod runtime;
+pub use runtime::CancellationClient;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingRoot {
+    canonical_parent: PathBuf,
+    parent_identity: NativeIdentity,
+    child: RelativePath,
+}
+impl meshloop_engine::workspace::LifecycleAccess for RepositoryLease {
+    fn new_id(&mut self) -> Result<LifecycleId, StoreError> {
+        self.validate()?;
+        LifecycleId::new(uuid::Uuid::new_v4().to_string()).map_err(|_| refused())
+    }
+    fn fence(&self) -> Result<&dyn RepositoryFence, StoreError> {
+        self.validate()?;
+        Ok(self)
+    }
+    fn resolve(&self, location: &PortableLocation) -> Result<PathBuf, StoreError> {
+        self.root(&location.root_alias)?;
+        let root = self
+            .manifest
+            .roots
+            .get(&location.root_alias)
+            .ok_or_else(refused)?;
+        let path = root.canonical_path.join(location.relative_path.as_str());
+        // Reject any existing reparse/symlink component; a missing suffix is not adopted.
+        let mut cursor = root.canonical_path.clone();
+        for component in location.relative_path.as_str().split('/') {
+            cursor.push(component);
+            match std::fs::symlink_metadata(&cursor) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err(refused());
+                    }
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::MetadataExt;
+                        if meta.file_attributes() & 0x400 != 0 {
+                            return Err(refused());
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => return Err(refused()),
+            }
+        }
+        Ok(path)
+    }
+    fn bootstrap_root(&mut self, alias: RootAlias, path: &Path) -> Result<RootRecord, StoreError> {
+        self.validate()?;
+        if self.manifest.roots.contains_key(&alias) {
+            return self.register_root(alias, path);
+        }
+        let parent =
+            std::fs::canonicalize(path.parent().ok_or_else(refused)?).map_err(io_refused)?;
+        regular_entry(&parent, true)?;
+        let child = RelativePath::new(
+            path.file_name()
+                .ok_or_else(refused)?
+                .to_str()
+                .ok_or_else(refused)?,
+        )
+        .map_err(|_| refused())?;
+        let target = parent.join(child.as_str());
+        let intent = PendingRoot {
+            canonical_parent: parent.clone(),
+            parent_identity: native_identity(&parent)?,
+            child,
+        };
+        if let Some(old) = self.manifest.pending_roots.get(&alias) {
+            if old != &intent {
+                return Err(refused());
+            }
+        } else {
+            if target.exists() {
+                return Err(refused());
+            }
+            let mut updated = self.manifest.clone();
+            updated.pending_roots.insert(alias.clone(), intent.clone());
+            write_manifest(&mut self.file, &updated)?;
+            self.manifest = updated;
+        }
+        if native_identity(&parent)? != intent.parent_identity {
+            return Err(refused());
+        }
+        match std::fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                regular_entry(&target, true)?;
+                if std::fs::read_dir(&target)
+                    .map_err(io_refused)?
+                    .next()
+                    .is_some()
+                {
+                    return Err(refused());
+                }
+            }
+            Err(e) => return Err(io_refused(e)),
+        }
+        // Keep the original pending intent as retained provenance after registration.
+        self.register_root(alias, &target)
+    }
 }
