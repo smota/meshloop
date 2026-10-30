@@ -129,6 +129,16 @@ pub struct ComposeRequest<'a> {
 }
 
 pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
+    compose_store(req, false)?.ok_or_else(|| "writable store unexpectedly absent".into())
+}
+
+/// Observes an existing ledger without migration, identity or gitignore maintenance.
+/// Existing ledgers may have SQLite-managed WAL/SHM effects (ADR 0034).
+pub fn compose_read_only(req: ComposeRequest<'_>) -> Result<Option<Composed>, String> {
+    compose_store(req, true)
+}
+
+fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Composed>, String> {
     let mut harnesses = HashMap::new();
     let mut candidates = Vec::new();
     for name in &req.config.selected_harnesses {
@@ -157,13 +167,21 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
         .db_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_db(&req.repo_root));
-    let store = SqliteStore::open(&db).map_err(|e: StoreError| format!("{e:?}"))?;
-    crate::gitignore::ensure_store_ignored(&db);
+    let store = if read_only {
+        match SqliteStore::open_read_only(&db).map_err(|e: StoreError| format!("{e:?}"))? {
+            Some(store) => store,
+            None => return Ok(None),
+        }
+    } else {
+        let store = SqliteStore::open(&db).map_err(|e: StoreError| format!("{e:?}"))?;
+        crate::gitignore::ensure_store_ignored(&db);
+        store
+    };
     let wt = req
         .worktree_base
         .unwrap_or_else(|| default_worktree_base(&req.repo_root));
 
-    Ok(Composed {
+    Ok(Some(Composed {
         harnesses,
         candidates,
         git,
@@ -183,7 +201,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
             .planner
             .selection()
             .map_err(|e| format!("{e:?}"))?,
-    })
+    }))
 }
 
 #[cfg(test)]

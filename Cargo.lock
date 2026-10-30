@@ -301,6 +301,7 @@ dependencies = [
  "meshloop-context",
  "meshloop-domain",
  "meshloop-engine",
+ "rusqlite",
  "serde",
  "serde_json",
  "toml",

@@ -2406,10 +2406,8 @@ impl<'a> RunLoop<'a> {
                     && let Some(wt) = &attempt.worktree_path
                     && self.workspace.worktree_exists(wt)
                 {
-                    let commit_sha = self
-                        .workspace
-                        .commit_all(wt, "meshloop task export")
-                        .or_else(|_| self.workspace.head(wt));
+                    // Export observes existing state; it never stages or commits dirty work.
+                    let commit_sha = self.workspace.head(wt);
                     if let Ok(sha) = commit_sha
                         && !sha.trim().is_empty()
                     {

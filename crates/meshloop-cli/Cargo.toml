@@ -36,3 +36,7 @@ toml = "0.8"
 [[bin]]
 name = "meshloop"
 path = "src/main.rs"
+
+# Native SQLite fixtures verify pre-v6 refusal and live WAL visibility (ADR 0034).
+[dev-dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }

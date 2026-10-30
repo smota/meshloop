@@ -994,6 +994,106 @@ fn with_saga(
     f(&mut saga)
 }
 
+struct ReadRequest<'a> {
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    command: &'a str,
+    empty_status: bool,
+    requested_graph: Option<&'a str>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+}
+
+fn with_read_only_saga(
+    request: ReadRequest<'_>,
+    f: impl FnOnce(&mut RunLoop<'_>) -> ExitCode,
+) -> ExitCode {
+    let ReadRequest {
+        config,
+        db,
+        command,
+        empty_status,
+        requested_graph,
+        json,
+        origin,
+    } = request;
+    let (cfg, _) = match load_cfg(config) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let mut composed = match compose::compose_read_only(compose::ComposeRequest {
+        config: &cfg,
+        repo_root: repo_root(),
+        db_path: db.as_deref(),
+        worktree_base: None,
+        origin: origin.clone(),
+        fixture_only: false,
+    }) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            if empty_status {
+                if json {
+                    println!(
+                        "{}",
+                        json_out::ok(
+                            command,
+                            origin,
+                            serde_json::json!({
+                                "banner": report::banner(), "runs": []
+                            })
+                        )
+                    );
+                } else {
+                    print!("{}", report::banner());
+                }
+                return ExitCode::SUCCESS;
+            }
+            let message = requested_graph.map_or_else(
+                || "graph not found: no managed runs".to_string(),
+                |id| format!("graph '{id}' not found: no managed runs"),
+            );
+            return read_error(command, origin, json, message);
+        }
+        Err(e) => return read_error(command, origin, json, e),
+    };
+    let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
+        .harnesses
+        .iter()
+        .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
+        .collect();
+    let mut saga = RunLoop {
+        harnesses: harness_refs,
+        candidates: composed.candidates.clone(),
+        workspace: &composed.git,
+        store: &mut composed.store,
+        processes: &composed.processes,
+        checks: &composed.checks,
+        router: Router::default(),
+        limits: composed.limits,
+        fixture_only: false,
+        verify_command: composed.verify_command.clone(),
+        worktree_base: composed.worktree_base.clone(),
+        active_graph: None,
+        planner: composed.planner.clone(),
+    };
+    f(&mut saga)
+}
+
+fn read_error(
+    command: &str,
+    origin: meshloop_engine::origin::Origin,
+    json: bool,
+    message: impl Into<String>,
+) -> ExitCode {
+    let message = message.into();
+    if json {
+        println!("{}", json_out::err(command, origin, message));
+    } else {
+        eprintln!("{message}");
+    }
+    ExitCode::from(2)
+}
+
 fn cmd_status(
     graph: Option<String>,
     config: Option<PathBuf>,
@@ -1010,7 +1110,16 @@ fn cmd_status(
         }
         return ExitCode::from(2);
     }
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:status",
+        empty_status: graph.is_none(),
+        requested_graph: graph.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1239,7 +1348,16 @@ fn cmd_inspect(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let resolved_id = graph.or(session_id);
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:inspect",
+        empty_status: false,
+        requested_graph: resolved_id.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1380,7 +1498,11 @@ fn cmd_inspect(
                 } else {
                     eprintln!("{e:?}");
                 }
-                ExitCode::from(1)
+                ExitCode::from(if matches!(e, OrchestratorError::MissingGraph(_)) {
+                    2
+                } else {
+                    1
+                })
             }
         }
     })
@@ -1433,7 +1555,16 @@ fn cmd_watch(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let resolved_id = graph.or(session_id);
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:watch",
+        empty_status: false,
+        requested_graph: resolved_id.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
