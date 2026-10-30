@@ -347,6 +347,39 @@ impl SqliteStore {
     }
 }
 impl RuntimeLedger for SqliteStore {
+    fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError> {
+        if !self.conn.is_autocommit() {
+            observe();
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(error)?;
+        observe();
+        // Observation never commits. Explicit rollback reports snapshot-close
+        // failures instead of relying on Transaction's best-effort Drop.
+        tx.rollback().map_err(error)
+    }
+    fn generation_initial_revision(
+        &self,
+        s: &ExecutionScope,
+    ) -> Result<Option<LifecycleId>, StoreError> {
+        if self
+            .resolve_scope(&s.graph_id, &RunScope::Generation(s.generation_id.clone()))?
+            .as_ref()
+            != Some(s)
+        {
+            return Err(refused());
+        }
+        self.conn
+            .query_row(
+                "SELECT revision_id FROM workspace_generation_revisions WHERE generation_id=?1",
+                [s.generation_id.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .map(|id| LifecycleId::new(id).map_err(error))
+            .transpose()
+    }
     fn project_revision(
         &mut self,
         f: &dyn RepositoryFence,

@@ -2,6 +2,7 @@
 use crate::ports::StoreError;
 use meshloop_domain::workspace::*;
 use std::path::Path;
+pub mod read;
 
 pub trait RepositoryFence {
     fn repository(&self) -> &RepositoryRecord;
@@ -121,6 +122,14 @@ impl LifecycleAccess for ReadOnlyLifecycleAccess {
     }
 }
 pub trait RuntimeLedger: WorkspaceLedger {
+    /// Invoke once within a consistent read snapshot. Nested calls reuse the
+    /// caller's transaction; ending an owned snapshot must propagate failures.
+    fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError>;
+    /// Exact immutable revision used to activate this generation.
+    fn generation_initial_revision(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<Option<LifecycleId>, StoreError>;
     fn project_revision(
         &mut self,
         fence: &dyn RepositoryFence,

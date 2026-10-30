@@ -13,6 +13,42 @@ CI double, `meshloop:review-plan` as the plan gate). Residuals (WSL2, concurrenc
 > 1, packaging, queried quota) are tracked as GitHub `limitation` issues. Do not read
 unverified paragraphs as product. Operator path: [Getting started](../start.md).
 
+### Bounded S3 public observation milestone (issue #74)
+
+For lifecycle-bound runs, status, inspect and watch capture the active generation and
+immutable current plan revision once per command. Events, attempts and evidence are
+selected within that generation; earlier revisions within it remain part of replay,
+validated through the exact activation revision and predecessor chain (maximum 4096
+revisions). Inconsistent bindings or revision linkage refuse observation. Only runs
+without a lifecycle binding retain the legacy read path. Bound output labels generation
+and revision and uses root aliases plus relative locations; it never resolves external
+roots for display. Bound Git export is explicitly unavailable until artifact-based
+export is implemented.
+Bound attempt process liveness remains `Ambiguous` until process-identity observation
+is implemented; an attempt completion timestamp does not establish OS process death.
+Attempt JSON carries its own generation and plan revision, including retained attempts
+from earlier revisions. The exact activation association permits restart to reuse an
+immutable revision originating in a prior generation. Revision metadata with no
+generation remains valid under the existing projection contract; an explicit conflicting
+generation after the activation revision refuses observation.
+
+Each command's selection and frame share one consistent SQLite read transaction;
+nested observations reuse that transaction and never close a caller-owned transaction.
+Observation ends its own transaction through explicit rollback, propagating failures.
+The activation revision and every revision with executed events or attempts must have
+historical accepted authorization. Later declines preserve that execution provenance.
+Current plan state follows the latest authorization, refreshed per frame: accepted means
+`PlanAccepted`; missing or declined authorization means `AwaitingPlanReview`, matching
+the existing revision projection contract.
+
+Watch refreshes events in its captured scope. A generation or revision change returns
+`ReadScopeChanged` and requires a new observation, so newer-revision events are never
+folded against the captured older plan. This milestone does not implement generation
+producers, restart preservation, historical CLI selectors, or the complete S3 oracle.
+SQLite observation sidecars follow accepted ADR 0034.
+Every watch poll opens a fresh read snapshot, allowing committed events and same-revision
+authorization changes to appear without mixing records from different database states.
+
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
 **Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes

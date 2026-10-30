@@ -221,7 +221,7 @@ pub struct EvidenceView {
 }
 
 impl EvidenceView {
-    fn from_evidence(e: &Evidence) -> Self {
+    pub(crate) fn from_evidence(e: &Evidence) -> Self {
         match e {
             Evidence::Deterministic(d) => Self {
                 kind: "deterministic",
@@ -270,7 +270,7 @@ pub struct RunSummary {
     pub worker_wall_seconds: u64,
 }
 
-fn duration_secs(started: &Option<String>, ended: &Option<String>) -> Option<u64> {
+pub(crate) fn duration_secs(started: &Option<String>, ended: &Option<String>) -> Option<u64> {
     let s = started.as_deref()?.parse::<u64>().ok()?;
     let e = ended.as_deref()?.parse::<u64>().ok()?;
     Some(e.saturating_sub(s))
@@ -2227,6 +2227,24 @@ impl<'a> RunLoop<'a> {
         graph_id: &str,
         task_id: TaskId,
     ) -> Result<Vec<AttemptView>, OrchestratorError> {
+        crate::workspace::read::read_snapshot(self.store, || {
+            self.attempts_snapshot(graph_id, task_id)
+        })
+    }
+
+    fn attempts_snapshot(
+        &self,
+        graph_id: &str,
+        task_id: TaskId,
+    ) -> Result<Vec<AttemptView>, OrchestratorError> {
+        let selection = crate::workspace::read::ReadSelection::capture(self.store, graph_id)?;
+        if selection.is_bound() {
+            return Ok(self
+                .read_frame(&selection)?
+                .attempts
+                .remove(&task_id)
+                .unwrap_or_default());
+        }
         let mut rows = self.store.attempts_for_task(graph_id, task_id)?;
         rows.sort_by_key(|a| a.attempt_id.0);
         // The attempt row's `outcome` column holds the attempt's base revision ("base:<sha>"),
@@ -2271,6 +2289,14 @@ impl<'a> RunLoop<'a> {
     }
 
     pub fn run_summary(&self, graph_id: &str) -> Result<RunSummary, OrchestratorError> {
+        crate::workspace::read::read_snapshot(self.store, || self.run_summary_snapshot(graph_id))
+    }
+
+    fn run_summary_snapshot(&self, graph_id: &str) -> Result<RunSummary, OrchestratorError> {
+        let selection = crate::workspace::read::ReadSelection::capture(self.store, graph_id)?;
+        if selection.is_bound() {
+            return Ok(self.read_frame(&selection)?.summary);
+        }
         let rows = self.store.attempts_for_graph(graph_id)?;
         let mut per_task: HashMap<TaskId, u32> = HashMap::new();
         let mut wall = 0u64;
@@ -2285,7 +2311,15 @@ impl<'a> RunLoop<'a> {
         })
     }
 
-    pub fn status(&mut self, graph_id: &str) -> Result<RunStatus, OrchestratorError> {
+    pub fn status(&self, graph_id: &str) -> Result<RunStatus, OrchestratorError> {
+        crate::workspace::read::read_snapshot(self.store, || self.status_snapshot(graph_id))
+    }
+
+    fn status_snapshot(&self, graph_id: &str) -> Result<RunStatus, OrchestratorError> {
+        let selection = crate::workspace::read::ReadSelection::capture(self.store, graph_id)?;
+        if selection.is_bound() {
+            return Ok(self.read_frame(&selection)?.status);
+        }
         let row = self
             .store
             .load_run(graph_id)?
@@ -2376,6 +2410,11 @@ impl<'a> RunLoop<'a> {
         &self,
         graph_id: &str,
     ) -> Result<Option<GitExport>, OrchestratorError> {
+        if crate::workspace::read::ReadSelection::capture(self.store, graph_id)?.is_bound() {
+            return Err(OrchestratorError::Illegal(
+                crate::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE.into(),
+            ));
+        }
         let integrate = self.integrate_path(graph_id);
         let ibranch = self.integrate_branch(graph_id);
         let row = self.store.load_run(graph_id)?;
