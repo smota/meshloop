@@ -1,11 +1,11 @@
 # 0034 Read-only SQLite observation
 
-- Status: Proposed
-- Implementation: not-started
+- Status: Accepted
+- Implementation: adapter observation implemented and validated; full S3 integration incomplete
 - Date: 2026-10-30
 - Author/executor: Codex (bounded investigation and proposal)
-- Reviewer: pending parent review and human decision
-- Approval evidence: none; this proposal does not change the current contract
+- Reviewer: human architecture decision; separate Codex executor reviewed the bounded implementation with no blocking findings (same model/harness)
+- Approval evidence: user explicitly approved option 2 in the current chat on 2026-10-30; this accepts the contract refinement, not implementation results or full S3 delivery
 - Supersedes: none
 - Related: [0033](0033-workspace-lifecycle.md), [issue #74](https://github.com/smota/meshloop/issues/74)
 - Superseded by: none
@@ -52,19 +52,13 @@ consistent database/WAL snapshot.
 
 ## Decision or proposal
 
-Recommend option 2 for human consideration: it uses the existing persistence stack
-and keeps the remaining S3 work bounded given the user's capacity concern. This is
-a proposed contract refinement, not evidence that the current reader meets S3.
-Option 1 remains available if zero source writes is a required product property.
+Accept option 2: permit SQLite-managed observation sidecars while retaining a read-only database connection and all application mutation prohibitions. This decision refines only existing-ledger observation; absent-ledger observation still creates no files or directories. No dependency or unsafe code is authorized or required by this decision.
 
-The current strict contract and frozen oracle remain authoritative until the human
-accepts a concrete choice and the owning issue, design, oracle, and implementation
-are updated through the governed workflow. Neither this document nor a commit of
-it authorizes implementation, a new dependency, or unsafe code.
+The user explicitly approved this concrete option on 2026-10-30. Implementation is limited to the SQLite observation milestone and focused proofs; full S3 remains incomplete. The original 23-case oracle remains byte-for-byte preserved as a historical frozen baseline. The explicit amendment at `tests/contracts/sqlite-observation-adr0034.json` identifies the narrow superseded assertions; it is separate from the original oracle pin. No original strict sidecar assertion is reported as passed under the revised contract.
 
 ## Consequences
 
-Option 2 would require precise operator wording about SQLite sidecars and revised
+Option 2 requires precise operator wording about SQLite sidecars and revised
 tests that still reject all application mutations. Filesystem permission failures
 must remain explicit; readers must never fall back to immutable live-source reads
 or silently omit committed WAL data. Option 1 retains stronger filesystem semantics
@@ -96,5 +90,20 @@ cargo test --locked -p meshloop-adapters retained_schema5_binary_refuses_schema6
 Actual result: **1 passed, 0 failed, 0 ignored**. Retained v5 fixture SHA-256:
 `e6a81cb444e5714e142620995de0efc9768fb5981339f02defe3097cf4d3b233`.
 This proves the retained old binary refusal regression only; it does not prove
-read-only observation or S3 completion. No VFS, snapshot, or contract refinement
-has been implemented by this proposal.
+read-only observation or S3 completion. At the time of that investigation no VFS, snapshot, or contract refinement
+had been implemented. The later user acceptance above changes the contract only;
+it does not convert those historical results into passing implementation evidence.
+
+### Accepted-contract implementation milestone
+
+On 2026-10-30, the adapter enables `query_only` before schema inspection. The
+required observation case now verifies the approved sidecar exception, unchanged
+application state and rejected SQL writes. An independent child process reads a
+value committed only to WAL while the parent holds the lifecycle fence.
+
+Validation on Windows: adapter library 47 passed, 0 failed, 1 ignored;
+`cargo run --locked -p xtask -- check` and `cargo run --locked -p xtask -- smoke`
+passed. The retained-v5 test was invoked separately again: 1 passed, 0 failed,
+0 ignored. These results validate this milestone, not all 23 S3 acceptance cases.
+AgentFlow developer freeze remains blocked by its stale issue-73 acceptance-file
+binding; no formal S3 acceptance or phase advancement is claimed.

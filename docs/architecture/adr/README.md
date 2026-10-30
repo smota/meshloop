@@ -49,7 +49,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0030 | Internalized petgraph DAG engine, parametric manifests, and scheduling latency gates | Accepted |
 | 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
 | 0033 | Workspace lifecycle and durable history | Accepted |
-| 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Proposed |
+| 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

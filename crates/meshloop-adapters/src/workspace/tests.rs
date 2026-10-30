@@ -1153,6 +1153,8 @@ fn lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required() {
     let c = seeded_v5(&path);
     let before_schema = schema_snapshot(&c);
     let before = history(&c);
+    let lifecycle = lifecycle_snapshot(&c);
+    let identity = native_identity(&path).unwrap();
     let mode: String = c
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
         .unwrap();
@@ -1166,18 +1168,27 @@ fn lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required() {
     let c = Connection::open(&path).unwrap();
     assert_eq!(before_schema, schema_snapshot(&c));
     assert_eq!(before, history(&c));
+    assert_eq!(lifecycle, lifecycle_snapshot(&c));
+    assert_eq!(identity, native_identity(&path).unwrap());
     assert_eq!(
         mode,
         c.query_row::<String, _, _>("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap()
     );
     drop(c);
-    drop(SqliteStore::open(&path).unwrap());
-    let entries_before = std::fs::read_dir(&f.base)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect::<std::collections::BTreeSet<_>>();
+    let migrated = SqliteStore::open(&path).unwrap();
+    let mode: String = migrated
+        .conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    let before_schema = schema_snapshot(&migrated.conn);
+    drop(migrated);
+    let bytes = std::fs::read(&path).unwrap();
+    let entries_before = observation_entries(&f.base, &path);
     let mut reader = SqliteStore::open_read_only(&path).unwrap().unwrap();
+    assert_eq!(before_schema, schema_snapshot(&reader.conn));
+    assert_eq!(before, history(&reader.conn));
+    assert_eq!(lifecycle, lifecycle_snapshot(&reader.conn));
     let graph = GraphId::new("graph-alpha").unwrap();
     assert!(
         reader
@@ -1190,17 +1201,154 @@ fn lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required() {
     assert!(
         matches!(&attempts[0],StoredAttempt::Legacy(row)if row.worktree_path.as_ref().unwrap().to_string_lossy()=="C:/legacy/root/attempt")
     );
-    assert!(reader.save_run(&run()).is_err());
+    assert!(matches!(reader.save_run(&run()), Err(StoreError::ReadOnly)));
+    assert_observer_sql_writes_rejected(&reader.conn);
     assert!(reader.run_binding(&graph).unwrap().is_none());
-    let entries_after = std::fs::read_dir(&f.base)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(before_schema, schema_snapshot(&reader.conn));
+    assert_eq!(before, history(&reader.conn));
+    assert_eq!(lifecycle, lifecycle_snapshot(&reader.conn));
+    assert_eq!(identity, native_identity(&path).unwrap());
+    assert_eq!(bytes, std::fs::read(&path).unwrap());
     assert_eq!(
-        entries_before, entries_after,
-        "reader created filesystem entries"
+        mode,
+        reader
+            .conn
+            .query_row::<String, _, _>("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap()
     );
+    assert_eq!(entries_before, observation_entries(&f.base, &path));
+    drop(reader);
+    assert_eq!(bytes, std::fs::read(&path).unwrap());
+    assert_eq!(entries_before, observation_entries(&f.base, &path));
     assert!(!f.repo.join(".git").join(REGISTRY).exists());
+}
+
+// Only exact SQLite sidecar names are exempt from entry preservation. A suffix
+// match would accidentally allow other ledgers or application-owned files.
+fn observation_entries(
+    base: &Path,
+    ledger: &Path,
+) -> std::collections::BTreeSet<std::ffi::OsString> {
+    let sidecar = |suffix| {
+        let mut name = ledger.file_name().unwrap().to_os_string();
+        name.push(suffix);
+        name
+    };
+    let allowed = [sidecar("-wal"), sidecar("-shm")];
+    std::fs::read_dir(base)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| !allowed.contains(name))
+        .collect()
+}
+
+fn assert_observer_sql_writes_rejected(conn: &Connection) {
+    for sql in [
+        "UPDATE runs SET review_note='forbidden'",
+        "UPDATE workspace_repositories SET payload_json='forbidden'",
+        "DELETE FROM workspace_roots",
+        "UPDATE schema_meta SET version=5",
+        "CREATE TABLE forbidden_observer_write(value TEXT)",
+    ] {
+        let error = conn.execute_batch(sql).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ReadOnly)
+        );
+    }
+}
+
+#[test]
+fn lifecycle_observation_live_wal_child() {
+    let Some(ledger) = std::env::var_os("MESHLOOP_OBSERVATION_LEDGER") else {
+        return;
+    };
+    let repo = std::env::var_os("MESHLOOP_OBSERVATION_REPO").unwrap();
+    assert!(
+        GitRepositoryIdentity::new("git")
+            .acquire(Path::new(&repo), Path::new(&ledger))
+            .is_err()
+    );
+    let reader = SqliteStore::open_read_only(Path::new(&ledger))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reader
+            .load_run("graph-alpha")
+            .unwrap()
+            .unwrap()
+            .review_note
+            .as_deref(),
+        Some("committed-only-in-live-wal")
+    );
+    assert_observer_sql_writes_rejected(&reader.conn);
+}
+
+#[test]
+fn lifecycle_observation_independent_process_reads_live_wal_while_fenced() {
+    let f = Fixture::new();
+    let (mut writer, lease) = bound(&f);
+    writer
+        .conn
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
+    writer
+        .conn
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let bytes = std::fs::read(&f.ledger).unwrap();
+    let mut updated = run();
+    updated.review_note = Some("committed-only-in-live-wal".into());
+    writer.save_run(&updated).unwrap();
+    assert_eq!(
+        bytes,
+        std::fs::read(&f.ledger).unwrap(),
+        "fixture commit must reside only in WAL"
+    );
+    let mut wal = f.ledger.as_os_str().to_os_string();
+    wal.push("-wal");
+    assert!(std::fs::metadata(Path::new(&wal)).unwrap().len() > 32);
+    let schema = schema_snapshot(&writer.conn);
+    let domain = history(&writer.conn);
+    let lifecycle = lifecycle_snapshot(&writer.conn);
+    let identity = native_identity(&f.ledger).unwrap();
+    let registry_bytes = locked_registry_bytes(&lease);
+    let root = lease.root(&alias()).unwrap();
+    let entries = observation_entries(&f.base, &f.ledger);
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "workspace::tests::lifecycle_observation_live_wal_child",
+            "--nocapture",
+        ])
+        .env("MESHLOOP_OBSERVATION_LEDGER", &f.ledger)
+        .env("MESHLOOP_OBSERVATION_REPO", &f.repo);
+    let output = bounded_stdout(command, Duration::from_secs(10)).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains("1 passed"),
+        "child did not execute observation proof: {output}"
+    );
+    lease.validate().unwrap();
+    assert_eq!(schema, schema_snapshot(&writer.conn));
+    assert_eq!(domain, history(&writer.conn));
+    assert_eq!(lifecycle, lifecycle_snapshot(&writer.conn));
+    assert_eq!(identity, native_identity(&f.ledger).unwrap());
+    assert_eq!(registry_bytes, locked_registry_bytes(&lease));
+    assert_eq!(root, lease.root(&alias()).unwrap());
+    assert_eq!(bytes, std::fs::read(&f.ledger).unwrap());
+    assert_eq!(entries, observation_entries(&f.base, &f.ledger));
+}
+
+fn locked_registry_bytes(lease: &RepositoryLease) -> Vec<u8> {
+    let mut file = lease.file.try_clone().unwrap();
+    let position = file.stream_position().unwrap();
+    file.seek(std::io::SeekFrom::Start(0)).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    file.seek(std::io::SeekFrom::Start(position)).unwrap();
+    bytes
 }
 #[test]
 #[ignore = "mandatory external acceptance proof: explicit compatible retained S2 binary and SHA256 required"]

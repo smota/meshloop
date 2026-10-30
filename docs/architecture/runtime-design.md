@@ -193,6 +193,14 @@ once this ADR is accepted, per `schemas/README.md`):
 - `routing_feedback(harness, model_ref, tier, success_count, failure_count, updated_at)` —
   aggregate counters only, feeding §5's routing scores.
 
+**Existing-ledger observation (ADR 0034).** A read-only SQLite connection may let
+SQLite create, update, or remove its WAL/SHM coordination sidecars so readers see
+committed live WAL data while a writer holds the repository fence. Observation
+does not migrate schemas, set journal mode, write application schema/data, initialize
+identity, register roots, or adopt runs. An absent ledger creates no files or
+directories. Permission and compatibility errors remain explicit; immutable live-source
+fallbacks are forbidden. This contract does not claim full S3 implementation.
+
 **Redaction.** No raw prompt text, no full model completions, no file contents, no
 credentials or tokens are persisted. [ADR 0033](adr/0033-workspace-lifecycle.md),
 accepted 2026-10-28 with implementation not-started, narrowly permits absolute

@@ -293,6 +293,9 @@ fn validate_driver(
     Ok(())
 }
 impl SqliteStore {
+    /// Observes an existing v6 ledger without application writes or migration.
+    /// SQLite may create, update, or remove its WAL/SHM coordination sidecars
+    /// (ADR 0034); an absent ledger creates no files or directories.
     pub fn open_read_only(path: &std::path::Path) -> Result<Option<Self>, StoreError> {
         match std::fs::metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -308,6 +311,8 @@ impl SqliteStore {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(error)?;
+        conn.pragma_update(None, "query_only", true)
+            .map_err(error)?;
 
         match super::schema::schema_version(&conn)? {
             Some(6) => {}
@@ -315,8 +320,6 @@ impl SqliteStore {
             _ => return Err(refused()),
         }
         super::schema::validate6(&conn)?;
-        conn.pragma_update(None, "query_only", true)
-            .map_err(error)?;
         verify_handle(&handle, path)?;
         Ok(Some(Self {
             conn,

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "issue": 74,
+  "decision": "docs/architecture/adr/0034-read-only-sqlite-observation.md",
+  "approval": {
+    "source": "current user chat",
+    "date": "2026-10-30",
+    "decision": "option 2 accepted",
+    "scope": "bounded SQLite observation milestone; full S3 remains incomplete"
+  },
+  "baseline": {
+    "path": "tests/oracles/workspace-lifecycle-s3.json",
+    "rawSha256": "8757b17dbe3db709bf0d32a34a0e9ca55c5b36cbdede6cf50b00fddfc6596272",
+    "preserved": true,
+    "originalPinNotReplaced": true
+  },
+  "supersededAssertions": [
+    {
+      "oracleId": "public-reads-while-driver-holds-locked-registry",
+      "scope": "Existing-ledger observation only: prohibition on all SQLite WAL/SHM initialization or coordination effects."
+    },
+    {
+      "oracleId": "readonly-absent-db-and-pre-v6-upgrade-required",
+      "scope": "Existing pre-v6 and migrated-v6 ledger filesystem snapshot immutability and no-side-effects assertions only insofar as they prohibit SQLite-managed WAL/SHM effects; SchemaUpgradeRequired for pre-v6 and application database immutability remain mandatory."
+    }
+  ],
+  "contract": {
+    "allowed": "SQLite-managed WAL/SHM creation, coordination updates and removal for existing-ledger observation through a read-only database connection.",
+    "forbidden": [
+      "Application schema/data writes",
+      "Schema migration",
+      "Explicit WAL/journal-mode setup",
+      "Identity initialization",
+      "Repository registry or root registration",
+      "Adoption or lifecycle mutation",
+      "immutable=1 live-source fallback",
+      "Silently omitting committed WAL data"
+    ],
+    "absentLedger": "No files or directories created.",
+    "errors": "Filesystem permission and compatibility failures remain explicit.",
+    "requiredProofs": [
+      "Absent ledger creates nothing",
+      "Supported existing schemas remain readable",
+      "Pre-v6 returns SchemaUpgradeRequired with unchanged application schema/data/identity",
+      "Closed WAL database is observable",
+      "Independent process sees committed live WAL data while writer owns fence",
+      "Forbidden application writes rejected; only SQLite-managed sidecar effects allowed"
+    ],
+    "retainedOldBinaryRefusal": "Original strict refusal/no-mutation case remains unchanged."
+  },
+  "validation": {
+    "status": "planned-not-run",
+    "fullS3Accepted": false
+  }
+}
