@@ -49,6 +49,18 @@ SQLite observation sidecars follow accepted ADR 0034.
 Every watch poll opens a fresh read snapshot, allowing committed events and same-revision
 authorization changes to appear without mixing records from different database states.
 
+### Bounded RunLoop mutation admission (issue #74)
+
+Graph-targeted `RunLoop` mutation entry points check the lifecycle binding before
+filesystem, Git, process or store effects. Pending and active bindings return
+`LegacyOwnershipUnresolved`; lookup errors propagate without legacy fallback.
+This includes start/stage, plan decisions/mutations, tick, resume/restart, cancel,
+human acceptance, integration/deliverable paths and Git export. Unbound runs keep
+the existing legacy path. This is a snapshot admission check, not a cross-process
+fence or complete exclusion of binding changes after the check. It does not cover
+orchestration outside `RunLoop`, activate generations, implement successful bound
+producers or safe cleanup, or complete S3.
+
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
 **Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes

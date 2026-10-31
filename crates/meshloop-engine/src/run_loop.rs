@@ -315,6 +315,17 @@ fn terminal(state: TaskState) -> bool {
 }
 
 impl<'a> RunLoop<'a> {
+    /// Transitional admission check: legacy producers cannot own lifecycle-bound runs.
+    /// This observes the current binding only; it is not a repository fence.
+    fn require_legacy_mutation(&self, graph_id: &str) -> Result<(), OrchestratorError> {
+        let graph = meshloop_domain::workspace::GraphId::new(graph_id)
+            .map_err(|_| OrchestratorError::Store(StoreError::PlanRevisionMismatch))?;
+        if self.store.run_binding(&graph)?.is_some() {
+            return Err(StoreError::LegacyOwnershipUnresolved.into());
+        }
+        Ok(())
+    }
+
     fn graph_dir(&self, graph_id: &str) -> PathBuf {
         self.worktree_base.join(graph_id)
     }
@@ -494,6 +505,7 @@ impl<'a> RunLoop<'a> {
         mut graph: TaskGraph,
         run_base: String,
     ) -> Result<(), OrchestratorError> {
+        self.require_legacy_mutation(&graph.graph_id)?;
         graph
             .validate()
             .map_err(|e| OrchestratorError::Illegal(format!("{e:?}")))?;
@@ -581,6 +593,7 @@ impl<'a> RunLoop<'a> {
         mut graph: TaskGraph,
         run_base: String,
     ) -> Result<String, OrchestratorError> {
+        self.require_legacy_mutation(&graph.graph_id)?;
         graph
             .validate()
             .map_err(|e| OrchestratorError::Illegal(format!("{e:?}")))?;
@@ -627,6 +640,7 @@ impl<'a> RunLoop<'a> {
         decision: PlanDecision,
         note: Option<String>,
     ) -> Result<PlanState, OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         let mut row = self
             .store
             .load_run(graph_id)?
@@ -655,6 +669,7 @@ impl<'a> RunLoop<'a> {
         mutation: GraphMutation,
         require_review: bool,
     ) -> Result<TaskGraph, OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         let mut row = self
             .store
             .load_run(graph_id)?
@@ -745,6 +760,7 @@ impl<'a> RunLoop<'a> {
             .active_graph
             .clone()
             .ok_or_else(|| OrchestratorError::MissingGraph("no active graph".into()))?;
+        self.require_legacy_mutation(&graph_id)?;
         let row = self
             .store
             .load_run(&graph_id)?
@@ -1858,6 +1874,7 @@ impl<'a> RunLoop<'a> {
         retry: bool,
         restart: bool,
     ) -> Result<IdleReason, OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         if retry && restart {
             return Err(OrchestratorError::Illegal(
                 "use either --retry or --restart, not both".into(),
@@ -1878,6 +1895,7 @@ impl<'a> RunLoop<'a> {
     /// Keep the accepted plan; wipe this saga's attempts/events and leftover
     /// worktrees so the same graph_id can execute again (no replan).
     pub fn restart(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         let row = self
             .store
             .load_run(graph_id)?
@@ -1981,6 +1999,7 @@ impl<'a> RunLoop<'a> {
         graph_id: &str,
         task: Option<TaskId>,
     ) -> Result<(), OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         self.active_graph = Some(graph_id.into());
         let graph = self.graph(graph_id)?;
         let tasks = self.tasks(graph_id)?;
@@ -2030,6 +2049,7 @@ impl<'a> RunLoop<'a> {
             .active_graph
             .clone()
             .ok_or_else(|| OrchestratorError::MissingGraph("no active graph".into()))?;
+        self.require_legacy_mutation(&graph_id)?;
         let tasks = self.tasks(&graph_id)?;
         let state = tasks.get(&task).copied().unwrap_or(TaskState::Pending);
         if state == TaskState::Accepted || state == TaskState::Integrated {
@@ -2073,6 +2093,7 @@ impl<'a> RunLoop<'a> {
         graph_id: &str,
         git_ref: &str,
     ) -> Result<(), OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         let integrate = self.integrate_path(graph_id);
         self.land_worktree(&integrate, git_ref)
     }
@@ -2145,6 +2166,7 @@ impl<'a> RunLoop<'a> {
         graph_id: &str,
         tag: &str,
     ) -> Result<DeliverableView, OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         if !meshloop_domain::task_graph::graph_id_is_legal(tag) {
             return Err(OrchestratorError::UnknownDeliverable(tag.into()));
         }
@@ -2214,6 +2236,7 @@ impl<'a> RunLoop<'a> {
         tag: &str,
         git_ref: &str,
     ) -> Result<(), OrchestratorError> {
+        self.require_legacy_mutation(graph_id)?;
         let wt = self.deliverable_path(graph_id, tag);
         if !self.workspace.worktree_exists(&wt) {
             self.prepare_deliverable(graph_id, tag)?;
@@ -2410,15 +2433,14 @@ impl<'a> RunLoop<'a> {
         &self,
         graph_id: &str,
     ) -> Result<Option<GitExport>, OrchestratorError> {
-        if crate::workspace::read::ReadSelection::capture(self.store, graph_id)?.is_bound() {
-            return Err(OrchestratorError::Illegal(
-                crate::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE.into(),
-            ));
-        }
+        self.require_legacy_mutation(graph_id)?;
         let integrate = self.integrate_path(graph_id);
         let ibranch = self.integrate_branch(graph_id);
-        let row = self.store.load_run(graph_id)?;
-        let base = row.as_ref().map(|r| r.run_base.as_str()).unwrap_or("HEAD");
+        let row = self
+            .store
+            .load_run(graph_id)?
+            .ok_or_else(|| OrchestratorError::MissingGraph(graph_id.into()))?;
+        let base = row.run_base.as_str();
 
         // 1. If integrate worktree exists, check its HEAD commit
         if self.workspace.worktree_exists(&integrate)
@@ -2577,6 +2599,303 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    use crate::ports::{CheckError, DiffSummary, FeedbackCounters};
+    use crate::workspace::*;
+    use meshloop_domain::capability::QuotaState;
+    use meshloop_domain::workspace::*;
+
+    // Every unexpected port call fails immediately: refusal must happen before reads
+    // that can reach harnesses, processes, Git, files or legacy ledger writes.
+    struct AdmissionPorts {
+        binding: Result<Option<meshloop_domain::workspace::RunBinding>, StoreError>,
+        lookups: Cell<u32>,
+    }
+    macro_rules! forbidden_port_calls {
+        ($(fn $name:ident($($args:tt)*) -> $ret:ty;)*) => {$(
+            #[allow(unused_variables)]
+            fn $name($($args)*) -> $ret {
+                panic!("unexpected port call before admission: {}", stringify!($name))
+            }
+        )*};
+    }
+    impl crate::ports::EvidenceStore for AdmissionPorts {
+        forbidden_port_calls! {
+            fn record(&mut self, evidence: Evidence) -> Result<(), StoreError>;
+            fn evidence_for(&self, candidate: &CandidateRef) -> Result<Vec<Evidence>, StoreError>;
+            fn evidence_for_attempt( &self, task_id: TaskId, attempt_id: AttemptId, ) -> Result<Vec<Evidence>, StoreError>;
+        }
+    }
+    impl crate::ports::RoutingFeedbackStore for AdmissionPorts {
+        forbidden_port_calls! {
+            fn record_outcome(&mut self, key: &FeedbackKey, success: bool) -> Result<(), StoreError>;
+            fn counters(&self, key: &FeedbackKey) -> Result<FeedbackCounters, StoreError>;
+        }
+    }
+    impl crate::ports::EventLog for AdmissionPorts {
+        forbidden_port_calls! {
+            fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError>;
+            fn records_for_graph(&self, graph_id: &str) -> Result<Vec<TransitionRecord>, StoreError>;
+        }
+    }
+    impl crate::ports::QuotaStore for AdmissionPorts {
+        forbidden_port_calls! {
+            fn load_quota(&self, harness: &str) -> Result<QuotaState, StoreError>;
+            fn save_quota(&mut self, harness: &str, state: &QuotaState) -> Result<(), StoreError>;
+        }
+    }
+    impl RunStore for AdmissionPorts {
+        forbidden_port_calls! {
+            fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
+            fn save_run_and_events( &mut self, row: &RunRow, events: &[TransitionRecord], ) -> Result<(), StoreError>;
+            fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError>;
+            fn latest_run(&self) -> Result<Option<RunRow>, StoreError>;
+            fn list_runs(&self) -> Result<Vec<RunRow>, StoreError>;
+            fn next_attempt_id(&self) -> Result<AttemptId, StoreError>;
+            fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError>;
+            fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError>;
+            fn attempts_for_task( &self, graph_id: &str, task_id: TaskId, ) -> Result<Vec<AttemptRow>, StoreError>;
+            fn latest_attempt_for_task( &self, graph_id: &str, task_id: TaskId, ) -> Result<Option<AttemptRow>, StoreError>;
+            fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError>;
+            fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError>;
+            fn update_attempt_pid( &mut self, attempt_id: AttemptId, pid: Option<u32>, image_name: Option<&str>, ) -> Result<(), StoreError>;
+            fn update_attempt_pane( &mut self, attempt_id: AttemptId, pane_id: Option<&str>, ) -> Result<(), StoreError>;
+        }
+    }
+    impl crate::workspace::WorkspaceLedger for AdmissionPorts {
+        forbidden_port_calls! {
+            fn bind_repository(&mut self, fence: &dyn RepositoryFence) -> Result<(), StoreError>;
+            fn repository(&self, id: &LifecycleId) -> Result<Option<RepositoryRecord>, StoreError>;
+            fn register_root( &mut self, fence: &dyn RepositoryFence, alias: &RootAlias, ) -> Result<(), StoreError>;
+            fn insert_generation( &mut self, fence: &dyn RepositoryFence, record: &GenerationRecord, ) -> Result<(), StoreError>;
+            fn generation(&self, id: &LifecycleId) -> Result<Option<GenerationRecord>, StoreError>;
+            fn generations( &self, repository: &LifecycleId, graph: &GraphId, ) -> Result<Vec<GenerationRecord>, StoreError>;
+            fn insert_artifacts( &mut self, fence: &dyn RepositoryFence, records: &[ArtifactRecord], dependencies: &[ArtifactDependency], ) -> Result<(), StoreError>;
+            fn artifact(&self, id: &LifecycleId) -> Result<Option<ArtifactRecord>, StoreError>;
+            fn dependencies(&self, artifact: &LifecycleId) -> Result<Vec<ArtifactDependency>, StoreError>;
+            fn append_fact( &mut self, fence: &dyn RepositoryFence, fact: &LifecycleFact, ) -> Result<(), StoreError>;
+            fn facts(&self, artifact: &LifecycleId) -> Result<Vec<LifecycleFact>, StoreError>;
+            fn append_journal( &mut self, fence: &dyn RepositoryFence, entry: &JournalEntry, ) -> Result<(), StoreError>;
+            fn journal(&self, artifact: &LifecycleId) -> Result<Vec<JournalEntry>, StoreError>;
+        }
+    }
+    impl crate::workspace::RuntimeLedger for AdmissionPorts {
+        fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError> {
+            assert!(GraphId::new(graph.as_str()).is_ok());
+            self.lookups.set(self.lookups.get() + 1);
+            self.binding.clone()
+        }
+        forbidden_port_calls! {
+            fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError>;
+            fn generation_initial_revision( &self, scope: &ExecutionScope, ) -> Result<Option<LifecycleId>, StoreError>;
+            fn project_revision( &mut self, fence: &dyn RepositoryFence, graph: &GraphId, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn record_scoped_evidence( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, evidence: &meshloop_domain::evidence::Evidence, ) -> Result<(), StoreError>;
+            fn scoped_evidence( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<meshloop_domain::evidence::Evidence>, StoreError>;
+            fn artifacts(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactRecord>, StoreError>;
+            fn bind_artifact( &mut self, fence: &dyn RepositoryFence, binding: &ArtifactBinding, ) -> Result<(), StoreError>;
+            fn artifact_bindings(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactBinding>, StoreError>;
+            fn create_run_binding( &mut self, fence: &dyn RepositoryFence, binding: &RunBinding, ) -> Result<(), StoreError>;
+            fn create_provisional( &mut self, fence: &dyn RepositoryFence, owner: &ProvisionalOwner, ) -> Result<(), StoreError>;
+            fn provisionals(&self, repository: &LifecycleId) -> Result<Vec<ProvisionalOwner>, StoreError>;
+            fn promote_provisional( &mut self, fence: &dyn RepositoryFence, promotion: &ProvisionalPromotion, ) -> Result<(), StoreError>;
+            fn append_revision( &mut self, fence: &dyn RepositoryFence, revision: &PlanRevisionSnapshot, ) -> Result<(), StoreError>;
+            fn revision(&self, id: &LifecycleId) -> Result<Option<PlanRevisionSnapshot>, StoreError>;
+            fn authorize_revision( &mut self, fence: &dyn RepositoryFence, authorization: &RevisionAuthorization, ) -> Result<(), StoreError>;
+            fn authorizations( &self, revision: &LifecycleId, ) -> Result<Vec<RevisionAuthorization>, StoreError>;
+            fn activate_generation( &mut self, fence: &dyn RepositoryFence, activation: &GenerationActivation, ) -> Result<(), StoreError>;
+            fn select_revision( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn resolve_scope( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Option<ExecutionScope>, StoreError>;
+            fn scoped_events( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredEvent>, StoreError>;
+            fn append_scoped_event( &mut self, fence: &dyn RepositoryFence, event: &ScopedEvent, ) -> Result<(), StoreError>;
+            fn reserve_attempt( &mut self, fence: &dyn RepositoryFence, reservation: &AttemptReservation, ) -> Result<ScopedAttempt, StoreError>;
+            fn update_scoped_attempt( &mut self, fence: &dyn RepositoryFence, attempt: &ScopedAttempt, ) -> Result<(), StoreError>;
+            fn scoped_attempts( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredAttempt>, StoreError>;
+            fn append_operation( &mut self, fence: &dyn RepositoryFence, operation: &ProducerOperation, ) -> Result<(), StoreError>;
+            fn operations( &self, repository: &LifecycleId, scope: Option<&ExecutionScope>, ) -> Result<Vec<ProducerOperation>, StoreError>;
+            fn append_operation_step( &mut self, fence: &dyn RepositoryFence, step: &OperationStep, ) -> Result<(), StoreError>;
+            fn operation_steps(&self, id: &LifecycleId) -> Result<Vec<OperationStep>, StoreError>;
+            fn register_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn update_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn drivers(&self, repository: &LifecycleId) -> Result<Vec<DriverRecord>, StoreError>;
+            fn cancellation_requests( &self, driver: &LifecycleId, ) -> Result<Vec<CancellationObservation>, StoreError>;
+            fn acknowledge_cancellation( &mut self, fence: &dyn RepositoryFence, id: &LifecycleId, status: CancellationStatus, ) -> Result<(), StoreError>;
+        }
+    }
+    impl WorkspacePort for AdmissionPorts {
+        forbidden_port_calls! {
+            fn repo_root(&self) -> &Path;
+            fn add_worktree_from( &self, path: &Path, branch: &str, start_point: &str, ) -> Result<(), WorkspaceError>;
+            fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
+            fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
+            fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
+            fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
+            fn worktree_exists(&self, path: &Path) -> bool;
+            fn prune(&self) -> Result<(), WorkspaceError>;
+            fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, WorkspaceError>;
+            fn checkout_ref(&self, git_ref: &str) -> Result<(), WorkspaceError>;
+            fn merge_ff_only(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn merge_no_ff(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn current_head(&self) -> Result<String, WorkspaceError>;
+            fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError>;
+            fn remove_file(&self, worktree: &Path, rel: &str) -> Result<(), WorkspaceError>;
+            fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
+            fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
+            fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
+        }
+    }
+    impl ProcessView for AdmissionPorts {
+        forbidden_port_calls! {
+            fn is_live(&self, hint: &ProcessHint) -> LiveCheck;
+        }
+    }
+    impl CheckRunner for AdmissionPorts {
+        forbidden_port_calls! {
+            fn run( &self, worktree: &Path, argv: &[String], timeout: Duration, ) -> Result<DeterministicEvidence, CheckError>;
+        }
+    }
+
+    fn admission_ports(binding: Result<Option<RunBinding>, StoreError>) -> AdmissionPorts {
+        AdmissionPorts {
+            binding,
+            lookups: Cell::new(0),
+        }
+    }
+    fn admission_loop<'a>(store: &'a mut AdmissionPorts, other: &'a AdmissionPorts) -> RunLoop<'a> {
+        RunLoop {
+            harnesses: HashMap::new(),
+            candidates: vec![],
+            workspace: other,
+            store,
+            processes: other,
+            checks: other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir().join(format!(
+                "meshloop-admission-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+        }
+    }
+    fn admission_graph() -> TaskGraph {
+        serde_json::from_str(r#"{"graph_id":"g","nodes":[{"id":1,"description":"task","depends_on":[],"tier":"Tier1"}]}"#).unwrap()
+    }
+    fn admission_binding(active: bool) -> RunBinding {
+        RunBinding {
+            graph_id: GraphId::new("g").unwrap(),
+            repository_id: LifecycleId::new("repo").unwrap(),
+            location: PortableLocation {
+                root_alias: RootAlias::new("worktrees").unwrap(),
+                relative_path: RelativePath::new("runs/g").unwrap(),
+            },
+            layout_version: 1,
+            active_generation: active.then(|| LifecycleId::new("gen-1").unwrap()),
+            current_revision: active.then(|| LifecycleId::new("rev-1").unwrap()),
+        }
+    }
+    #[test]
+    fn graph_mutators_refuse_pending_active_and_lookup_failure_before_other_port_calls() {
+        let failure = StoreError::Io("binding lookup failed".into());
+        for (binding, expected) in [
+            (
+                Ok(Some(admission_binding(false))),
+                StoreError::LegacyOwnershipUnresolved,
+            ),
+            (
+                Ok(Some(admission_binding(true))),
+                StoreError::LegacyOwnershipUnresolved,
+            ),
+            (Err(failure.clone()), failure),
+        ] {
+            for operation in 0..16 {
+                let mut store = admission_ports(binding.clone());
+                let other = admission_ports(Ok(None));
+                let mut run = admission_loop(&mut store, &other);
+                // A refused call must also leave the caller's active selection intact.
+                if !matches!(operation, 6 | 10 | 15) {
+                    run.active_graph = Some("previous".into());
+                }
+                let before = run.active_graph.clone();
+                assert!(!run.worktree_base.exists());
+                let result = match operation {
+                    0 => run.start(admission_graph(), "HEAD".into()),
+                    1 => run.stage_plan(admission_graph(), "HEAD".into()).map(|_| ()),
+                    2 => run.accept_plan("g"),
+                    3 => run
+                        .decide_plan("g", PlanDecision::Decline, None)
+                        .map(|_| ()),
+                    4 => run
+                        .mutate_plan(
+                            "g",
+                            GraphMutation::AppendFollowup {
+                                source_task: TaskId(1),
+                                new_tasks: vec![],
+                            },
+                            false,
+                        )
+                        .map(|_| ()),
+                    5 => run.resume("g", false, false).map(|_| ()),
+                    6 => run.tick().map(|_| ()),
+                    7 => run.resume("g", true, false).map(|_| ()),
+                    8 => run.resume("g", false, true).map(|_| ()),
+                    9 => run.restart("g"),
+                    10 => run.accept_human(TaskId(1), "human"),
+                    11 => run.cancel("g", None),
+                    12 => run.integrate_into("g", "main"),
+                    13 => run.prepare_deliverable("g", "tag").map(|_| ()),
+                    14 => run.integrate_deliverable_into("g", "tag", "main"),
+                    15 => run.export_git_metadata("g").map(|_| ()),
+                    _ => unreachable!(),
+                };
+                assert!(
+                    matches!(result, Err(OrchestratorError::Store(ref error)) if *error == expected),
+                    "operation {operation}: {result:?}"
+                );
+                assert_eq!(run.active_graph, before);
+                assert!(
+                    !run.worktree_base.exists(),
+                    "operation {operation} created artifacts"
+                );
+                assert_eq!(store.lookups.get(), 1, "operation {operation}");
+                assert_eq!(other.lookups.get(), 0);
+            }
+        }
+    }
+    #[test]
+    fn mutation_admission_preserves_domain_graph_id_grammar_and_lookup_errors() {
+        for graph_id in ["", "a/b", "a\\b"] {
+            let mut store = admission_ports(Ok(None));
+            let other = admission_ports(Ok(None));
+            let run = admission_loop(&mut store, &other);
+            assert!(matches!(
+                run.require_legacy_mutation(graph_id),
+                Err(OrchestratorError::Store(StoreError::PlanRevisionMismatch))
+            ));
+            assert_eq!(store.lookups.get(), 0);
+        }
+        let mut store = admission_ports(Ok(None));
+        let other = admission_ports(Ok(None));
+        let run = admission_loop(&mut store, &other);
+        assert!(run.require_legacy_mutation("g").is_ok());
+        // Keep the existing grammar, including its dot-only legacy IDs.
+        assert!(run.require_legacy_mutation(".").is_ok());
+        assert!(run.require_legacy_mutation("..").is_ok());
+        assert_eq!(store.lookups.get(), 3);
+    }
 
     #[test]
     fn skipped_verify_evidence_is_a_passing_deterministic_row() {

@@ -214,6 +214,12 @@ fn auth(rev: &str) -> RevisionAuthorization {
     }
 }
 fn setup(f: &Fixture) -> (SqliteStore, meshloop_adapters::workspace::RepositoryLease) {
+    setup_binding(f, true)
+}
+fn setup_binding(
+    f: &Fixture,
+    active: bool,
+) -> (SqliteStore, meshloop_adapters::workspace::RepositoryLease) {
     let mut store = SqliteStore::open(&f.db).unwrap();
     let mut lease = GitRepositoryIdentity::new("git")
         .acquire(&f.repo, &f.db)
@@ -253,7 +259,9 @@ fn setup(f: &Fixture) -> (SqliteStore, meshloop_adapters::workspace::RepositoryL
             },
         )
         .unwrap();
-    activate(&mut store, &lease, 1);
+    if active {
+        activate(&mut store, &lease, 1);
+    }
     (store, lease)
 }
 fn activate(store: &mut SqliteStore, lease: &dyn RepositoryFence, number: u32) {
@@ -923,5 +931,131 @@ fn sqlite_snapshot_holds_complete_old_frame_across_committed_writer_changes_then
                 );
             }
         });
+    }
+}
+
+#[test]
+fn bound_start_restart_and_cancel_preserve_dirty_legacy_artifacts_and_history() {
+    // Both pending and activated bindings must stop legacy producers. The legacy
+    // rows/paths deliberately coexist, exposing restart's former early effects.
+    for active in [false, true] {
+        let f = Fixture::new(if active {
+            "active-mutation"
+        } else {
+            "pending-mutation"
+        });
+        let worktrees = f.base.join("legacy-worktrees");
+        let integrate = worktrees.join("bound-run/integrate");
+        let attempt_path = worktrees.join("bound-run/task-1-attempt-91");
+        for (path, branch) in [
+            (&integrate, "meshloop/bound-run/integrate"),
+            (&attempt_path, "meshloop/bound-run/task-1/attempt-91"),
+        ] {
+            git(
+                &f.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    branch,
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            fs::write(
+                path.join("tracked.txt"),
+                "dirty tracked work must survive\n",
+            )
+            .unwrap();
+            fs::write(path.join("untracked.txt"), "unknown work must survive\n").unwrap();
+            fs::write(path.join(".gitignore"), "ignored-output/\n").unwrap();
+            fs::create_dir(path.join("ignored-output")).unwrap();
+            fs::write(path.join("ignored-output/result.bin"), b"retained output").unwrap();
+        }
+        let input = f.repo.join("input-plan.json");
+        fs::write(&input, plan("immutable task", false)).unwrap();
+        // Seed legacy execution before assigning lifecycle ownership.
+        let mut legacy = SqliteStore::open(&f.db).unwrap();
+        let json = plan("immutable task", false);
+        legacy
+            .save_run(&RunRow {
+                graph_id: "bound-run".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "HEAD".into(),
+                integrate_ref: "meshloop/bound-run/integrate".into(),
+                plan_id: sha256_hex(json.as_bytes()),
+                plan_json: json,
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+        legacy
+            .save_attempt(&meshloop_engine::ports::AttemptRow {
+                attempt_id: AttemptId(91),
+                graph_id: "bound-run".into(),
+                task_id: TaskId(1),
+                harness: Some("fixture".into()),
+                model_ref: None,
+                worktree_path: Some(attempt_path.clone()),
+                pid: None,
+                image_name: None,
+                pane_id: Some("retained-pane".into()),
+                started_at: Some("1".into()),
+                ended_at: None,
+                outcome: None,
+            })
+            .unwrap();
+        drop(legacy);
+        let (store, lease) = setup_binding(&f, active);
+        drop(lease);
+        drop(store);
+        let artifacts = snapshot(&worktrees);
+        let refs = git(
+            &f.repo,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        let database = fs::read(&f.db).unwrap();
+        for args in [
+            vec!["run", "--plan", input.to_str().unwrap(), "--accept-plan"],
+            vec![
+                "run",
+                "--plan",
+                input.to_str().unwrap(),
+                "--accept-plan",
+                "--reset",
+            ],
+            vec!["resume", "--graph", "bound-run", "--restart"],
+            vec!["cancel", "--graph", "bound-run"],
+        ] {
+            let mut command = f.command(&args);
+            if args[0] != "cancel" {
+                command
+                    .arg("--fixture-only")
+                    .arg("--worktree-base")
+                    .arg(&worktrees);
+            }
+            let out = bounded_output(&mut command);
+            assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("LegacyOwnershipUnresolved")
+                    || String::from_utf8_lossy(&out.stdout).contains("LegacyOwnershipUnresolved"),
+                "{args:?}: {out:?}"
+            );
+            assert_eq!(snapshot(&worktrees), artifacts, "{args:?}");
+            assert_eq!(
+                git(
+                    &f.repo,
+                    &["for-each-ref", "--format=%(refname) %(objectname)"]
+                ),
+                refs,
+                "{args:?}"
+            );
+            assert_eq!(
+                fs::read(&f.db).unwrap(),
+                database,
+                "legacy and lifecycle history changed: {args:?}"
+            );
+        }
     }
 }
