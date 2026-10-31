@@ -74,6 +74,7 @@ pub struct Composed {
     pub candidates: Vec<Candidate>,
     pub git: GitWorktreeAdapter,
     pub store: SqliteStore,
+    pub db_path: PathBuf,
     pub processes: HostProcessView,
     pub checks: CommandCheckRunner,
     pub limits: RunLimits,
@@ -138,6 +139,45 @@ pub fn compose_read_only(req: ComposeRequest<'_>) -> Result<Option<Composed>, St
     compose_store(req, true)
 }
 
+/// The caller retains this fence through planner dispatch and collection. Opening
+/// the existing writable SQLite store precedes this producer-specific fence.
+pub fn planning_access(
+    composed: &mut Composed,
+) -> Result<meshloop_adapters::workspace::RepositoryLease, String> {
+    use meshloop_adapters::workspace::GitRepositoryIdentity;
+    use meshloop_domain::workspace::RootAlias;
+    use meshloop_engine::ports::WorkspacePort;
+    use meshloop_engine::workspace::{LifecycleAccess, RepositoryIdentity, WorkspaceLedger};
+    let db = &composed.db_path;
+    let mut lease = GitRepositoryIdentity::new("git")
+        .acquire(composed.git.repo_root(), db)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    composed
+        .store
+        .bind_repository(&lease)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    let alias =
+        RootAlias::new("planning-worktrees").map_err(|_| "planner-access-failed".to_string())?;
+    match std::fs::symlink_metadata(&composed.worktree_base) {
+        Ok(_) => {
+            lease
+                .register_root(alias.clone(), &composed.worktree_base)
+                .map_err(|_| "planner-access-failed".to_string())?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            lease
+                .bootstrap_root(alias.clone(), &composed.worktree_base)
+                .map_err(|_| "planner-access-failed".to_string())?;
+        }
+        Err(_) => return Err("planner root inspection failed".into()),
+    }
+    composed
+        .store
+        .register_root(&lease, &alias)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    Ok(lease)
+}
+
 fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Composed>, String> {
     let mut harnesses = HashMap::new();
     let mut candidates = Vec::new();
@@ -186,6 +226,7 @@ fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Comp
         candidates,
         git,
         store,
+        db_path: db,
         processes: HostProcessView {},
         checks: CommandCheckRunner,
         limits: RunLimits {

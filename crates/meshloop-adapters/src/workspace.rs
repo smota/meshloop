@@ -226,7 +226,24 @@ impl RepositoryLease {
         alias: RootAlias,
         path: &Path,
     ) -> Result<RootRecord, StoreError> {
+        if self.manifest.pending_roots.contains_key(&alias)
+            && !self.manifest.roots.contains_key(&alias)
+        {
+            return Err(refused());
+        }
+        self.register_created_root(alias, path)
+    }
+    fn register_created_root(
+        &mut self,
+        alias: RootAlias,
+        path: &Path,
+    ) -> Result<RootRecord, StoreError> {
         self.validate()?;
+        for component in path.ancestors() {
+            if !component.as_os_str().is_empty() {
+                regular_entry(component, true)?;
+            }
+        }
         let path = std::fs::canonicalize(path).map_err(io_refused)?;
         regular_entry(&path, true)?;
         let identity = native_identity(&path)?;
@@ -399,6 +416,29 @@ impl meshloop_engine::workspace::LifecycleAccess for RepositoryLease {
                 Err(_) => return Err(refused()),
             }
         }
+        // Git for Windows rejects verbatim canonical paths (`//?/C:/...`).
+        // Preserve registry identity; return the equivalent native absolute path.
+        #[cfg(windows)]
+        {
+            use std::path::{Component, Prefix};
+            if let Some(Component::Prefix(prefix)) = path.components().next() {
+                match prefix.kind() {
+                    Prefix::VerbatimDisk(drive) => {
+                        let mut normal = PathBuf::from(format!("{}:\\", char::from(drive)));
+                        normal.extend(path.components().skip(2));
+                        return Ok(normal);
+                    }
+                    Prefix::VerbatimUNC(server, share) => {
+                        let mut normal = PathBuf::from("\\\\");
+                        normal.push(server);
+                        normal.push(share);
+                        normal.extend(path.components().skip(2));
+                        return Ok(normal);
+                    }
+                    _ => {}
+                }
+            }
+        }
         Ok(path)
     }
     fn bootstrap_root(&mut self, alias: RootAlias, path: &Path) -> Result<RootRecord, StoreError> {
@@ -406,16 +446,35 @@ impl meshloop_engine::workspace::LifecycleAccess for RepositoryLease {
         if self.manifest.roots.contains_key(&alias) {
             return self.register_root(alias, path);
         }
-        let parent =
-            std::fs::canonicalize(path.parent().ok_or_else(refused)?).map_err(io_refused)?;
-        regular_entry(&parent, true)?;
-        let child = RelativePath::new(
-            path.file_name()
-                .ok_or_else(refused)?
-                .to_str()
-                .ok_or_else(refused)?,
-        )
-        .map_err(|_| refused())?;
+        // Resolve only the nearest existing ancestor. Persist the entire missing
+        // suffix before creating its first component; never create parents first.
+        let mut ancestor = path.to_path_buf();
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::symlink_metadata(&ancestor) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(
+                        ancestor
+                            .file_name()
+                            .ok_or_else(refused)?
+                            .to_str()
+                            .ok_or_else(refused)?
+                            .to_string(),
+                    );
+                    ancestor = ancestor.parent().ok_or_else(refused)?.to_path_buf();
+                }
+                Err(e) => return Err(io_refused(e)),
+            }
+        }
+        for component in ancestor.ancestors() {
+            if !component.as_os_str().is_empty() {
+                regular_entry(component, true)?;
+            }
+        }
+        let parent = std::fs::canonicalize(&ancestor).map_err(io_refused)?;
+        missing.reverse();
+        let child = RelativePath::new(missing.join("/")).map_err(|_| refused())?;
         let target = parent.join(child.as_str());
         let intent = PendingRoot {
             canonical_parent: parent.clone(),
@@ -438,21 +497,23 @@ impl meshloop_engine::workspace::LifecycleAccess for RepositoryLease {
         if native_identity(&parent)? != intent.parent_identity {
             return Err(refused());
         }
-        match std::fs::create_dir(&target) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                regular_entry(&target, true)?;
-                if std::fs::read_dir(&target)
-                    .map_err(io_refused)?
-                    .next()
-                    .is_some()
-                {
-                    return Err(refused());
+        let mut cursor = parent.clone();
+        for component in intent.child.as_str().split('/') {
+            // Recheck the pinned ancestor and every created component before each
+            // effect. Preexisting partial trees are ambiguous and are not adopted.
+            if native_identity(&parent)? != intent.parent_identity {
+                return Err(refused());
+            }
+            for ancestor in cursor.ancestors() {
+                if !ancestor.as_os_str().is_empty() {
+                    regular_entry(ancestor, true)?;
                 }
             }
-            Err(e) => return Err(io_refused(e)),
+            cursor.push(component);
+            std::fs::create_dir(&cursor).map_err(io_refused)?;
+            regular_entry(&cursor, true)?;
         }
         // Keep the original pending intent as retained provenance after registration.
-        self.register_root(alias, &target)
+        self.register_created_root(alias, &target)
     }
 }

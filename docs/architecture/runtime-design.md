@@ -61,6 +61,45 @@ fence or complete exclusion of binding changes after the check. It does not cove
 orchestration outside `RunLoop`, activate generations, implement successful bound
 producers or safe cleanup, or complete S3.
 
+### Bounded provisional planner producer (issue #74)
+
+`RunLoop::plan` requires writable `LifecycleAccess`. Both `plan` and
+`review-plan --adjust` acquire the repository fence, bind the same ledger, and
+retain the lease through dispatch and collection. This covers root and planner
+production; initial SQLite opening/creation/migration still precedes acquisition.
+The requested CLI `--out` export retains its existing behavior and is outside this
+managed attempt ownership journal.
+It does not extend the fence to legacy graph execution or other producers.
+
+Each invocation and bounded validation retry creates a fresh opaque worktree/ref.
+A provisional worktree owner and a distinct protected output owner permit typed
+Worktree, Spawn and Plan intents before effects under the existing exclusive
+pending-target rule. No accepted hash, generation or execution binding is created.
+Existing bound-run mutation refusal and the acceptance gate remain in force.
+
+The selected existing root is registered without adopting artifacts. Missing root
+parents use one retained registry intent containing the full relative suffix before
+any directory creation. Reparse ancestors and ambiguous partially created trees
+are refused and retained for reconciliation; automatic recovery is not implemented.
+The current default root and explicit configuration behavior are preserved.
+Windows canonical drive/UNC prefixes are converted only after identity and
+containment validation so native Git can consume equivalent absolute paths.
+
+Planner-written output is preserved in its owned attempt. If no file was produced,
+collected stdout is written there before validation. Preexisting tracked output is
+refused before dispatch. Rejected plans, failed worktrees and old attempts are never
+reset, overwritten or deleted. Operation records contain aliases, relative locations
+and stable error codes only; output, source and prompts stay outside durable
+telemetry. Rejection diagnostics identify portable locators rather than external
+absolute paths. Filesystem failures propagate as stable public errors.
+
+Successful collection completes Spawn; only a validated successful output completes
+Plan. Rejected output blocks Plan with a stable classification and may use the
+bounded validation retry budget. Invoke/collect failures leave their intents
+unresolved and stop retries. Full process identity, cancellation, driver control,
+recovery and crash reconciliation remain outstanding; these records are not proof
+that an uncertain process tree has stopped. This milestone is not full S3 acceptance.
+
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
 **Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes

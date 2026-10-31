@@ -1844,3 +1844,104 @@ fn b1_revision_authorization_is_append_only_and_operations_fail_closed() {
     assert_eq!(vec![step], store.operation_steps(&operation.id).unwrap());
     assert_eq!(vec![p], store.provisionals(&scope.repository_id).unwrap());
 }
+
+#[test]
+fn provisional_root_bootstrap_records_missing_parent_suffix_and_resolves_native_path() {
+    use meshloop_engine::workspace::LifecycleAccess;
+    let f = Fixture::new();
+    let mut lease = f.lease();
+    let target = f.base.join("missing-parent").join("selected-root");
+    let root = RootAlias::new("planner-fixture").unwrap();
+    lease.bootstrap_root(root.clone(), &target).unwrap();
+    assert_eq!(
+        lease.manifest.pending_roots[&root].child.as_str(),
+        "missing-parent/selected-root"
+    );
+    let location = PortableLocation {
+        root_alias: root,
+        relative_path: RelativePath::new("plan-opaque").unwrap(),
+    };
+    let resolved = lease.resolve(&location).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(resolved.parent().unwrap()).unwrap(),
+        std::fs::canonicalize(&target).unwrap()
+    );
+    #[cfg(windows)]
+    assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "planner-native-path",
+            resolved.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(resolved.join(".git").is_file());
+}
+#[test]
+fn provisional_root_partial_creation_is_retained_and_cannot_be_adopted() {
+    use meshloop_engine::workspace::LifecycleAccess;
+    let f = Fixture::new();
+    let mut lease = f.lease();
+    let alias = RootAlias::new("partial-planner").unwrap();
+    let parent = std::fs::canonicalize(&f.base).unwrap();
+    let target = parent.join("partial-parent").join("selected-root");
+    lease.manifest.pending_roots.insert(
+        alias.clone(),
+        PendingRoot {
+            canonical_parent: parent.clone(),
+            parent_identity: native_identity(&parent).unwrap(),
+            child: RelativePath::new("partial-parent/selected-root").unwrap(),
+        },
+    );
+    write_manifest(&mut lease.file, &lease.manifest).unwrap();
+    std::fs::create_dir(parent.join("partial-parent")).unwrap();
+    std::fs::write(
+        parent.join("partial-parent/evidence.txt"),
+        "uncertain origin",
+    )
+    .unwrap();
+    assert!(lease.bootstrap_root(alias.clone(), &target).is_err());
+    std::fs::create_dir(&target).unwrap();
+    assert!(lease.register_root(alias.clone(), &target).is_err());
+    assert!(lease.bootstrap_root(alias.clone(), &target).is_err());
+    assert!(!lease.manifest.roots.contains_key(&alias));
+    assert_eq!(
+        std::fs::read_to_string(parent.join("partial-parent/evidence.txt")).unwrap(),
+        "uncertain origin"
+    );
+}
+#[test]
+fn provisional_root_rejects_reparse_ancestor_before_creating_children() {
+    use meshloop_engine::workspace::LifecycleAccess;
+    let f = Fixture::new();
+    let mut lease = f.lease();
+    let real = f.base.join("real");
+    let link = f.base.join("linked");
+    std::fs::create_dir(&real).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    assert!(
+        Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let alias = RootAlias::new("linked-root").unwrap();
+    assert!(
+        lease
+            .bootstrap_root(alias.clone(), &link.join("child"))
+            .is_err()
+    );
+    assert!(lease.register_root(alias.clone(), &link).is_err());
+    assert!(!real.join("child").exists());
+    assert!(!lease.manifest.pending_roots.contains_key(&alias));
+}

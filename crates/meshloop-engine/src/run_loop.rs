@@ -19,7 +19,7 @@ use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::converge::{RepairAction, RepairBudget, RepairSession};
-use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_with_retry};
+use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_owned};
 use crate::ports::{
     AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, LiveCheck,
     ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord, WorkspaceError,
@@ -334,10 +334,6 @@ impl<'a> RunLoop<'a> {
         self.graph_dir(graph_id).join("integrate")
     }
 
-    fn plan_path(&self, graph_id: &str) -> PathBuf {
-        self.graph_dir(graph_id).join("plan")
-    }
-
     fn attempt_path(&self, graph_id: &str, task: TaskId, attempt: AttemptId) -> PathBuf {
         self.graph_dir(graph_id)
             .join(format!("task-{}-attempt-{}", task.0, attempt.0))
@@ -357,10 +353,6 @@ impl<'a> RunLoop<'a> {
 
     fn deliverable_branch(&self, graph_id: &str, tag: &str) -> String {
         format!("meshloop/{graph_id}/integrate-{tag}")
-    }
-
-    fn plan_branch(&self, graph_id: &str) -> String {
-        format!("meshloop/{graph_id}/plan")
     }
 
     fn require_dispatch_ok(&self, harness: &str) -> Result<(), OrchestratorError> {
@@ -432,8 +424,13 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    pub fn plan(&mut self, objective: &str, scope: &str) -> Result<Planned, OrchestratorError> {
-        let scratch = "planning";
+    pub fn plan(
+        &mut self,
+        objective: &str,
+        scope: &str,
+        access: &mut dyn crate::workspace::LifecycleAccess,
+    ) -> Result<Planned, OrchestratorError> {
+        access.fence()?.validate()?;
         let (pool, tier) = self.planner_pool()?;
         let profiles = self.probe_all();
         let quotas = self.load_quotas();
@@ -464,38 +461,24 @@ impl<'a> RunLoop<'a> {
             .get(&top.harness)
             .ok_or_else(|| OrchestratorError::UnknownHarness(top.harness.clone()))?;
 
-        let wt = self.plan_path(scratch);
-        let branch = self.plan_branch(scratch);
-        let head = self.workspace.current_head()?;
-        if self.workspace.worktree_exists(&wt) {
-            self.workspace.reset_hard(&wt, &head)?;
-        } else if self.workspace.branch_exists(&branch)? {
-            return Err(OrchestratorError::Illegal(
-                "planning branch exists without a worktree; remove meshloop-worktrees/.../plan and retry"
-                    .into(),
-            ));
-        } else {
-            let _ = std::fs::create_dir_all(self.graph_dir(scratch));
-            self.workspace.add_worktree_from(&wt, &branch, &head)?;
-        }
-
         let spec = build_planning_spec(
             objective,
             scope,
             AttemptId(0),
             &top.harness,
             &top.model_ref,
-            wt.clone(),
+            PathBuf::new(),
             self.limits.task_timeout,
         );
-        let rejected_dir = self
-            .workspace
-            .repo_root()
-            .join(".meshloop")
-            .join("rejected-plans");
-        let mut graph =
-            decompose_with_retry(harness, &spec, self.limits.max_retries, &rejected_dir)
-                .map_err(OrchestratorError::Plan)?;
+        let mut graph = decompose_owned(
+            harness,
+            &spec,
+            self.limits.max_retries,
+            self.workspace,
+            self.store,
+            access,
+        )
+        .map_err(OrchestratorError::Plan)?;
         assign_tiers(&mut graph, &DefaultTierAssigner);
         Ok(Planned { graph, planner })
     }
@@ -2806,6 +2789,24 @@ mod tests {
             active_generation: active.then(|| LifecycleId::new("gen-1").unwrap()),
             current_revision: active.then(|| LifecycleId::new("rev-1").unwrap()),
         }
+    }
+    #[test]
+    fn planning_requires_writable_lifecycle_access_before_any_port_call() {
+        let mut store = admission_ports(Ok(None));
+        let other = admission_ports(Ok(None));
+        let mut run = admission_loop(&mut store, &other);
+        let error = run
+            .plan(
+                "objective",
+                "scope",
+                &mut crate::workspace::ReadOnlyLifecycleAccess,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OrchestratorError::Store(StoreError::ReadOnly)
+        ));
+        assert_eq!(store.lookups.get(), 0);
     }
     #[test]
     fn graph_mutators_refuse_pending_active_and_lookup_failure_before_other_port_calls() {

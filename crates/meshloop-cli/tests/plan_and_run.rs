@@ -507,7 +507,7 @@ fn doctor_reports_why_each_harness_is_not_ready() {
 }
 
 #[test]
-fn plan_fails_fast_with_reasons_when_the_probe_hangs() {
+fn plan_fails_fast_with_stable_code_when_the_probe_hangs() {
     // Issue #9: a harness whose version call never exits blocked `plan` forever.
     let dir = disposable_repo("plan-hang");
     let config_path = dir.join("meshloop.toml");
@@ -551,10 +551,10 @@ model_tier = "top"
         start.elapsed()
     );
     assert!(!output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("fixture: probe timed out after 1s"),
-        "{stderr}"
-    );
+    // Issue #74: bounded probing remains required; public plan diagnostics now
+    // expose stable codes because probe reasons can contain private process text.
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
+    assert!(stderr.contains("meshloop doctor"), "{stderr}");
     assert!(!dir.join("plan.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2186,7 +2186,7 @@ fn plan_with_only_a_mid_tier_harness_names_the_planner_override() {
         .expect("plan");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("does not fit task Tier3"), "{stderr}");
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
     assert!(stderr.contains("[planner] harness"), "{stderr}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -2495,4 +2495,548 @@ fn plan_rejects_an_illegal_deliverable_tag() {
     assert!(!out.status.success(), "{all}");
     assert!(all.contains("IllegalDeliverable"), "{all}");
     fs::remove_dir_all(&dir).ok();
+}
+
+// These tests exercise the public producer, not a separate ownership helper.
+fn planning_owners(dir: &Path) -> Vec<serde_json::Value> {
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    let mut query = db
+        .prepare("SELECT payload_json FROM workspace_provisional_owners ORDER BY rowid")
+        .unwrap();
+    query
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+        .collect()
+}
+fn owned_plan_path(dir: &Path, owner: &serde_json::Value) -> PathBuf {
+    dir.parent()
+        .unwrap()
+        .join(".meshloop-worktrees")
+        .join(dir.file_name().unwrap())
+        .join(owner["location"]["relative_path"].as_str().unwrap())
+}
+fn invoke_owned_plan(dir: &Path, config: &Path) -> std::process::Output {
+    meshloop()
+        .current_dir(dir)
+        .args([
+            "plan",
+            "--objective",
+            "private-objective-marker",
+            "--config",
+        ])
+        .arg(config)
+        .args(["--out"])
+        .arg(dir.join("result.json"))
+        .output()
+        .unwrap()
+}
+#[test]
+fn provisional_planning_preserves_each_invocation_and_metadata_privacy() {
+    let dir = disposable_repo("owned-repeat");
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    assert!(invoke_owned_plan(&dir, &config).status.success());
+    let first = planning_owners(&dir);
+    assert_eq!(first.len(), 2);
+    let first_path = owned_plan_path(&dir, &first[1]);
+    let original = fs::read(&first_path).unwrap();
+    fs::write(
+        first_path.parent().unwrap().join("preserved.txt"),
+        "do not reset",
+    )
+    .unwrap();
+    assert!(invoke_owned_plan(&dir, &config).status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 4);
+    assert_ne!(owners[0]["id"], owners[2]["id"]);
+    assert_eq!(fs::read(&first_path).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(first_path.parent().unwrap().join("preserved.txt")).unwrap(),
+        "do not reset"
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    for (table, expected) in [
+        ("workspace_generations", 0),
+        ("workspace_operations", 6),
+        ("workspace_operation_steps", 6),
+    ] {
+        assert_eq!(
+            db.query_row::<u32, _, _>(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap(),
+            expected
+        );
+    }
+    let mut query = db.prepare("SELECT payload_json FROM workspace_operations UNION ALL SELECT payload_json FROM workspace_operation_steps UNION ALL SELECT payload_json FROM workspace_provisional_owners").unwrap();
+    for value in query.query_map([], |r| r.get::<_, String>(0)).unwrap() {
+        let value = value.unwrap();
+        assert!(!value.contains("private-objective-marker"));
+        assert!(!value.contains("first task"));
+        assert!(!value.contains(&dir.to_string_lossy().to_string()));
+    }
+}
+#[test]
+fn provisional_planning_retries_rejected_stdout_in_separate_preserved_worktrees() {
+    let dir = disposable_repo("owned-retry");
+    let config = write_config(&dir, r#"["--noop"]"#);
+    let result = invoke_owned_plan(&dir, &config);
+    assert!(!result.status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        owners.len(),
+        4,
+        "two owners for each of two bounded attempts"
+    );
+    assert_ne!(owners[0]["location"], owners[2]["location"]);
+    for owner in [&owners[1], &owners[3]] {
+        assert_eq!(fs::read(owned_plan_path(&dir, owner)).unwrap(), b"");
+    }
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(db.query_row::<u32,_,_>("SELECT COUNT(*) FROM workspace_operation_steps WHERE json_extract(payload_json,'$.state')='Blocked'", [], |r|r.get(0)).unwrap(), 2);
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_generations", [], |r| r
+            .get(0))
+            .unwrap(),
+        0
+    );
+    // Operator diagnostics use portable aliases, not the external root.
+    assert!(
+        !String::from_utf8_lossy(&result.stderr)
+            .contains(&owned_plan_path(&dir, &owners[0]).display().to_string())
+    );
+}
+#[test]
+fn provisional_planning_timeout_retains_unresolved_intents_without_retry() {
+    let dir = disposable_repo("owned-timeout");
+    let config = write_config(&dir, r#"["--hang"]"#);
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("task_timeout_seconds = 30", "task_timeout_seconds = 1"),
+    )
+    .unwrap();
+    assert!(!invoke_owned_plan(&dir, &config).status.success());
+    assert_eq!(
+        planning_owners(&dir).len(),
+        2,
+        "uncertain effects must not retry"
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_operation_steps", [], |r| r
+            .get(0))
+            .unwrap(),
+        1,
+        "only worktree is completed"
+    );
+}
+#[test]
+fn provisional_planning_refuses_stale_tracked_output_without_reuse() {
+    let dir = disposable_repo("owned-stale");
+    let stale = r#"{"graph_id":"stale","nodes":[{"id":1,"description":"stale","depends_on":[],"tier":null}]}"#;
+    fs::write(dir.join("meshloop-plan.json"), stale).unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "meshloop-plan.json"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["commit", "-q", "-m", "stale fixture"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    assert!(!invoke_owned_plan(&dir, &config).status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 2);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        stale
+    );
+    assert!(!dir.join("result.json").exists());
+}
+#[test]
+fn provisional_planning_holds_cross_process_fence_through_collection() {
+    use meshloop_adapters::workspace::GitRepositoryIdentity;
+    use meshloop_engine::workspace::RepositoryIdentity;
+    use std::time::{Duration, Instant};
+    let dir = disposable_repo("owned-fence");
+    let config = write_config(&dir, r#"["--sleep-ms", "1500"]"#);
+    let mut child = meshloop()
+        .current_dir(&dir)
+        .args(["plan", "--objective", "fixture", "--config"])
+        .arg(&config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let db_path = dir.join(".meshloop/state.sqlite");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(db) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) && db
+            .query_row::<u32, _, _>(
+                "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+            == 2
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            panic!("planner did not reach collection");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        GitRepositoryIdentity::new("git")
+            .acquire(&dir, &db_path)
+            .is_err()
+    );
+    assert!(
+        !invoke_owned_plan(&dir, &config).status.success(),
+        "concurrent CLI writer must be refused"
+    );
+    assert!(
+        !child.wait().unwrap().success(),
+        "sleep fixture emits rejected output"
+    );
+    assert_eq!(
+        planning_owners(&dir).len(),
+        4,
+        "only original bounded two attempts"
+    );
+    assert!(
+        GitRepositoryIdentity::new("git")
+            .acquire(&dir, &db_path)
+            .is_ok()
+    );
+}
+
+struct OwnedScriptedPlanner {
+    responses: Vec<String>,
+    prompts: std::sync::Mutex<Vec<String>>,
+    db: PathBuf,
+    fail_invoke: bool,
+    stdout_only: bool,
+}
+impl meshloop_engine::ports::HarnessCapabilities for OwnedScriptedPlanner {
+    fn probe(
+        &self,
+    ) -> Result<
+        meshloop_domain::capability::HarnessProfile,
+        meshloop_domain::capability::HarnessError,
+    > {
+        Ok(meshloop_domain::capability::HarnessProfile {
+            harness: "fixture".into(),
+            version: "1".into(),
+            compatibility: meshloop_domain::capability::Compatibility::Compatible,
+            supports_noninteractive: true,
+            supports_structured_output: true,
+            supports_cancellation: true,
+            reason: None,
+        })
+    }
+    fn invoke(
+        &self,
+        spec: &meshloop_engine::agent::AgentSpec,
+    ) -> Result<meshloop_engine::ports::HarnessHandle, meshloop_domain::capability::HarnessError>
+    {
+        let db = rusqlite::Connection::open(&self.db).unwrap();
+        assert_eq!(
+            db.query_row::<u32, _, _>(
+                "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2,
+            "Spawn and Plan intents precede invocation"
+        );
+        let mut prompts = self.prompts.lock().unwrap();
+        let index = prompts.len();
+        prompts.push(spec.prompt.clone());
+        if !self.stdout_only {
+            fs::write(
+                spec.worktree_path.join("meshloop-plan.json"),
+                &self.responses[index],
+            )
+            .unwrap();
+        }
+        if self.fail_invoke {
+            return Err(meshloop_domain::capability::HarnessError::ProcessFault {
+                detail: "private-dispatch-detail".into(),
+            });
+        }
+        Ok(meshloop_engine::ports::HarnessHandle {
+            attempt_id: spec.attempt_id,
+            pid: None,
+            pane_id: None,
+        })
+    }
+    fn collect(
+        &self,
+        _: &meshloop_engine::ports::HarnessHandle,
+    ) -> Result<meshloop_engine::ports::HarnessOutcome, meshloop_domain::capability::HarnessError>
+    {
+        Ok(meshloop_engine::ports::HarnessOutcome {
+            exit_code: 0,
+            output_redacted: self.responses[self.prompts.lock().unwrap().len() - 1].clone(),
+            worktree_changed: true,
+        })
+    }
+    fn cancel(
+        &self,
+        _: &meshloop_engine::ports::HarnessHandle,
+    ) -> Result<(), meshloop_domain::capability::HarnessError> {
+        panic!("not cancellation coverage")
+    }
+}
+fn scripted_owned_plan(
+    dir: &Path,
+    responses: Vec<String>,
+    trigger: &str,
+    fail_invoke: bool,
+    stdout_only: bool,
+) -> (
+    Result<meshloop_engine::run_loop::Planned, meshloop_engine::run_loop::OrchestratorError>,
+    Vec<String>,
+) {
+    use meshloop_engine::workspace::{LifecycleAccess, RepositoryIdentity, WorkspaceLedger};
+    let db_path = dir.join(".meshloop/state.sqlite");
+    let mut store = meshloop_adapters::store::SqliteStore::open(&db_path).unwrap();
+    let mut lease = meshloop_adapters::workspace::GitRepositoryIdentity::new("git")
+        .acquire(dir, &db_path)
+        .unwrap();
+    store.bind_repository(&lease).unwrap();
+    let alias = meshloop_domain::workspace::RootAlias::new("planning-worktrees").unwrap();
+    let root = dir
+        .parent()
+        .unwrap()
+        .join(".meshloop-worktrees")
+        .join(dir.file_name().unwrap());
+    if root.exists() {
+        lease.register_root(alias.clone(), &root).unwrap();
+    } else {
+        lease.bootstrap_root(alias.clone(), &root).unwrap();
+    }
+    store.register_root(&lease, &alias).unwrap();
+    if !trigger.is_empty() {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(trigger)
+            .unwrap();
+    }
+    let harness = OwnedScriptedPlanner {
+        responses,
+        prompts: Default::default(),
+        db: db_path,
+        fail_invoke,
+        stdout_only,
+    };
+    let git = meshloop_adapters::git::GitWorktreeAdapter::new(dir.to_path_buf());
+    let processes = meshloop_adapters::process::HostProcessView {};
+    let checks = meshloop_adapters::check::CommandCheckRunner;
+    let mut run = meshloop_engine::run_loop::RunLoop {
+        harnesses: std::collections::HashMap::from([(
+            "fixture".into(),
+            &harness as &dyn meshloop_engine::ports::HarnessCapabilities,
+        )]),
+        candidates: vec![meshloop_engine::router::Candidate {
+            harness: "fixture".into(),
+            model_ref: "fixture".into(),
+            model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+        }],
+        workspace: &git,
+        store: &mut store,
+        processes: &processes,
+        checks: &checks,
+        router: meshloop_engine::router::Router::default(),
+        limits: meshloop_engine::run_loop::RunLimits {
+            max_retries: 2,
+            task_timeout: std::time::Duration::from_secs(1),
+            max_concurrent_workers: 1,
+        },
+        fixture_only: true,
+        verify_command: vec![],
+        worktree_base: root,
+        active_graph: None,
+        planner: meshloop_engine::run_loop::PlannerSelection::default(),
+    };
+    let result = run.plan("private-objective-marker", "scope", &mut lease);
+    (result, harness.prompts.into_inner().unwrap())
+}
+const OWNED_VALID_GRAPH: &str = r#"{"graph_id":"owned","nodes":[{"id":1,"description":"private-source-marker","depends_on":[],"tier":null}]}"#;
+#[test]
+fn provisional_planning_malformed_then_valid_preserves_original_and_retry_diagnostic() {
+    let dir = disposable_repo("owned-repair");
+    let bad = r#"{"graph_id":"bad","nodes":[{"id":1,"description":"private-source-marker","depends_on":[],"tier":"private-tier-marker"}]}"#;
+    let (result, prompts) = scripted_owned_plan(
+        &dir,
+        vec![bad.into(), OWNED_VALID_GRAPH.into()],
+        "",
+        false,
+        false,
+    );
+    assert!(result.is_ok());
+    assert_eq!(prompts.len(), 2);
+    assert!(!prompts[0].contains("your previous graph failed"));
+    assert!(prompts[1].contains("your previous graph failed: planner-malformed-output"));
+    assert!(!prompts[1].contains("private-tier-marker"));
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        bad
+    );
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[3])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+}
+#[test]
+fn provisional_planning_valid_stdout_is_preserved_before_completed_plan() {
+    let dir = disposable_repo("owned-stdout");
+    assert!(
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], "", false, true)
+            .0
+            .is_ok()
+    );
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+}
+#[test]
+fn provisional_planning_unknown_invoke_failure_never_salvages_or_exposes_detail() {
+    let dir = disposable_repo("owned-invoke-fail");
+    let (result, prompts) =
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], "", true, false);
+    let error = match result.unwrap_err() {
+        meshloop_engine::run_loop::OrchestratorError::Plan(error) => error,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(error.to_string(), "planner-dispatch-unresolved");
+    assert_eq!(prompts.len(), 1);
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+#[test]
+fn provisional_planning_intent_failures_precede_worktree_or_spawn_effects() {
+    for kind in ["Worktree", "Spawn"] {
+        let dir = disposable_repo(&format!("owned-intent-{kind}"));
+        let trigger = format!(
+            "CREATE TRIGGER injected_fault BEFORE INSERT ON workspace_operations WHEN json_extract(NEW.payload_json,'$.kind')='{kind}' BEGIN SELECT RAISE(ABORT,'private-store-detail'); END;"
+        );
+        let (result, prompts) =
+            scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], &trigger, false, false);
+        assert!(result.is_err());
+        assert!(prompts.is_empty());
+        let owners = planning_owners(&dir);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owned_plan_path(&dir, &owners[0]).exists(), kind == "Spawn");
+        assert!(
+            !owned_plan_path(&dir, &owners[0])
+                .join("meshloop-plan.json")
+                .exists()
+        );
+    }
+}
+#[test]
+fn provisional_planning_completion_failure_remains_unresolved_and_stops_retry() {
+    let dir = disposable_repo("owned-completion-fault");
+    let trigger = "CREATE TRIGGER injected_fault BEFORE INSERT ON workspace_operation_steps WHEN EXISTS(SELECT 1 FROM workspace_operations WHERE id=NEW.operation_id AND json_extract(payload_json,'$.kind')='Spawn') BEGIN SELECT RAISE(ABORT,'private-store-detail'); END;";
+    let (result, prompts) =
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], trigger, false, true);
+    assert!(result.is_err());
+    assert_eq!(prompts.len(), 1);
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_operation_steps", [], |r| r
+            .get(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn provisional_planning_failed_probe_private_detail_is_absent_from_stderr() {
+    let dir = disposable_repo("owned-probe-privacy");
+    // The Rust test runner rejects unknown options with a failing exit and echoes
+    // the option to stderr. Prove that private process text actually exists before
+    // asserting that the public planning command with this same probe suppresses it.
+    let probe_executable = std::env::current_exe().unwrap();
+    let direct_probe = Command::new(&probe_executable)
+        .arg("--private-probe-marker")
+        .output()
+        .unwrap();
+    assert!(!direct_probe.status.success());
+    assert!(String::from_utf8_lossy(&direct_probe.stderr).contains("private-probe-marker"));
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace(
+            &fixture_path().replace('\\', "\\\\"),
+            &probe_executable.to_string_lossy().replace('\\', "\\\\"),
+        )
+        .replace(
+            r#"version_args = ["--version"]"#,
+            r#"version_args = ["--private-probe-marker"]"#,
+        );
+    fs::write(&config, text).unwrap();
+    let output = invoke_owned_plan(&dir, &config);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
+    assert!(stderr.contains("meshloop doctor"), "{stderr}");
+    assert!(!stderr.contains("private-probe-marker"), "{stderr}");
+    assert!(!dir.join("result.json").exists());
+    assert!(planning_owners(&dir).is_empty());
 }

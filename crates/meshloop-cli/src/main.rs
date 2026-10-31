@@ -364,9 +364,16 @@ fn cmd_plan(
         fixture_only: false,
     }) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
+        Err(_) => {
+            eprintln!("planner-access-failed");
             return ExitCode::from(2);
+        }
+    };
+    let mut planning_access = match compose::planning_access(&mut composed) {
+        Ok(access) => access,
+        Err(_) => {
+            eprintln!("planner-access-failed");
+            return ExitCode::from(1);
         }
     };
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
@@ -397,13 +404,12 @@ fn cmd_plan(
     let (graph, planner) = match saga.plan(
         &objective,
         scope.as_deref().unwrap_or("scope: this repository only"),
+        &mut planning_access,
     ) {
         Ok(p) => (p.graph, p.planner),
-        Err(OrchestratorError::NoCandidate(rejections)) => {
-            eprintln!("Decomposition failed: no harness can run the planner.");
-            for r in &rejections {
-                eprintln!("  {}: {}", r.harness, r.reason);
-            }
+        Err(OrchestratorError::NoCandidate(_)) => {
+            // Probe/router reasons may contain process output or private paths.
+            eprintln!("planner-no-candidate");
             if cfg.planner.harness.is_none() {
                 eprintln!("{}", report::PLANNER_ROUTING_HINT);
             }
@@ -414,8 +420,8 @@ fn cmd_plan(
             eprintln!("Decomposition failed: {e}");
             return ExitCode::from(1);
         }
-        Err(e) => {
-            eprintln!("Decomposition failed: {e:?}");
+        Err(_) => {
+            eprintln!("planner-operation-failed");
             return ExitCode::from(1);
         }
     };
@@ -526,9 +532,24 @@ fn cmd_review_plan(
     }) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{e}");
+            if decision == PlanDecision::Adjust {
+                eprintln!("planner-access-failed");
+            } else {
+                eprintln!("{e}");
+            }
             return ExitCode::from(2);
         }
+    };
+    let mut planning_access = if decision == PlanDecision::Adjust {
+        match compose::planning_access(&mut composed) {
+            Ok(access) => Some(access),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
     };
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
         .harnesses
@@ -582,9 +603,14 @@ fn cmd_review_plan(
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+        let Some(access) = planning_access.as_mut() else {
+            eprintln!("planner-access-failed");
+            return ExitCode::from(1);
+        };
         match saga.plan(
             &prompt,
             scope.as_deref().unwrap_or("scope: this repository only"),
+            access,
         ) {
             Ok(p) => graph = p.graph,
             Err(e) => {
@@ -592,7 +618,7 @@ fn cmd_review_plan(
                     OrchestratorError::Plan(p) => {
                         eprintln!("Adjust decomposition failed: {p}")
                     }
-                    _ => eprintln!("Adjust decomposition failed: {e:?}"),
+                    _ => eprintln!("planner-operation-failed"),
                 }
                 return ExitCode::from(1);
             }
