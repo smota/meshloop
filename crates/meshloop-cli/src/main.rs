@@ -347,6 +347,49 @@ fn repo_root() -> PathBuf {
     env::current_dir().expect("current directory")
 }
 
+fn legacy_mutation_preflight(
+    db: Option<&std::path::Path>,
+    graph: Option<&str>,
+) -> Result<(), String> {
+    let path = db
+        .map(PathBuf::from)
+        .unwrap_or_else(|| compose::default_db(&repo_root()));
+    let Some(store) = meshloop_adapters::store::SqliteStore::open_read_only(&path)
+        .map_err(|e| format!("{e:?}"))?
+    else {
+        return Ok(());
+    };
+    let selected = match graph {
+        Some(id) => Some(id.to_owned()),
+        None => store
+            .latest_run()
+            .map_err(|e| format!("{e:?}"))?
+            .map(|r| r.graph_id),
+    };
+    if let Some(id) = selected {
+        legacy_mutation_admission(&store, &id)?;
+    }
+    Ok(())
+}
+
+fn legacy_mutation_admission(store: &dyn RunStore, graph_id: &str) -> Result<(), String> {
+    let graph = meshloop_domain::workspace::GraphId::new(graph_id)
+        .map_err(|_| format!("invalid graph identity: {graph_id:?}"))?;
+    let unresolved = store
+        .legacy_ownership_unresolved(&graph)
+        .map_err(|e| format!("{e:?}"))?;
+    let bound = store
+        .run_binding(&graph)
+        .map_err(|e| format!("{e:?}"))?
+        .is_some();
+    if unresolved || bound {
+        return Err(format!(
+            "LegacyOwnershipUnresolved: graph {graph_id:?}; explicit legacy ownership adoption is required before mutation. Adoption is not available in this milestone; preserve the original run and use status/inspect/export for read-only access."
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_plan(
     mut objective: String,
@@ -540,6 +583,14 @@ fn cmd_review_plan(
         eprintln!("plan failed structural validation: {e:?}");
         return ExitCode::from(2);
     }
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), Some(&graph.graph_id)) {
+        if json {
+            println!("{}", json_out::err("meshloop:review-plan", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     let (cfg, _) = match load_cfg(config) {
         Ok(v) => v,
         Err(c) => return c,
@@ -563,6 +614,14 @@ fn cmd_review_plan(
             return ExitCode::from(2);
         }
     };
+    if let Err(message) = legacy_mutation_admission(&composed.store, &graph.graph_id) {
+        if json {
+            println!("{}", json_out::err("meshloop:review-plan", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     let mut planning_access = if decision == PlanDecision::Adjust {
         match compose::planning_access(&mut composed) {
             Ok(access) => Some(access),
@@ -771,6 +830,14 @@ fn cmd_run(
         eprintln!("plan failed structural validation: {e:?}");
         return ExitCode::from(2);
     }
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), Some(&graph.graph_id)) {
+        if json {
+            println!("{}", json_out::err("meshloop:run", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     let (cfg, _) = match load_cfg(config.clone()) {
         Ok(v) => v,
         Err(c) => return c,
@@ -790,6 +857,14 @@ fn cmd_run(
             return ExitCode::from(2);
         }
     };
+    if let Err(message) = legacy_mutation_admission(&composed.store, &graph.graph_id) {
+        if json {
+            println!("{}", json_out::err("meshloop:run", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     if composed.verify_command.is_empty() {
         eprintln!("warning: {EMPTY_VERIFY_WARNING}");
     }
@@ -1364,6 +1439,10 @@ fn cmd_resume(
     fixture_only: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), graph.as_deref()) {
+        eprintln!("{message}");
+        return ExitCode::from(1);
+    }
     with_saga(config, db, worktree_base, fixture_only, origin, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
@@ -1372,6 +1451,10 @@ fn cmd_resume(
                 return ExitCode::from(2);
             }
         };
+        if let Err(message) = legacy_mutation_admission(saga.store, &id) {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
         match saga.resume(&id, retry, restart) {
             Ok(reason) => {
                 println!("{}", report::format_idle(reason));
@@ -1402,6 +1485,14 @@ fn cmd_cancel(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let resolved_id = graph.or(session_id);
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), resolved_id.as_deref()) {
+        if json {
+            println!("{}", json_out::err("meshloop:cancel", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
         let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
@@ -1417,6 +1508,14 @@ fn cmd_cancel(
                 return ExitCode::from(2);
             }
         };
+        if let Err(message) = legacy_mutation_admission(saga.store, &id) {
+            if json {
+                println!("{}", json_out::err("meshloop:cancel", origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
         // Kill process trees of any live attempts to prevent orphaned processes
         if let Ok(graph) = saga.graph(&id) {
             for node in &graph.nodes {
@@ -1833,6 +1932,10 @@ fn cmd_accept(
     worktree_base: Option<PathBuf>,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), graph.as_deref()) {
+        eprintln!("{message}");
+        return ExitCode::from(1);
+    }
     with_saga(config, db, worktree_base, false, origin, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
@@ -1841,6 +1944,10 @@ fn cmd_accept(
                 return ExitCode::from(2);
             }
         };
+        if let Err(message) = legacy_mutation_admission(saga.store, &id) {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
         saga.active_graph = Some(id);
         match saga.accept_human(TaskId(task), &identity) {
             Ok(()) => {
@@ -1884,16 +1991,32 @@ fn cmd_integrate(
         eprintln!("integrate requires --accept-integrate after reviewing the integrate worktree");
         return ExitCode::from(2);
     }
-    with_saga(config, db, worktree_base, false, origin, |saga| match saga
-        .integrate_into(&graph, &into)
-    {
-        Ok(()) => {
-            println!("integrated graph {graph} into {into}");
-            ExitCode::SUCCESS
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), Some(&graph)) {
+        if json {
+            println!("{}", json_out::err("meshloop:integrate", origin, message));
+        } else {
+            eprintln!("{message}");
         }
-        Err(e) => {
-            eprintln!("{e:?}");
-            ExitCode::from(1)
+        return ExitCode::from(1);
+    }
+    with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
+        if let Err(message) = legacy_mutation_admission(saga.store, &graph) {
+            if json {
+                println!("{}", json_out::err("meshloop:integrate", origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
+        match saga.integrate_into(&graph, &into) {
+            Ok(()) => {
+                println!("integrated graph {graph} into {into}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e:?}");
+                ExitCode::from(1)
+            }
         }
     })
 }
@@ -1913,7 +2036,23 @@ fn cmd_integrate_deliverable(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let cmd = "meshloop:integrate";
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), Some(&graph)) {
+        if json {
+            println!("{}", json_out::err(cmd, origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
+        if let Err(message) = legacy_mutation_admission(saga.store, &graph) {
+            if json {
+                println!("{}", json_out::err(cmd, origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
         let result = if accept_integrate {
             saga.integrate_deliverable_into(&graph, &tag, &into)
                 .map(|()| None)
@@ -2377,7 +2516,20 @@ fn cmd_orchestrate(
         );
     }
 
-    let mut composed = match load_cfg(config) {
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), graph.as_deref()) {
+        if json {
+            println!("{}", json_out::err("meshloop:orchestrate", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
+    let authoritative = graph.is_some()
+        || db.as_deref().map_or_else(
+            || compose::default_db(&repo_root()).exists(),
+            std::path::Path::exists,
+        );
+    let composed_result = match load_cfg(config) {
         Ok((cfg, _)) => compose::compose(compose::ComposeRequest {
             config: &cfg,
             repo_root: repo_root(),
@@ -2385,10 +2537,44 @@ fn cmd_orchestrate(
             worktree_base,
             origin: origin.clone(),
             fixture_only,
-        })
-        .ok(),
+        }),
+        Err(_) => Err("review configuration could not be loaded".into()),
+    };
+    let mut composed = match composed_result {
+        Ok(c) => Some(c),
+        Err(message) if authoritative => {
+            if json {
+                println!("{}", json_out::err("meshloop:orchestrate", origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
         Err(_) => None,
     };
+
+    if let Some(c) = composed.as_ref() {
+        let selected = match &graph {
+            Some(id) => Ok(Some(id.clone())),
+            None => c
+                .store
+                .latest_run()
+                .map(|row| row.map(|r| r.graph_id))
+                .map_err(|e| format!("{e:?}")),
+        };
+        let admission = selected.and_then(|selected| match selected {
+            Some(id) => legacy_mutation_admission(&c.store, &id),
+            None => Ok(()),
+        });
+        if let Err(message) = admission {
+            if json {
+                println!("{}", json_out::err("meshloop:orchestrate", origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
+    }
 
     let pinned = composed.as_mut().and_then(|c| {
         let id = graph
@@ -2535,6 +2721,14 @@ fn cmd_mutate_plan(
         }
     };
 
+    if let Err(message) = legacy_mutation_preflight(db.as_deref(), graph_arg.as_deref()) {
+        if json {
+            println!("{}", json_out::err("meshloop:mutate-plan", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     let (cfg, _) = match load_cfg(config) {
         Ok(v) => v,
         Err(c) => return c,
@@ -2605,6 +2799,14 @@ fn cmd_mutate_plan(
         },
     };
 
+    if let Err(message) = legacy_mutation_admission(saga.store, &graph_id) {
+        if json {
+            println!("{}", json_out::err("meshloop:mutate-plan", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(1);
+    }
     let updated_graph = match saga.mutate_plan(&graph_id, mutation, require_review) {
         Ok(g) => g,
         Err(e) => {

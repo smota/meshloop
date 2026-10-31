@@ -412,13 +412,48 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .map_err(error)?;
-        if exists {
+        let graph = GraphId::new(graph).map_err(error)?;
+        if exists || self.legacy_ownership_unresolved(&graph)? {
             return Err(StoreError::LegacyOwnershipUnresolved);
+        }
+        Ok(())
+    }
+    pub(crate) fn reject_legacy_attempt(
+        &self,
+        attempt: meshloop_domain::evidence::AttemptId,
+    ) -> Result<(), StoreError> {
+        if self.read_only {
+            return Err(StoreError::ReadOnly);
+        }
+        let marked: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_legacy_unbound WHERE source_table='attempts' AND source_id=CAST(?1 AS TEXT))",
+            [attempt.0], |r| r.get(0)).map_err(error)?;
+        if marked {
+            return Err(StoreError::LegacyOwnershipUnresolved);
+        }
+        let graph: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT graph_id FROM attempts WHERE attempt_id=?1",
+                [attempt.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some(graph) = graph {
+            self.reject_bound_graph(&graph)?;
         }
         Ok(())
     }
 }
 impl RuntimeLedger for SqliteStore {
+    fn legacy_ownership_unresolved(&self, graph: &GraphId) -> Result<bool, StoreError> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id=?1)
+             OR EXISTS(SELECT 1 FROM workspace_legacy_unbound m JOIN attempts a ON m.source_table='attempts' AND m.source_id=CAST(a.attempt_id AS TEXT) WHERE a.graph_id=?1)",
+            [graph.as_str()], |r| r.get(0)).map_err(error)
+    }
+
     fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError> {
         if !self.conn.is_autocommit() {
             observe();
@@ -557,8 +592,7 @@ impl RuntimeLedger for SqliteStore {
         b: &RunBinding,
     ) -> Result<(), StoreError> {
         self.validate_fence(f, true)?;
-        let legacy:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id=?1)",[b.graph_id.as_str()],|r|r.get(0)).map_err(error)?;
-        if legacy {
+        if self.legacy_ownership_unresolved(&b.graph_id)? {
             return Err(StoreError::LegacyOwnershipUnresolved);
         }
         f.root(&b.location.root_alias)?;

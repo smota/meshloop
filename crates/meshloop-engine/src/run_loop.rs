@@ -315,12 +315,22 @@ fn terminal(state: TaskState) -> bool {
 }
 
 impl<'a> RunLoop<'a> {
-    /// Transitional admission check: legacy producers cannot own lifecycle-bound runs.
-    /// This observes the current binding only; it is not a repository fence.
+    /// Transitional admission: legacy producers cannot mutate bound or migration-marked runs.
+    /// This observes current ownership only; it is not a repository fence.
     fn require_legacy_mutation(&self, graph_id: &str) -> Result<(), OrchestratorError> {
         let graph = meshloop_domain::workspace::GraphId::new(graph_id)
             .map_err(|_| OrchestratorError::Store(StoreError::PlanRevisionMismatch))?;
-        if self.store.run_binding(&graph)?.is_some() {
+        if self.store.legacy_ownership_unresolved(&graph)? {
+            return Err(StoreError::LegacyOwnershipUnresolved.into());
+        }
+        self.require_unbound_graph(&graph)
+    }
+
+    fn require_unbound_graph(
+        &self,
+        graph: &meshloop_domain::workspace::GraphId,
+    ) -> Result<(), OrchestratorError> {
+        if self.store.run_binding(graph)?.is_some() {
             return Err(StoreError::LegacyOwnershipUnresolved.into());
         }
         Ok(())
@@ -2416,7 +2426,9 @@ impl<'a> RunLoop<'a> {
         &self,
         graph_id: &str,
     ) -> Result<Option<GitExport>, OrchestratorError> {
-        self.require_legacy_mutation(graph_id)?;
+        let graph = meshloop_domain::workspace::GraphId::new(graph_id)
+            .map_err(|_| OrchestratorError::Store(StoreError::PlanRevisionMismatch))?;
+        self.require_unbound_graph(&graph)?;
         let integrate = self.integrate_path(graph_id);
         let ibranch = self.integrate_branch(graph_id);
         let row = self
@@ -2593,6 +2605,7 @@ mod tests {
     struct AdmissionPorts {
         binding: Result<Option<meshloop_domain::workspace::RunBinding>, StoreError>,
         lookups: Cell<u32>,
+        legacy: Result<bool, StoreError>,
     }
     macro_rules! forbidden_port_calls {
         ($(fn $name:ident($($args:tt)*) -> $ret:ty;)*) => {$(
@@ -2663,6 +2676,9 @@ mod tests {
         }
     }
     impl crate::workspace::RuntimeLedger for AdmissionPorts {
+        fn legacy_ownership_unresolved(&self, _: &GraphId) -> Result<bool, StoreError> {
+            self.legacy.clone()
+        }
         fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError> {
             assert!(GraphId::new(graph.as_str()).is_ok());
             self.lookups.set(self.lookups.get() + 1);
@@ -2743,6 +2759,7 @@ mod tests {
     fn admission_ports(binding: Result<Option<RunBinding>, StoreError>) -> AdmissionPorts {
         AdmissionPorts {
             binding,
+            legacy: Ok(false),
             lookups: Cell::new(0),
         }
     }
@@ -2811,19 +2828,32 @@ mod tests {
     #[test]
     fn graph_mutators_refuse_pending_active_and_lookup_failure_before_other_port_calls() {
         let failure = StoreError::Io("binding lookup failed".into());
-        for (binding, expected) in [
+        for (binding, legacy, expected) in [
             (
                 Ok(Some(admission_binding(false))),
+                Ok(false),
                 StoreError::LegacyOwnershipUnresolved,
             ),
             (
                 Ok(Some(admission_binding(true))),
+                Ok(false),
                 StoreError::LegacyOwnershipUnresolved,
             ),
-            (Err(failure.clone()), failure),
+            (Err(failure.clone()), Ok(false), failure),
+            (Ok(None), Ok(true), StoreError::LegacyOwnershipUnresolved),
+            (
+                Ok(None),
+                Err(StoreError::Io("marker query failed".into())),
+                StoreError::Io("marker query failed".into()),
+            ),
         ] {
             for operation in 0..16 {
+                // Git export is a legacy read, so markers must not block it.
+                if operation == 15 && legacy != Ok(false) {
+                    continue;
+                }
                 let mut store = admission_ports(binding.clone());
+                store.legacy = legacy.clone();
                 let other = admission_ports(Ok(None));
                 let mut run = admission_loop(&mut store, &other);
                 // A refused call must also leave the caller's active selection intact.
@@ -2871,7 +2901,11 @@ mod tests {
                     !run.worktree_base.exists(),
                     "operation {operation} created artifacts"
                 );
-                assert_eq!(store.lookups.get(), 1, "operation {operation}");
+                assert_eq!(
+                    store.lookups.get(),
+                    u32::from(legacy == Ok(false)),
+                    "operation {operation}"
+                );
                 assert_eq!(other.lookups.get(), 0);
             }
         }

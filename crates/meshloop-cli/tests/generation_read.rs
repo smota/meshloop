@@ -1058,3 +1058,259 @@ fn bound_start_restart_and_cancel_preserve_dirty_legacy_artifacts_and_history() 
         }
     }
 }
+
+// Fixed canonical v4 fixture: production migration generates the unresolved markers.
+const LEGACY_V4_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS evidence (
+                 task_id INTEGER NOT NULL,
+                 attempt_id INTEGER NOT NULL,
+                 revision TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 payload_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS routing_feedback (
+                 harness TEXT NOT NULL,
+                 model_ref TEXT NOT NULL,
+                 tier TEXT NOT NULL,
+                 success_count INTEGER NOT NULL DEFAULT 0,
+                 failure_count INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (harness, model_ref, tier)
+             );
+             CREATE TABLE IF NOT EXISTS events (
+                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 graph_id TEXT NOT NULL,
+                 task_id INTEGER NOT NULL,
+                 attempt_id INTEGER,
+                 from_state TEXT NOT NULL,
+                 to_state TEXT NOT NULL,
+                 event_type TEXT NOT NULL,
+                 reason TEXT,
+                 executor TEXT NOT NULL,
+                 evidence_ref TEXT,
+                 occurred_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS runs (
+                 graph_id TEXT PRIMARY KEY,
+                 plan_state TEXT NOT NULL,
+                 run_base TEXT NOT NULL,
+                 integrate_ref TEXT NOT NULL,
+                 plan_json TEXT NOT NULL,
+                 plan_sha256 TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 review_note TEXT
+             );
+             CREATE TABLE IF NOT EXISTS attempts (
+                 attempt_id INTEGER PRIMARY KEY,
+                 graph_id TEXT NOT NULL,
+                 task_id INTEGER NOT NULL,
+                 harness TEXT,
+                 model_ref TEXT,
+                 worktree_path TEXT,
+                 pid INTEGER,
+                 image_name TEXT,
+                 started_at TEXT,
+                 ended_at TEXT,
+                 outcome TEXT,
+                 pane_id TEXT
+             );
+             CREATE TABLE IF NOT EXISTS quota_state (
+                 harness TEXT PRIMARY KEY,
+                 breaker TEXT NOT NULL,
+                 opened_at TEXT,
+                 cooldown_ms INTEGER NOT NULL
+             );"#;
+
+#[test]
+fn migrated_legacy_restart_review_and_mutations_preserve_files_refs_history_and_reads() {
+    let f = Fixture::new("migrated-legacy");
+    let worktrees = f.base.join("legacy-worktrees");
+    let integrate = worktrees.join("bound-run/integrate");
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "meshloop/bound-run/integrate",
+            integrate.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    fs::write(integrate.join("tracked.txt"), "retained dirty content").unwrap();
+    fs::write(
+        integrate.join("untracked.txt"),
+        "retained untracked content",
+    )
+    .unwrap();
+    let json = plan("retained legacy task", false);
+    let input = f.repo.join("input-plan.json");
+    fs::write(&input, &json).unwrap();
+    fs::create_dir_all(f.db.parent().unwrap()).unwrap();
+    let c = rusqlite::Connection::open(&f.db).unwrap();
+    c.execute_batch(LEGACY_V4_SCHEMA).unwrap();
+    c.execute("INSERT INTO schema_meta VALUES(4)", []).unwrap();
+    c.execute("INSERT INTO runs VALUES('bound-run','PlanAccepted','HEAD','meshloop/bound-run/integrate',?1,?2,'1','retained note')", rusqlite::params![json,sha256_hex(json.as_bytes())]).unwrap();
+    c.execute("INSERT INTO attempts(attempt_id,graph_id,task_id,harness,worktree_path,started_at,ended_at,outcome) VALUES(91,'bound-run',1,'fixture',?1,'1','2','retained')", [integrate.to_str().unwrap()]).unwrap();
+    c.execute("INSERT INTO events(graph_id,task_id,attempt_id,from_state,to_state,event_type,executor,occurred_at) VALUES('bound-run',1,91,'Verifying','AwaitingReview','DeterministicChecksPassed','fixture','2')", []).unwrap();
+    drop(c);
+    // Explicit writer migration is separate from mutation admission.
+    drop(SqliteStore::open(&f.db).unwrap());
+    let c = rusqlite::Connection::open(&f.db).unwrap();
+    let count: u32 = c
+        .query_row("SELECT COUNT(*) FROM workspace_legacy_unbound", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 2);
+    drop(c);
+    let before_repo = snapshot(&f.repo);
+    let before_worktrees = snapshot(&worktrees);
+    let refs = git(
+        &f.repo,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let registrations = git(&f.repo, &["worktree", "list", "--porcelain"]);
+    for args in [
+        vec![
+            "run",
+            "--plan",
+            input.to_str().unwrap(),
+            "--accept-plan",
+            "--reset",
+        ],
+        vec!["resume", "--graph", "bound-run", "--restart"],
+        vec!["resume", "--graph", "bound-run"],
+        vec!["cancel", "--graph", "bound-run"],
+        vec![
+            "accept",
+            "--graph",
+            "bound-run",
+            "--task",
+            "1",
+            "--as",
+            "fixture",
+        ],
+        vec![
+            "review-plan",
+            "--plan",
+            input.to_str().unwrap(),
+            "--adjust",
+            "--objective",
+            "must not invoke planner",
+        ],
+        vec![
+            "mutate-plan",
+            "--graph",
+            "bound-run",
+            "--mutation",
+            r#"{"type":"append_followup","source_task":1,"new_tasks":[]}"#,
+        ],
+        vec!["orchestrate", "--graph", "bound-run", "--task", "1"],
+        vec![
+            "integrate",
+            "--graph",
+            "bound-run",
+            "--into",
+            "main",
+            "--accept-integrate",
+        ],
+        vec![
+            "integrate",
+            "--graph",
+            "bound-run",
+            "--into",
+            "main",
+            "--deliverable",
+            "tag",
+        ],
+    ] {
+        let mut command = f.command(&args);
+        if args[0] != "review-plan" {
+            command.arg("--worktree-base").arg(&worktrees);
+        }
+        if matches!(args[0], "run" | "resume" | "review-plan" | "orchestrate") {
+            command.arg("--fixture-only");
+        }
+        let out = bounded_output(&mut command);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        if matches!(
+            args[0],
+            "run" | "review-plan" | "cancel" | "orchestrate" | "mutate-plan" | "integrate"
+        ) {
+            let body: serde_json::Value = serde_json::from_slice(&out.stdout)
+                .unwrap_or_else(|e| panic!("invalid JSON refusal: {e}: {out:?}"));
+            assert_eq!(body["ok"], false);
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("LegacyOwnershipUnresolved")
+            );
+        }
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            message.contains("LegacyOwnershipUnresolved")
+                && message.contains("bound-run")
+                && message.contains("adoption"),
+            "{args:?}: {message}"
+        );
+        assert_snapshot_unchanged(&f.repo, &before_repo);
+        assert_eq!(snapshot(&worktrees), before_worktrees, "{args:?}");
+        assert_eq!(
+            git(
+                &f.repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            refs
+        );
+        assert_eq!(
+            git(&f.repo, &["worktree", "list", "--porcelain"]),
+            registrations
+        );
+        assert!(!f.repo.join(".meshloop/reviews").exists());
+    }
+    f.read(&["status", "--graph", "bound-run"], 0);
+    f.read(&["inspect", "--graph", "bound-run", "--task", "1"], 0);
+    let mut reader = SqliteStore::open_read_only(&f.db).unwrap().unwrap();
+    with_reader(&mut reader, &f, |saga| {
+        assert!(saga.export_git_metadata("bound-run").unwrap().is_some());
+    });
+    assert_snapshot_unchanged(&f.repo, &before_repo);
+    assert_eq!(snapshot(&worktrees), before_worktrees);
+}
+
+fn assert_snapshot_unchanged(root: &Path, expected: &BTreeMap<PathBuf, Option<Vec<u8>>>) {
+    let actual = snapshot(root);
+    let changed: Vec<_> = actual
+        .keys()
+        .chain(expected.keys())
+        .filter(|path| actual.get(*path) != expected.get(*path))
+        .collect();
+    assert!(changed.is_empty(), "changed entries: {changed:?}");
+}
+
+#[test]
+fn orchestrate_selected_graph_fails_closed_before_pack_when_authority_cannot_be_read() {
+    for failure in ["schema", "config"] {
+        let f = Fixture::new(failure);
+        drop(SqliteStore::open(&f.db).unwrap());
+        if failure == "schema" {
+            let c = rusqlite::Connection::open(&f.db).unwrap();
+            c.execute("DROP TABLE workspace_legacy_unbound", [])
+                .unwrap();
+        } else {
+            fs::write(f.repo.join("meshloop.toml"), "invalid = [").unwrap();
+        }
+        let before = snapshot(&f.repo);
+        let out =
+            bounded_output(&mut f.command(&["orchestrate", "--graph", "bound-run", "--task", "1"]));
+        assert_eq!(out.status.code(), Some(1), "{failure}: {out:?}");
+        assert!(!f.repo.join(".meshloop/reviews").exists());
+        assert_snapshot_unchanged(&f.repo, &before);
+    }
+}
