@@ -50,7 +50,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
 | 0033 | Workspace lifecycle and durable history | Accepted |
 | 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Accepted |
-| 0035 | [Atomic Windows process assignment to owned jobs](0035-atomic-process-job-assignment.md) | Proposed |
+| 0035 | [Atomic Windows process assignment to owned jobs](0035-atomic-process-job-assignment.md) | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

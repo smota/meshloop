@@ -1,13 +1,14 @@
 # 0035 Atomic Windows process assignment to owned jobs
 
-- Status: Proposed
+- Status: Accepted
 - Implementation: not-started
 - Date: 2026-10-31
 - Author/executor: Codex bounded driver-control intake worker (draft); parent owns integration
 - Reviewer: independent GPT-6-sol safety reviewer; clear as a proposal, not acceptance or runtime verification
 - Decision owner: Samuel
-- Approval evidence: pending; authorization to prepare this proposal is not acceptance
-- Supersedes: none while Proposed; if accepted, narrowly replaces ADR 0025's Windows post-launch assignment mechanism
+- Accepted date: 2026-10-31
+- Approval evidence: Samuel explicitly replied "Accepted" to concrete ADR0035 proposal at checkpoint 2019951; this accepts the architecture decision, not runtime implementation or full S3
+- Supersedes: ADR 0025 Windows post-launch assignment mechanism only; other ADR 0025 decisions remain unchanged
 - Superseded by: none
 - Tracking: [#74](https://github.com/smota/meshloop/issues/74), within [#71](https://github.com/smota/meshloop/issues/71)
 - Inspected source: `1e6a831e84c6b74528ecc7a4d88d7238e579e90f`
