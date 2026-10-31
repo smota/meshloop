@@ -10,6 +10,39 @@ permissions:
   contents: read
 
 jobs:
+  # One diagnostic dispatch only: remove this job before any subsequent PR87 push.
+  # run_attempt == 1 prevents reruns, but cannot prevent a new synchronize event.
+  issue82-wal-storage-diagnostic:
+    name: Temporary PR87 Windows WAL/storage diagnostic
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 87 && github.run_attempt == 1
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Run fixed remote diagnostic once
+        shell: pwsh
+        env:
+          ISSUE82_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./scripts/diagnostics/issue82/run.ps1 -Mode Batch
+      - name: Retain partial diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue82-remote-wal-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .agent-runs/issue-82/remote-wal-*/*.json
+            .agent-runs/issue-82/remote-wal-*/*.stdout
+            .agent-runs/issue-82/remote-wal-*/*.stderr
+          include-hidden-files: true
+          if-no-files-found: warn
   test-and-gate:
     name: ${{ matrix.os }} - check, smoke, bench
     runs-on: ${{ matrix.os }}
