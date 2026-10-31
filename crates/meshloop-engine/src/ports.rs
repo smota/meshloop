@@ -46,6 +46,19 @@ pub trait HarnessCapabilities: Sync {
     fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError>;
     fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError>;
     fn collect(&self, handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError>;
+    /// Explicit opt-in: provisional drivers must never call a blocking fallback.
+    fn supports_nonblocking_collection(&self) -> bool {
+        false
+    }
+    /// Cancel only the exact retained owner and prove its complete tree quiescent.
+    /// Unsupported adapters must not fall back to recorded PID cancellation.
+    fn cancel_owned(
+        &self,
+        _handle: &HarnessHandle,
+        _timeout: Duration,
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported)
+    }
     /// Non-blocking poll for attempt outcome (ADR 0024).
     /// Returns Ok(Some(outcome)) when finished, Ok(None) when still executing, or Err on fault/timeout.
     fn try_collect(&self, handle: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {

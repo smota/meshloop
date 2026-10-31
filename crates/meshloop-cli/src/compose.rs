@@ -26,6 +26,16 @@ pub enum DispatchHarness {
 }
 
 impl HarnessCapabilities for DispatchHarness {
+    fn supports_nonblocking_collection(&self) -> bool {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.supports_nonblocking_collection(),
+        }
+    }
+    fn cancel_owned(&self, handle: &HarnessHandle, timeout: Duration) -> Result<(), HarnessError> {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.cancel_owned(handle, timeout),
+        }
+    }
     fn probe(&self) -> Result<HarnessProfile, HarnessError> {
         match self {
             Self::Fixture(h) | Self::Direct(h) => h.probe(),

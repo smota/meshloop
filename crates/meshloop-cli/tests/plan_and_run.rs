@@ -142,6 +142,266 @@ fn meshloop() -> Command {
     Command::new(env!("CARGO_BIN_EXE_meshloop"))
 }
 
+#[cfg(windows)]
+fn driver_json(dir: &Path, db: &Path, args: &[&str]) -> serde_json::Value {
+    let output = meshloop()
+        .current_dir(dir)
+        .args(args)
+        .arg("--db")
+        .arg(db)
+        .arg("--json")
+        .guarded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[cfg(windows)]
+struct LivePlanner(std::process::Child);
+#[cfg(windows)]
+impl Drop for LivePlanner {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(windows)]
+fn hanging_planner(dir: &Path, adjust: bool) -> (LivePlanner, PathBuf, PathBuf, serde_json::Value) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let pid = dir.join("descendant.pid");
+    let heartbeat = dir.join("descendant.heartbeat");
+    let args = serde_json::to_string(&[
+        "--spawn-grandchild".to_string(),
+        pid.display().to_string(),
+        heartbeat.display().to_string(),
+    ])
+    .unwrap();
+    let config = write_config(dir, &args);
+    let db = dir.join(".meshloop/state.sqlite");
+    let mut command = meshloop();
+    command.current_dir(dir);
+    if adjust {
+        let plan = dir.join("input.json");
+        fs::write(&plan, r#"{"graph_id":"unregistered","nodes":[{"id":1,"description":"task","depends_on":[],"tier":null}]}"#).unwrap();
+        command
+            .args(["review-plan", "--adjust", "--plan"])
+            .arg(plan);
+    } else {
+        command.arg("plan");
+    }
+    let mut planner = LivePlanner(
+        command
+            .args(["--objective", "control fixture", "--config"])
+            .arg(config)
+            .arg("--db")
+            .arg(&db)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .guarded_spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let driver = loop {
+        assert!(
+            Instant::now() < deadline,
+            "planner never registered live driver"
+        );
+        assert!(
+            planner.0.try_wait().unwrap().is_none(),
+            "planner exited early"
+        );
+        if db.exists() && pid.exists() && heartbeat.exists() {
+            let output = meshloop()
+                .current_dir(dir)
+                .args(["status", "--drivers", "--db"])
+                .arg(&db)
+                .arg("--json")
+                .guarded_output()
+                .unwrap();
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                && let Some(driver) = value["data"]["drivers"]
+                    .as_array()
+                    .and_then(|drivers| drivers.iter().find(|d| d["phase"] == "Running"))
+            {
+                break driver.clone();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    (planner, db, heartbeat, driver)
+}
+
+#[cfg(windows)]
+#[test]
+fn provisional_driver_cancels_real_planner_tree_and_preserves_unrelated_process() {
+    use std::time::Duration;
+    for adjust in [false, true] {
+        let dir = disposable_repo(if adjust {
+            "driver-adjust"
+        } else {
+            "driver-plan"
+        });
+        let (mut planner, db, heartbeat, driver) = hanging_planner(&dir, adjust);
+        let id = driver["id"].as_str().unwrap();
+        assert_eq!(driver["process"]["pid"], planner.0.id());
+        assert!(
+            driver["process"]["creation_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("windows-")
+        );
+        assert_eq!(driver["process"]["tree_token"], driver["nonce"]);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            runs, 0,
+            "driver discovery cannot depend on graph registration"
+        );
+        let before = fs::read(&db).unwrap();
+        let inspected = driver_json(&dir, &db, &["inspect", "--driver", id]);
+        assert_eq!(inspected["data"]["driver"]["id"], id);
+        assert_eq!(
+            before,
+            fs::read(&db).unwrap(),
+            "read discovery changed ledger contents"
+        );
+        let mut unrelated = meshloop_adapters::process::spawn_command(
+            Command::new(fixture_path()).args(["--sleep-ms", "20000"]),
+        )
+        .unwrap();
+        let cancelled = driver_json(&dir, &db, &["cancel", "--driver", id]);
+        assert_eq!(cancelled["data"]["status"], "Applied", "{cancelled}");
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "unrelated child was killed"
+        );
+        let after = fs::read(&heartbeat).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            after,
+            fs::read(&heartbeat).unwrap(),
+            "descendant survived Applied"
+        );
+        let repeated = driver_json(&dir, &db, &["cancel", "--driver", id]);
+        assert_eq!(
+            repeated["data"], cancelled["data"],
+            "terminal request must deduplicate"
+        );
+        assert!(!planner.0.wait().unwrap().success());
+        let final_driver = driver_json(&dir, &db, &["inspect", "--driver", id]);
+        assert_eq!(final_driver["data"]["driver"]["phase"], "Exited");
+        assert_eq!(
+            final_driver["data"]["driver"]["cancellations"][0]["status"],
+            "Applied"
+        );
+        let operations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workspace_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            operations, 3,
+            "cancelled attempt must never retry or discard intents"
+        );
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn provisional_driver_ack_write_failure_stays_pending_with_stable_error() {
+    use std::time::{Duration, Instant};
+    let dir = disposable_repo("driver-ack-failure");
+    let (mut planner, db, heartbeat, driver) = hanging_planner(&dir, false);
+    let mut client =
+        meshloop_adapters::workspace::CancellationClient::open(Path::new("git"), &dir, &db)
+            .unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER deny_control_ack BEFORE UPDATE OF status ON workspace_control_requests BEGIN SELECT RAISE(FAIL, 'private injected detail'); END;").unwrap();
+    let started = Instant::now();
+    let request = client
+        .enqueue_driver(
+            &meshloop_domain::workspace::LifecycleId::new(driver["id"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+    let result = client
+        .wait_for_acknowledgement(request, Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        result.status,
+        meshloop_domain::workspace::CancellationStatus::Pending
+    );
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(9));
+    let output = planner.0.wait().unwrap();
+    assert!(!output.success());
+    let mut stderr = String::new();
+    use std::io::Read;
+    planner
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(
+        stderr.contains("planner-cancellation-ack-failed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("private injected detail"));
+    conn.execute_batch("DROP TRIGGER deny_control_ack;")
+        .unwrap();
+    let final_driver = driver_json(
+        &dir,
+        &db,
+        &["inspect", "--driver", driver["id"].as_str().unwrap()],
+    );
+    assert_eq!(final_driver["data"]["driver"]["phase"], "Blocked");
+    assert_eq!(
+        final_driver["data"]["driver"]["cancellations"][0]["status"],
+        "Pending"
+    );
+    let before = fs::read(&heartbeat).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(before, fs::read(&heartbeat).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn provisional_driver_missing_owner_returns_pending_within_public_deadline() {
+    use std::time::{Duration, Instant};
+    let dir = disposable_repo("driver-no-owner");
+    let (mut planner, db, _, driver) = hanging_planner(&dir, false);
+    planner.0.kill().unwrap();
+    planner.0.wait().unwrap();
+    let started = Instant::now();
+    let result = driver_json(
+        &dir,
+        &db,
+        &["cancel", "--driver", driver["id"].as_str().unwrap()],
+    );
+    assert_eq!(result["data"]["status"], "Pending");
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(9));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let status: String = conn
+        .query_row("SELECT status FROM workspace_control_requests", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "Pending");
+}
+
 #[test]
 fn plan_writes_the_canned_fixture_graph() {
     let dir = disposable_repo("plan");

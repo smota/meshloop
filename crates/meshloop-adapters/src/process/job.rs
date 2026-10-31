@@ -8,6 +8,30 @@ use super::owned_spawn::OwnedSpawnSpec;
 #[cfg(windows)]
 mod windows;
 
+pub(super) fn current_creation_token() -> io::Result<Option<String>> {
+    #[cfg(windows)]
+    {
+        windows::current_creation_token().map(Some)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let stat = std::fs::read_to_string("/proc/self/stat")?;
+        // comm (field 2) may contain spaces or parentheses. Fields after its final
+        // closing parenthesis start at state (3); starttime is field 22.
+        let start = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| io::Error::other("driver-creation-identity-failed"))?;
+        Ok(Some(format!("linux-{}-{start}", boot.trim())))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Ok(None)
+    }
+}
+
 /// Parent-owned pipe endpoint. Its concrete native handle stays private.
 pub type OwnedReadPipe = Box<dyn Read + Send>;
 pub type OwnedWritePipe = Box<dyn Write + Send>;
