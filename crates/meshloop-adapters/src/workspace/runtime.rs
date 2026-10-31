@@ -2,6 +2,7 @@
 use super::{native_identity, refused, verify_handle};
 use crate::store::SqliteStore;
 use meshloop_domain::evidence::AttemptId;
+use meshloop_domain::task_graph::{TaskGraph, TaskId};
 use meshloop_domain::workspace::*;
 use meshloop_engine::ports::{EventLog, RunStore, StoreError};
 use meshloop_engine::workspace::*;
@@ -242,8 +243,27 @@ fn operation(
     .map_err(error)?;
     Ok(())
 }
+fn revision_task(
+    c: &Connection,
+    s: &ExecutionScope,
+    revision: &LifecycleId,
+    task: TaskId,
+) -> Result<(), StoreError> {
+    let snapshot = revision_snapshot(c, revision)?.ok_or(StoreError::PlanRevisionMismatch)?;
+    let graph: TaskGraph =
+        serde_json::from_str(&snapshot.plan_json).map_err(|_| StoreError::PlanRevisionMismatch)?;
+    if snapshot.metadata.repository_id != s.repository_id
+        || snapshot.metadata.graph_id != s.graph_id
+        || graph.graph_id != s.graph_id.as_str()
+        || !graph.nodes.iter().any(|node| node.id == task)
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
 fn event(c: &Connection, f: &dyn RepositoryFence, e: &ScopedEvent) -> Result<(), StoreError> {
     scope(c, f, &e.scope, Some(&e.revision_id))?;
+    revision_task(c, &e.scope, &e.revision_id, e.record.task_id)?;
     if e.record.reason.as_ref().is_some_and(|r| !public_text(r)) || !public_text(&e.record.executor)
     {
         return Err(refused());
@@ -252,7 +272,7 @@ fn event(c: &Connection, f: &dyn RepositoryFence, e: &ScopedEvent) -> Result<(),
         return Err(refused());
     }
     if let Some(id) = e.record.attempt_id {
-        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE attempt_id=?1 AND generation_id=?2 AND revision_id=?3)",params![id.0,e.scope.generation_id.as_str(),e.revision_id.as_str()],|r|r.get(0)).map_err(error)?;
+        let valid:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE attempt_id=?1 AND generation_id=?2 AND revision_id=?3 AND graph_id=?4 AND task_id=?5)",params![id.0,e.scope.generation_id.as_str(),e.revision_id.as_str(),e.scope.graph_id.as_str(),e.record.task_id.0],|r|r.get(0)).map_err(error)?;
         if !valid {
             return Err(refused());
         }
@@ -880,6 +900,7 @@ impl RuntimeLedger for SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
         scope(&tx, f, &r.scope, Some(&r.revision_id))?;
+        revision_task(&tx, &r.scope, &r.revision_id, r.task_id)?;
         let g: GenerationRecord = get(
             &tx,
             "workspace_generations",

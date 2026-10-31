@@ -1480,6 +1480,105 @@ fn empty_expected() -> ExpectedState {
     }
 }
 #[test]
+fn b1_scoped_writes_reject_foreign_tasks_without_persisting_changes() {
+    use meshloop_domain::state::{Event, TaskState};
+    use meshloop_domain::task_graph::TaskId;
+    use meshloop_engine::workspace::*;
+
+    fn snapshot(store: &SqliteStore) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap();
+        statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|name| {
+                let name = name.unwrap();
+                let contents = rows(&store.conn, &name);
+                (name, contents)
+            })
+            .collect()
+    }
+
+    let f = Fixture::new();
+    let (mut store, lease, activation) = runtime_fixture(&f);
+    store.activate_generation(&lease, &activation).unwrap();
+    let scope = store
+        .resolve_scope(&activation.generation.graph_id, &RunScope::ActiveGeneration)
+        .unwrap()
+        .unwrap();
+    let artifact = artifact(
+        "task-owned-attempt",
+        &activation.generation,
+        ArtifactKind::Attempt,
+    );
+    let mut reservation = AttemptReservation {
+        scope: scope.clone(),
+        revision_id: activation.revision.metadata.id.clone(),
+        task_id: TaskId(67), // The accepted revision contains only tasks 1 through 66.
+        harness: Some("fixture".into()),
+        model_ref: None,
+        spawn_intent: ProducerOperation {
+            id: id("task-owned-spawn"),
+            repository_id: scope.repository_id.clone(),
+            graph_id: Some(scope.graph_id.clone()),
+            generation_id: Some(scope.generation_id.clone()),
+            target: ProducerTarget::Artifact(artifact.id.clone()),
+            kind: ProducerKind::Spawn,
+            before: empty_expected(),
+            after: empty_expected(),
+            max_steps: 1,
+        },
+        artifact,
+    };
+    let before = snapshot(&store);
+    assert!(store.reserve_attempt(&lease, &reservation).is_err());
+    assert_eq!(before, snapshot(&store));
+    reservation.task_id = TaskId(1);
+    let attempt = store.reserve_attempt(&lease, &reservation).unwrap();
+    let mut event = ScopedEvent {
+        scope,
+        revision_id: reservation.revision_id.clone(),
+        record: meshloop_engine::ports::TransitionRecord {
+            graph_id: reservation.scope.graph_id.as_str().into(),
+            task_id: TaskId(1),
+            attempt_id: Some(attempt.attempt_id),
+            from: TaskState::Ready,
+            to: TaskState::Running,
+            event: Event::AttemptStarted,
+            reason: None,
+            executor: "fixture".into(),
+            occurred_at: "1".into(),
+        },
+    };
+    for (task_id, attempt_id) in [
+        (TaskId(2), Some(attempt.attempt_id)), // Existing task, foreign attempt.
+        (TaskId(67), Some(attempt.attempt_id)), // Unknown task with an attempt.
+        (TaskId(67), None),                    // Unknown task without an attempt.
+    ] {
+        event.record.task_id = task_id;
+        event.record.attempt_id = attempt_id;
+        let before = snapshot(&store);
+        assert!(store.append_scoped_event(&lease, &event).is_err());
+        assert_eq!(before, snapshot(&store));
+    }
+    event.record.task_id = TaskId(1);
+    event.record.attempt_id = Some(attempt.attempt_id);
+    store.append_scoped_event(&lease, &event).unwrap();
+    event.record.task_id = TaskId(2);
+    event.record.attempt_id = None;
+    store.append_scoped_event(&lease, &event).unwrap();
+    assert_eq!(
+        store
+            .scoped_events(&reservation.scope.graph_id, &RunScope::ActiveGeneration)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn b1_runtime_atomic_generations_revision_scopes_and_portable_attempts() {
     use meshloop_domain::task_graph::TaskId;
     use meshloop_engine::workspace::*;
