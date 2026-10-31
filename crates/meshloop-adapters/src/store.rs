@@ -67,6 +67,13 @@ impl SqliteStore {
         attempt: Option<&AttemptRow>,
     ) -> Result<(), StoreError> {
         self.reject_bound_graph(&record.graph_id)?;
+        if let Some(id) = record.attempt_id {
+            self.reject_legacy_attempt(id)?;
+        }
+        if let Some(row) = attempt {
+            self.reject_bound_graph(&row.graph_id)?;
+            self.reject_legacy_attempt(row.attempt_id)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -156,6 +163,7 @@ impl SqliteStore {
         graph_id: &str,
         task_id: TaskId,
     ) -> Result<(), StoreError> {
+        self.reject_bound_graph(graph_id)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -226,6 +234,7 @@ fn parse_plan_state(s: &str) -> Result<PlanState, StoreError> {
 
 impl EvidenceStore for SqliteStore {
     fn record(&mut self, evidence: Evidence) -> Result<(), StoreError> {
+        self.reject_legacy_attempt(evidence.candidate().attempt_id)?;
         let bound_graph: Option<String> = self
             .conn
             .query_row(
@@ -353,6 +362,9 @@ impl RoutingFeedbackStore for SqliteStore {
 impl EventLog for SqliteStore {
     fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
         self.reject_bound_graph(&record.graph_id)?;
+        if let Some(id) = record.attempt_id {
+            self.reject_legacy_attempt(id)?;
+        }
         self.conn
             .execute(
                 "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
@@ -504,6 +516,12 @@ impl RunStore for SqliteStore {
         events: &[TransitionRecord],
     ) -> Result<(), StoreError> {
         self.reject_bound_graph(&row.graph_id)?;
+        for record in events {
+            self.reject_bound_graph(&record.graph_id)?;
+            if let Some(id) = record.attempt_id {
+                self.reject_legacy_attempt(id)?;
+            }
+        }
         let plan_state = match row.plan_state {
             PlanState::AwaitingPlanReview => "AwaitingPlanReview",
             PlanState::PlanAccepted => "PlanAccepted",
@@ -639,6 +657,7 @@ impl RunStore for SqliteStore {
 
     fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
         self.reject_bound_graph(&row.graph_id)?;
+        self.reject_legacy_attempt(row.attempt_id)?;
         self.conn
             .execute(
                 "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
@@ -772,6 +791,7 @@ impl RunStore for SqliteStore {
         pid: Option<u32>,
         image_name: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.reject_legacy_attempt(attempt_id)?;
         let graph: String = self
             .conn
             .query_row(
@@ -795,6 +815,7 @@ impl RunStore for SqliteStore {
         attempt_id: AttemptId,
         pane_id: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.reject_legacy_attempt(attempt_id)?;
         let graph: String = self
             .conn
             .query_row(

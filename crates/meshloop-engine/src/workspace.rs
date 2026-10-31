@@ -130,6 +130,8 @@ impl LifecycleAccess for ReadOnlyLifecycleAccess {
     }
 }
 pub trait RuntimeLedger: WorkspaceLedger {
+    /// Exact migration markers for this run or its persisted attempts; never infer ownership.
+    fn legacy_ownership_unresolved(&self, graph: &GraphId) -> Result<bool, StoreError>;
     /// Invoke once within a consistent read snapshot. Nested calls reuse the
     /// caller's transaction; ending an owned snapshot must propagate failures.
     fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError>;

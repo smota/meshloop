@@ -51,15 +51,25 @@ authorization changes to appear without mixing records from different database s
 
 ### Bounded RunLoop mutation admission (issue #74)
 
-Graph-targeted `RunLoop` mutation entry points check the lifecycle binding before
-filesystem, Git, process or store effects. Pending and active bindings return
-`LegacyOwnershipUnresolved`; lookup errors propagate without legacy fallback.
-This includes start/stage, plan decisions/mutations, tick, resume/restart, cancel,
-human acceptance, integration/deliverable paths and Git export. Unbound runs keep
-the existing legacy path. This is a snapshot admission check, not a cross-process
-fence or complete exclusion of binding changes after the check. It does not cover
-orchestration outside `RunLoop`, activate generations, implement successful bound
-producers or safe cleanup, or complete S3.
+Graph-targeted `RunLoop` mutation entry points check both lifecycle bindings and
+exact `workspace_legacy_unbound` migration markers before filesystem, Git, process
+or store effects. A marker for the original run or any persisted attempt refuses
+with `LegacyOwnershipUnresolved`; query errors propagate without legacy fallback.
+Direct legacy store writes also guard incoming and persisted AttemptIds, including
+mixed-graph event batches, so changing a supplied graph cannot bypass protection.
+CLI mutation entry points perform a read-only preflight before writer composition
+(including gitignore maintenance). Plan adjustment, cancellation and orchestration
+admit before planner ownership, process termination, review pack creation or reviewer
+invocation. Pre-v6 ledgers return `SchemaUpgradeRequired` from this preflight: an
+explicit writer schema migration is required first; mutation commands do not perform
+that migration implicitly. Migration does not adopt ownership. Refusals identify
+the original graph and require explicit ownership adoption, unavailable in this
+milestone. Status, inspect and export remain readable; Git export retains its
+existing bound-run restriction and does not reject unresolved legacy markers.
+Fresh schema6 unmarked, unbound runs keep the existing legacy path.
+This is a snapshot admission check, not a cross-process fence or complete exclusion
+of ownership changes after the check. It does not activate generations, implement
+successful bound producers, adoption or safe cleanup, or complete S3.
 
 ### Bounded provisional planner producer (issue #74)
 

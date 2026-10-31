@@ -2249,3 +2249,164 @@ fn provisional_root_rejects_reparse_ancestor_before_creating_children() {
     assert!(!real.join("child").exists());
     assert!(!lease.manifest.pending_roots.contains_key(&alias));
 }
+
+#[test]
+fn migrated_legacy_mutations_and_attempt_reassignment_preserve_exact_history() {
+    use meshloop_domain::evidence::{CandidateRef, DeterministicEvidence, Evidence};
+    use meshloop_domain::state::{Event, TaskState};
+    use meshloop_domain::task_graph::TaskId;
+    use meshloop_engine::ports::{EventLog, EvidenceStore, StoreError, TransitionRecord};
+    use meshloop_engine::workspace::RuntimeLedger;
+    for marker in ["both", "runs", "attempts"] {
+        let f = Fixture::new();
+        let path = f.base.join("legacy-mutations.sqlite");
+        drop(seeded_v5(&path));
+        let mut store = SqliteStore::open(&path).unwrap();
+        if marker != "both" {
+            store
+                .conn
+                .execute(
+                    "DELETE FROM workspace_legacy_unbound WHERE source_table<>?1",
+                    [marker],
+                )
+                .unwrap();
+        }
+        assert!(
+            store
+                .legacy_ownership_unresolved(&GraphId::new("graph-alpha").unwrap())
+                .unwrap()
+        );
+        assert!(
+            !store
+                .legacy_ownership_unresolved(&GraphId::new("unmarked").unwrap())
+                .unwrap()
+        );
+        let before = history(&store.conn);
+        let markers = rows(&store.conn, "workspace_legacy_unbound");
+        let row = store.load_run("graph-alpha").unwrap().unwrap();
+        let attempt = store.load_attempt(AttemptId(7)).unwrap().unwrap();
+        let event = TransitionRecord {
+            graph_id: "graph-alpha".into(),
+            task_id: TaskId(1),
+            attempt_id: Some(AttemptId(7)),
+            from: TaskState::Ready,
+            to: TaskState::Running,
+            event: Event::AttemptStarted,
+            reason: None,
+            executor: "fixture".into(),
+            occurred_at: "11".into(),
+        };
+        let mut reassigned = attempt.clone();
+        reassigned.graph_id = "unmarked".into();
+        reassigned.pid = Some(1234);
+        let mut foreign = event.clone();
+        foreign.graph_id = "unmarked".into();
+        let mut fresh = row.clone();
+        fresh.graph_id = "unmarked".into();
+        for action in 0..12 {
+            let result = match action {
+                0 => store.save_run(&row),
+                1 => store.save_run_and_events(&row, std::slice::from_ref(&event)),
+                2 => store.append(event.clone()),
+                3 => store.save_attempt(&attempt),
+                4 => store.save_attempt(&reassigned),
+                5 => store.record_transition_and_attempt(foreign.clone(), Some(&reassigned)),
+                6 => store.save_run_and_events(&fresh, &[foreign.clone()]),
+                7 => store.update_attempt_pid(AttemptId(7), Some(1234), Some("changed")),
+                8 => store.update_attempt_pane(AttemptId(7), Some("changed")),
+                9 => store.reset_graph_execution("graph-alpha"),
+                10 => store.record(Evidence::Deterministic(DeterministicEvidence {
+                    candidate: CandidateRef {
+                        task_id: TaskId(1),
+                        attempt_id: AttemptId(7),
+                        revision: "revision".into(),
+                    },
+                    tool: "fixture".into(),
+                    tool_version: "1".into(),
+                    exit_code: 0,
+                    output_redacted: "unchanged".into(),
+                })),
+                11 => store.save_run_and_events(&fresh, std::slice::from_ref(&event)),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                result,
+                Err(StoreError::LegacyOwnershipUnresolved),
+                "{marker} action {action}"
+            );
+            assert_eq!(before, history(&store.conn), "{marker} action {action}");
+            assert_eq!(markers, rows(&store.conn, "workspace_legacy_unbound"));
+        }
+        assert!(store.load_run("graph-alpha").unwrap().is_some());
+        assert_eq!(store.attempts_for_graph("graph-alpha").unwrap().len(), 1);
+        assert_eq!(store.records_for_graph("graph-alpha").unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn legacy_marker_lookup_failure_and_detached_attempt_marker_fail_closed() {
+    use meshloop_domain::evidence::{CandidateRef, DeterministicEvidence, Evidence};
+    use meshloop_domain::task_graph::TaskId;
+    use meshloop_engine::ports::{EvidenceStore, StoreError};
+    use meshloop_engine::workspace::RuntimeLedger;
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO workspace_legacy_unbound VALUES('attempts','7','Unresolved')",
+            [],
+        )
+        .unwrap();
+    let evidence = Evidence::Deterministic(DeterministicEvidence {
+        candidate: CandidateRef {
+            task_id: TaskId(1),
+            attempt_id: AttemptId(7),
+            revision: "r".into(),
+        },
+        tool: "fixture".into(),
+        tool_version: "1".into(),
+        exit_code: 0,
+        output_redacted: "none".into(),
+    });
+    assert_eq!(
+        store.record(evidence),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    assert!(rows(&store.conn, "evidence").is_empty());
+    store
+        .conn
+        .execute("DROP TABLE workspace_legacy_unbound", [])
+        .unwrap();
+    assert!(
+        store
+            .legacy_ownership_unresolved(&GraphId::new("graph-alpha").unwrap())
+            .is_err()
+    );
+    assert!(store.save_run(&run()).is_err());
+    assert!(rows(&store.conn, "runs").is_empty());
+}
+
+#[test]
+fn bound_existing_attempt_cannot_be_reassigned_to_unmarked_graph() {
+    use meshloop_engine::ports::StoreError;
+    let f = Fixture::new();
+    let legacy = SqliteStore::open(&f.ledger).unwrap();
+    legacy
+        .conn
+        .execute(
+            "INSERT INTO attempts(attempt_id,graph_id,task_id) VALUES(7,'graph-alpha',1)",
+            [],
+        )
+        .unwrap();
+    drop(legacy);
+    let (mut store, _lease, _activation) = runtime_fixture(&f);
+    let before = history(&store.conn);
+    let mut attempt = store.load_attempt(AttemptId(7)).unwrap().unwrap();
+    attempt.graph_id = "fresh".into();
+    attempt.pid = Some(1234);
+    assert_eq!(
+        store.save_attempt(&attempt),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    assert_eq!(before, history(&store.conn));
+}
