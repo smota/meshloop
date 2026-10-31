@@ -50,6 +50,12 @@ impl HarnessCapabilities for DispatchHarness {
         }
     }
 
+    fn try_collect(&self, handle: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.try_collect(handle),
+        }
+    }
+
     fn session_live(&self, handle: &HarnessHandle) -> meshloop_engine::ports::LiveCheck {
         match self {
             Self::Fixture(h) | Self::Direct(h) => h.session_live(handle),
@@ -308,5 +314,54 @@ mod tests {
             assert!(matches!(harness, DispatchHarness::Direct(_)));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod collection_delegation_tests {
+    use super::*;
+    #[test]
+    fn dispatch_harness_try_collect_does_not_delegate_to_blocking_collect() {
+        #[cfg(windows)]
+        let (executable, invoke_args_template) = (
+            PathBuf::from("powershell.exe"),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 30".into(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (executable, invoke_args_template) = (
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "sleep 30".into()],
+        );
+        let dir =
+            std::env::temp_dir().join(format!("meshloop-dispatch-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let harness = DispatchHarness::Direct(CliHarness::new(CliHarnessConfig {
+            name: "fixture".into(),
+            executable,
+            version_args: vec!["--version".into()],
+            probe_timeout: Duration::from_secs(5),
+            invoke_args_template,
+        }));
+        let spec = AgentSpec {
+            task_id: meshloop_domain::task_graph::TaskId(1),
+            attempt_id: meshloop_domain::evidence::AttemptId(99),
+            harness: "fixture".into(),
+            model_ref: "fixture".into(),
+            worktree_path: dir.clone(),
+            prompt: "test".into(),
+            timeout: Duration::from_secs(5),
+        };
+        let handle = harness.invoke(&spec).unwrap();
+        let start = std::time::Instant::now();
+        let result = harness.try_collect(&handle);
+        let elapsed = start.elapsed();
+        harness.cancel(&handle).unwrap();
+        assert!(result.unwrap().is_none());
+        assert!(elapsed < Duration::from_secs(1), "poll took {elapsed:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

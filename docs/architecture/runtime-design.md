@@ -456,3 +456,24 @@ via domain event `Event::GraphMutated`:
 **Operator governance.** If invoked with `--require-review`, `RunLoop::mutate_plan` transitions the
 run to `PlanState::AwaitingPlanReview`. `meshloop resume` is refused until the operator accepts the
 modified plan via `meshloop review-plan --plan .meshloop/plan.json --accept --as <identity>`.
+
+### Bounded CLI harness output collection
+
+CLI invocation and version probes drain stdout and stderr concurrently. Each stream
+retains at most 4 MiB; overflow, read failure, invalid UTF-8 or reader failure is a
+capture fault. The existing 2048-byte redacted outcome limit remains in effect;
+large planner JSON uses its protected owned plan file. Sixteen capture pairs are
+admitted process-wide before spawn (at most 32 reader threads and 128 MiB of retained
+stream bytes, excluding ordinary transient parsing/redaction allocations). Both
+workers and capture state retain admission until released. Escaped external writers
+holding a pipe can consume a slot even after harness destruction; subsequent harness
+instances refuse new admission when capacity is exhausted. This bounds accumulation,
+without promising termination of an escaped writer. Probes share the admission budget.
+
+Polling never reads a pipe or joins an unfinished reader under the harness registry
+mutex. The CLI dispatch wrapper delegates nonblocking collection. Owned handles remain
+available through output collection so deadline failure can terminate owned descendants.
+Pending pipe EOF at the deadline reports an explicit EOF timeout; a still-running leader
+reports the existing attempt Timeout. Existing cancellation remains best effort and does
+not prove process tree quiescence. Public provisional driver cancellation and full S3
+producer/recovery integration remain outstanding.

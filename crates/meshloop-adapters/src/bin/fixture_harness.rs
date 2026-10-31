@@ -7,6 +7,41 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--large-output") => {
+            use std::io::Write;
+            let n: usize = args
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(128 * 1024);
+            let stderr = std::thread::spawn(move || {
+                let _ = std::io::stderr().write_all(&vec![b'e'; n]);
+            });
+            let _ = std::io::stdout().write_all(&vec![b'x'; n]);
+            let _ = stderr.join();
+        }
+        Some("--emit-large-graph") => {
+            use std::io::Write;
+            let noise = std::thread::spawn(|| {
+                let _ = std::io::stderr().write_all(&vec![b'e'; 128 * 1024]);
+            });
+            let json = format!(
+                "{}{{\"graph_id\":\"large-planner\",\"nodes\":[{{\"id\":1,\"description\":\"task\",\"depends_on\":[],\"tier\":null}}]}}",
+                " ".repeat(128 * 1024)
+            );
+            fs::write("meshloop-plan.json", &json).expect("write owned fixture plan");
+            print!("{json}");
+            let _ = noise.join();
+        }
+        Some("--exit-with-inherited-pipes") => {
+            #[allow(
+                clippy::zombie_processes,
+                reason = "fixture descendant tests inherited pipe lifetime"
+            )]
+            let _child = std::process::Command::new(env::current_exe().expect("fixture path"))
+                .args(["--sleep-ms", "2000"])
+                .spawn()
+                .expect("spawn inherited writer");
+        }
         Some("--version") => println!("fixture-harness 1.0.0"),
         Some("--hang") => loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));

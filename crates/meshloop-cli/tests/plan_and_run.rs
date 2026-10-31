@@ -3040,3 +3040,32 @@ fn provisional_planning_failed_probe_private_detail_is_absent_from_stderr() {
     assert!(!dir.join("result.json").exists());
     assert!(planning_owners(&dir).is_empty());
 }
+
+#[test]
+fn provisional_planning_large_simultaneous_output_completes_and_retains_owned_plan() {
+    let dir = disposable_repo("owned-large-pipes");
+    let config = write_config(&dir, r#"["--emit-large-graph"]"#);
+    let result = invoke_owned_plan(&dir, &config);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(graph["graph_id"], "large-planner");
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 2);
+    let raw = fs::read(owned_plan_path(&dir, &owners[1])).unwrap();
+    assert!(raw.len() > 128 * 1024);
+    let retained: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(retained["graph_id"], "large-planner");
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    let generations: i64 = db
+        .query_row("SELECT COUNT(*) FROM workspace_generations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(generations, 0);
+    fs::remove_dir_all(dir).ok();
+}
