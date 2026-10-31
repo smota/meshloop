@@ -8,7 +8,13 @@
 - Decision owner: Samuel
 - Approval evidence: operator could not re-run `awesome-landscape-v1` after FailedTerminal without changing `graph_id`; they asked to start over without replanning
 - Supersedes: none
-- Superseded by: none
+- Superseded by: [ADR 0033](0033-workspace-lifecycle.md), accepted 2026-10-28, for worktree placement and destructive history-reset semantics only; the original decision below is retained as history
+
+ADR 0033 requires new generations that retain earlier events, attempts and evidence,
+and capability-probed nested placement or an explicitly configured external root.
+Its implementation is not-started; this partial supersession does not claim a
+runtime change. Explicit restart authorization and the remaining ADR 0021 contract
+are preserved.
 
 ## Context
 `graph_id` keys both the accepted plan and the saga attempts. After a failed wave

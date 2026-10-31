@@ -15,30 +15,45 @@ use meshloop_engine::ports::{
     RoutingFeedbackStore, RunRow, RunStore, StoreError, TransitionRecord,
 };
 
-const SCHEMA_VERSION: i64 = 4;
-
 pub struct SqliteStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
+    pub(crate) database_handle: Option<same_file::Handle>,
+    pub(crate) database_identity: Option<meshloop_domain::workspace::NativeIdentity>,
 }
 
 impl SqliteStore {
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory().map_err(|e| StoreError::Io(e.to_string()))?;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         Self::migrate(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            database_handle: None,
+            database_identity: None,
+        })
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| StoreError::Io(e.to_string()))?;
         }
+        let (database_handle, database_identity) = crate::workspace::pin_database(path)?;
         let conn = Connection::open(path).map_err(|e| StoreError::Io(e.to_string()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StoreError::Io(e.to_string()))?;
+        crate::workspace::verify_handle(&database_handle, path)?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| StoreError::Io(e.to_string()))?;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
         Self::migrate(&conn)?;
-        Ok(Self { conn })
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        crate::workspace::verify_handle(&database_handle, path)?;
+        Ok(Self {
+            conn,
+            database_handle: Some(database_handle),
+            database_identity: Some(database_identity),
+        })
     }
 
     /// Atomically records a state transition event and upserts attempt metadata under an
@@ -153,122 +168,8 @@ impl SqliteStore {
     }
 
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS evidence (
-                 task_id INTEGER NOT NULL,
-                 attempt_id INTEGER NOT NULL,
-                 revision TEXT NOT NULL,
-                 kind TEXT NOT NULL,
-                 payload_json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS routing_feedback (
-                 harness TEXT NOT NULL,
-                 model_ref TEXT NOT NULL,
-                 tier TEXT NOT NULL,
-                 success_count INTEGER NOT NULL DEFAULT 0,
-                 failure_count INTEGER NOT NULL DEFAULT 0,
-                 PRIMARY KEY (harness, model_ref, tier)
-             );
-             CREATE TABLE IF NOT EXISTS events (
-                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 graph_id TEXT NOT NULL,
-                 task_id INTEGER NOT NULL,
-                 attempt_id INTEGER,
-                 from_state TEXT NOT NULL,
-                 to_state TEXT NOT NULL,
-                 event_type TEXT NOT NULL,
-                 reason TEXT,
-                 executor TEXT NOT NULL,
-                 evidence_ref TEXT,
-                 occurred_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS runs (
-                 graph_id TEXT PRIMARY KEY,
-                 plan_state TEXT NOT NULL,
-                 run_base TEXT NOT NULL,
-                 integrate_ref TEXT NOT NULL,
-                 plan_json TEXT NOT NULL,
-                 plan_sha256 TEXT NOT NULL,
-                 created_at TEXT NOT NULL,
-                 review_note TEXT
-             );
-             CREATE TABLE IF NOT EXISTS attempts (
-                 attempt_id INTEGER PRIMARY KEY,
-                 graph_id TEXT NOT NULL,
-                 task_id INTEGER NOT NULL,
-                 harness TEXT,
-                 model_ref TEXT,
-                 worktree_path TEXT,
-                 pid INTEGER,
-                 image_name TEXT,
-                 started_at TEXT,
-                 ended_at TEXT,
-                 outcome TEXT,
-                 pane_id TEXT
-             );
-             CREATE TABLE IF NOT EXISTS quota_state (
-                 harness TEXT PRIMARY KEY,
-                 breaker TEXT NOT NULL,
-                 opened_at TEXT,
-                 cooldown_ms INTEGER NOT NULL
-             );",
-        )
-        .map_err(|e| StoreError::Io(e.to_string()))?;
-
-        if !column_exists(conn, "attempts", "pane_id")? {
-            conn.execute("ALTER TABLE attempts ADD COLUMN pane_id TEXT", [])
-                .map_err(|e| StoreError::Io(e.to_string()))?;
-        }
-        if !column_exists(conn, "runs", "review_note")? {
-            conn.execute("ALTER TABLE runs ADD COLUMN review_note TEXT", [])
-                .map_err(|e| StoreError::Io(e.to_string()))?;
-        }
-
-        let existing: Option<i64> = conn
-            .query_row("SELECT version FROM schema_meta LIMIT 1", [], |r| r.get(0))
-            .optional()
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-
-        match existing {
-            None => {
-                conn.execute(
-                    "INSERT INTO schema_meta (version) VALUES (?1)",
-                    params![SCHEMA_VERSION],
-                )
-                .map_err(|e| StoreError::Io(e.to_string()))?;
-            }
-            Some(v) if v > SCHEMA_VERSION => {
-                return Err(StoreError::Corrupt(format!(
-                    "on-disk schema version {v} is newer than this build supports ({SCHEMA_VERSION})"
-                )));
-            }
-            Some(v) if v < SCHEMA_VERSION => {
-                conn.execute(
-                    "UPDATE schema_meta SET version = ?1",
-                    params![SCHEMA_VERSION],
-                )
-                .map_err(|e| StoreError::Io(e.to_string()))?;
-            }
-            Some(_) => {}
-        }
-        Ok(())
+        crate::workspace::schema::migrate(conn)
     }
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|e| StoreError::Io(e.to_string()))?;
-    let names = stmt
-        .query_map([], |r| r.get::<_, String>(1))
-        .map_err(|e| StoreError::Io(e.to_string()))?;
-    for name in names {
-        if name.map_err(|e| StoreError::Io(e.to_string()))? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn parse_state(s: &str) -> Result<TaskState, StoreError> {
