@@ -96,9 +96,46 @@ absolute paths. Filesystem failures propagate as stable public errors.
 Successful collection completes Spawn; only a validated successful output completes
 Plan. Rejected output blocks Plan with a stable classification and may use the
 bounded validation retry budget. Invoke/collect failures leave their intents
-unresolved and stop retries. Full process identity, cancellation, driver control,
-recovery and crash reconciliation remain outstanding; these records are not proof
-that an uncertain process tree has stopped. This milestone is not full S3 acceptance.
+unresolved and stop retries. Recovery and crash reconciliation remain outstanding;
+these records are not proof that an uncertain process tree has stopped. This
+milestone is not full S3 acceptance.
+
+Each real provisional planning attempt registers its own immutable driver before
+invocation, then retains the repository fence while polling control requests and
+explicitly nonblocking harness collection every 100 ms. The process identity is
+the current Meshloop owner PID and OS creation identity: Windows creation FILETIME,
+or Linux boot ID plus `/proc/self/stat` start ticks. The tree token is the driver's
+nonce ownership marker, never a fabricated OS process group. Other platforms, or
+adapters without explicit nonblocking collection, expose `driver-control-unavailable`
+and preserve existing owned planning without offering cancellation control.
+Actual identity-probe errors on supported platforms fail closed before invoke.
+
+`status --drivers` and `inspect --driver <id>` observe the existing ledger without
+requiring a graph or acquiring its writer registry fence. They expose portable
+driver identity/phase and at most the latest 64 cancellation observations; SQLite
+sidecar effects follow ADR 0034. Absent ledgers stay absent. `cancel --driver <id>`
+is exclusive with graph, session and task selectors. It opens only the narrow
+`CancellationClient`, enqueues an exact driver/owner/process request and polls the
+acknowledgement at 100 ms intervals for at most five seconds. Its returned Pending
+status is not success or proof of termination. At most 64 requests may be pending
+per driver. Repeating an exact request returns its existing durable status,
+including after terminal Applied; new requests for terminal/stale drivers refuse.
+
+Only the driver owning the retained harness can act. Windows Applied requires
+that exact retained job's successful termination, observed direct-child exit,
+zero active job processes and a successful fenced acknowledgement write. Registry
+ownership is reserved by the same token while native waiting occurs outside its
+mutex; concurrent removal cannot resurrect an old attempt. No recorded-PID or
+legacy cancellation fallback participates. Unavailable or failed proof returns
+Blocked. POSIX attempts best-effort cleanup only of the retained unreaped owner
+and returns Blocked; it makes no complete-tree proof claim. The driver retains
+ownership through subsequent collection/timeout, and never retries that attempt.
+Post-invoke errors also attempt exact retained-owner cleanup, preserving unresolved
+intents. A failed acknowledgement leaves Pending and reports the stable
+`planner-cancellation-ack-failed` error. Normal completion first publishes its
+terminal phase, then acknowledges requests committed before that transition as
+Stale; it never infers Applied from completion. Worktrees and output are retained.
+Other producer control, accepted-generation activation and full S3 remain excluded.
 
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
@@ -475,8 +512,8 @@ mutex. The CLI dispatch wrapper delegates nonblocking collection. Owned handles 
 available through output collection so deadline failure can terminate owned descendants.
 Pending pipe EOF at the deadline reports an explicit EOF timeout; a still-running leader
 reports the existing attempt Timeout. Existing cancellation remains best effort and does
-not prove process tree quiescence. Public provisional driver cancellation and full S3
-producer/recovery integration remain outstanding.
+not prove process tree quiescence. The separate strict provisional-driver contract
+is described above; full S3 producer/recovery integration remains outstanding.
 
 ### Atomic owned Windows startup (ADR 0035)
 

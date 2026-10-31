@@ -381,6 +381,13 @@ struct PendingRoot {
     child: RelativePath,
 }
 impl meshloop_engine::workspace::LifecycleAccess for RepositoryLease {
+    fn owner_process_identity(
+        &self,
+        nonce: &LifecycleId,
+    ) -> Result<Option<ProcessIdentity>, StoreError> {
+        self.validate()?;
+        crate::process::current_process_identity(nonce).map_err(io_refused)
+    }
     fn new_id(&mut self) -> Result<LifecycleId, StoreError> {
         self.validate()?;
         LifecycleId::new(uuid::Uuid::new_v4().to_string()).map_err(|_| refused())

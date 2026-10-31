@@ -39,6 +39,58 @@ fn spec(worktree: PathBuf, attempt: u32) -> AgentSpec {
 }
 
 #[test]
+fn owned_cancellation_refuses_forged_handles_and_never_falls_back_to_pid() {
+    let dir = std::env::temp_dir().join(format!(
+        "meshloop-strict-owned-cancel-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(5),
+        invoke_args_template: vec!["--hang".into()],
+    });
+    let handle = harness.invoke(&spec(dir.clone(), 501)).unwrap();
+    let mut unrelated = meshloop_adapters::process::spawn_command(
+        std::process::Command::new(fixture_path()).args(["--sleep-ms", "10000"]),
+    )
+    .unwrap();
+    let mut forged = handle.clone();
+    forged.pid = Some(unrelated.id());
+    assert!(
+        harness
+            .cancel_owned(&forged, Duration::from_secs(1))
+            .is_err()
+    );
+    forged.attempt_id = AttemptId(502);
+    assert!(
+        harness
+            .cancel_owned(&forged, Duration::from_secs(1))
+            .is_err()
+    );
+    assert!(harness.try_collect(&handle).unwrap().is_none());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    let proof = harness.cancel_owned(&handle, Duration::from_secs(2));
+    #[cfg(windows)]
+    assert!(proof.is_ok());
+    #[cfg(not(windows))]
+    assert!(proof.is_err(), "POSIX best effort cannot prove Applied");
+    assert!(
+        harness
+            .cancel_owned(&handle, Duration::from_secs(1))
+            .is_err(),
+        "strict cancellation must never retry an already-attempted termination"
+    );
+    assert!(unrelated.try_wait().unwrap().is_none());
+    let _ = harness.collect(&handle);
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn probe_reports_the_fixtures_real_reported_version() {
     let harness = CliHarness::new(CliHarnessConfig {
         name: "fixture".into(),

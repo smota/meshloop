@@ -101,6 +101,14 @@ pub struct GenerationActivation {
 }
 /// Required writer capability. Read-only access has no successful mutation path.
 pub trait LifecycleAccess {
+    /// Actual current owner identity. `tree_token` is the retained driver's nonce
+    /// ownership marker, not an OS process-group identifier.
+    fn owner_process_identity(
+        &self,
+        _nonce: &LifecycleId,
+    ) -> Result<Option<ProcessIdentity>, StoreError> {
+        Ok(None)
+    }
     fn new_id(&mut self) -> Result<LifecycleId, StoreError>;
     fn fence(&self) -> Result<&dyn RepositoryFence, StoreError>;
     fn resolve(&self, location: &PortableLocation) -> Result<std::path::PathBuf, StoreError>;

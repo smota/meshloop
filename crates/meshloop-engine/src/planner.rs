@@ -45,6 +45,7 @@ fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, 
 
 #[derive(Debug)]
 pub enum PlanError {
+    Control(&'static str),
     Ownership(StoreError),
     Preservation,
     Dispatch(HarnessError),
@@ -62,6 +63,7 @@ pub enum PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PlanError::Control(code) => write!(f, "{code}"),
             PlanError::Ownership(_) => write!(f, "planner-ownership-failed"),
             PlanError::Preservation => write!(f, "planner-preservation-failed"),
             PlanError::Dispatch(_) => write!(f, "planner-dispatch-unresolved"),
@@ -238,8 +240,7 @@ pub(crate) fn decompose_owned(
         access.fence().map_err(owned)?.validate().map_err(owned)?;
         // Neither invoke nor collect failures prove the process tree is quiescent.
         // Leave both intents unresolved and do not salvage or retry uncertain effects.
-        let handle = harness.invoke(&attempt_spec).map_err(PlanError::Dispatch)?;
-        let outcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
+        let outcome = collect_with_driver(harness, &attempt_spec, &owner, store, access)?;
         // Preserve stdout-only output locally before validating. A producer-written
         // file always wins and is never overwritten, including malformed output.
         let output_path = access.resolve(&output_owner.location).map_err(owned)?;
@@ -303,6 +304,188 @@ pub(crate) fn decompose_owned(
         }
     }
     unreachable!("at least one planning attempt")
+}
+
+/// A driver belongs to one attempt because its provisional target is immutable.
+/// The repository fence remains borrowed throughout invocation, polling and ack.
+fn collect_with_driver(
+    harness: &dyn HarnessCapabilities,
+    spec: &AgentSpec,
+    owner: &ProvisionalOwner,
+    store: &mut dyn RunStore,
+    access: &mut dyn LifecycleAccess,
+) -> Result<HarnessOutcome, PlanError> {
+    use std::time::Duration;
+    let nonce = access.new_id().map_err(PlanError::Ownership)?;
+    let process = access
+        .owner_process_identity(&nonce)
+        .map_err(PlanError::Ownership)?;
+    let controlled = process.is_some() && harness.supports_nonblocking_collection();
+    let mut driver = DriverRecord {
+        id: access.new_id().map_err(PlanError::Ownership)?,
+        nonce,
+        target: DriverTarget::Provisional {
+            repository_id: owner.repository_id.clone(),
+            owner_id: owner.id.clone(),
+        },
+        process,
+        phase: if controlled {
+            DriverPhase::Starting
+        } else {
+            DriverPhase::Blocked
+        },
+        heartbeat: 0,
+        error_code: if controlled {
+            None
+        } else {
+            Some(
+                LifecycleId::new("driver-control-unavailable")
+                    .map_err(|_| PlanError::Preservation)?,
+            )
+        },
+        diagnostic: None,
+    };
+    store
+        .register_driver(access.fence().map_err(PlanError::Ownership)?, &driver)
+        .map_err(PlanError::Ownership)?;
+    let mut retained_handle = None;
+    let mut cancellation_attempted = false;
+    let result = (|| {
+        let handle = harness.invoke(spec).map_err(PlanError::Dispatch)?;
+        retained_handle = Some(handle.clone());
+        if !controlled {
+            return harness.collect(&handle).map_err(PlanError::Dispatch);
+        }
+        driver.phase = DriverPhase::Running;
+        store
+            .update_driver(access.fence().map_err(PlanError::Ownership)?, &driver)
+            .map_err(PlanError::Ownership)?;
+        let mut blocked = false;
+        loop {
+            access
+                .fence()
+                .map_err(PlanError::Ownership)?
+                .validate()
+                .map_err(PlanError::Ownership)?;
+            let requests = store
+                .cancellation_requests(&driver.id)
+                .map_err(PlanError::Ownership)?;
+            for observation in requests
+                .into_iter()
+                .take(64)
+                .filter(|r| r.status == CancellationStatus::Pending)
+            {
+                let request = observation.request;
+                let exact = request.process
+                    == driver
+                        .process
+                        .clone()
+                        .ok_or(PlanError::Control("driver-identity-unavailable"))?
+                    && request.target
+                        == CancellationTarget::Provisional {
+                            repository_id: owner.repository_id.clone(),
+                            owner_id: owner.id.clone(),
+                            driver_id: driver.id.clone(),
+                        }
+                    && access
+                        .owner_process_identity(&driver.nonce)
+                        .map_err(PlanError::Ownership)?
+                        == driver.process;
+                let status = if !exact {
+                    CancellationStatus::Stale
+                } else {
+                    cancellation_attempted = true;
+                    if harness
+                        .cancel_owned(&handle, Duration::from_secs(2))
+                        .is_ok()
+                    {
+                        CancellationStatus::Applied
+                    } else {
+                        CancellationStatus::Blocked
+                    }
+                };
+                // Only this successful fenced commit makes a proof an Applied ack.
+                store
+                    .acknowledge_cancellation(
+                        access.fence().map_err(PlanError::Ownership)?,
+                        &request.id,
+                        status,
+                    )
+                    .map_err(|_| PlanError::Control("planner-cancellation-ack-failed"))?;
+                if status == CancellationStatus::Applied {
+                    return Err(PlanError::Control("planner-cancelled"));
+                }
+                if status == CancellationStatus::Blocked {
+                    // Keep the retained owner alive until normal collection or
+                    // its existing timeout. In particular, a POSIX Child drop
+                    // does not terminate its process group. Never retry this
+                    // attempt even if its eventual output is valid.
+                    blocked = true;
+                    driver.error_code = Some(
+                        LifecycleId::new("planner-cancellation-blocked")
+                            .map_err(|_| PlanError::Preservation)?,
+                    );
+                }
+            }
+            if let Some(outcome) = harness.try_collect(&handle).map_err(PlanError::Dispatch)? {
+                return if blocked {
+                    Err(PlanError::Control("planner-cancellation-blocked"))
+                } else {
+                    Ok(outcome)
+                };
+            }
+            driver.heartbeat = driver.heartbeat.saturating_add(1);
+            store
+                .update_driver(access.fence().map_err(PlanError::Ownership)?, &driver)
+                .map_err(PlanError::Ownership)?;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    })();
+    if result.is_err()
+        && !cancellation_attempted
+        && !matches!(result, Err(PlanError::Control("planner-cancelled")))
+        && let Some(handle) = retained_handle.as_ref()
+    {
+        // Fence/persistence/identity errors can occur after launch too. Only the
+        // exact retained-owner port may perform best-effort unwind cleanup;
+        // its result is not an acknowledgement, and unresolved intent stays.
+        let _cleanup = harness.cancel_owned(handle, Duration::from_secs(2));
+    }
+    driver.phase = match &result {
+        Ok(_) | Err(PlanError::Control("planner-cancelled")) => DriverPhase::Exited,
+        Err(_) => DriverPhase::Blocked,
+    };
+    if let Err(error) = &result {
+        driver.error_code = Some(
+            LifecycleId::new(match error {
+                PlanError::Control(code) => *code,
+                _ => "planner-driver-unresolved",
+            })
+            .map_err(|_| PlanError::Preservation)?,
+        );
+    }
+    // A failed terminal write is also uncertain; never continue validation/retry.
+    store
+        .update_driver(access.fence().map_err(PlanError::Ownership)?, &driver)
+        .map_err(|_| PlanError::Control("planner-driver-update-failed"))?;
+    if result.is_ok() {
+        // Enqueue and the terminal phase update serialize in SQLite. Requests
+        // committed before that transition are drained after it; later enqueue
+        // is refused. Normal completion is never retroactively called Applied.
+        for observation in store
+            .cancellation_requests(&driver.id)
+            .map_err(PlanError::Ownership)?
+        {
+            store
+                .acknowledge_cancellation(
+                    access.fence().map_err(PlanError::Ownership)?,
+                    &observation.request.id,
+                    CancellationStatus::Stale,
+                )
+                .map_err(|_| PlanError::Control("planner-cancellation-ack-failed"))?;
+        }
+    }
+    result
 }
 
 fn planning_intent(

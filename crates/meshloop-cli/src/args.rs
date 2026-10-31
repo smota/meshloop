@@ -24,6 +24,7 @@ pub enum Command {
         db: Option<PathBuf>,
     },
     Status {
+        drivers: bool,
         graph: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
@@ -69,6 +70,7 @@ pub enum Command {
         fixture_only: bool,
     },
     Cancel {
+        driver: Option<String>,
         graph: Option<String>,
         task: Option<u32>,
         session_id: Option<String>,
@@ -77,6 +79,7 @@ pub enum Command {
         worktree_base: Option<PathBuf>,
     },
     Inspect {
+        driver: Option<String>,
         task: Option<u32>,
         graph: Option<String>,
         session_id: Option<String>,
@@ -153,6 +156,18 @@ pub fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
 
+fn driver_selector(args: &[String]) -> Result<Option<String>, String> {
+    let driver = flag_value(args, "--driver");
+    if driver.is_some()
+        && ["--graph", "--session-id", "--task"]
+            .iter()
+            .any(|flag| has_flag(args, flag))
+    {
+        return Err("--driver is mutually exclusive with --graph, --session-id and --task".into());
+    }
+    Ok(driver)
+}
+
 fn verb(raw: &str) -> String {
     MeshloopId::parse(raw)
         .map(|id| id.cli_verb().to_string())
@@ -221,7 +236,12 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (false, "--fixture-only"),
             (false, "--detach"),
         ],
-        "status" => &[(true, "--graph"), (true, "--config"), (true, "--db")],
+        "status" => &[
+            (false, "--drivers"),
+            (true, "--graph"),
+            (true, "--config"),
+            (true, "--db"),
+        ],
         "resume" => &[
             (true, "--graph"),
             (false, "--retry"),
@@ -232,6 +252,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (false, "--fixture-only"),
         ],
         "cancel" => &[
+            (true, "--driver"),
             (true, "--session-id"),
             (true, "--graph"),
             (true, "--task"),
@@ -240,6 +261,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--worktree-base"),
         ],
         "inspect" => &[
+            (true, "--driver"),
             (true, "--session-id"),
             (true, "--graph"),
             (true, "--task"),
@@ -338,6 +360,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
     }
     match args.first().map(|s| verb(s)) {
         None => Ok(Command::Status {
+            drivers: false,
             graph: None,
             config: None,
             db: None,
@@ -430,11 +453,17 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 detach: has_flag(rest, "--detach"),
             })
         }
-        Some(v) if v == "status" => Ok(Command::Status {
-            graph: flag_value(&args[1..], "--graph"),
-            config: flag_value(&args[1..], "--config").map(PathBuf::from),
-            db: flag_value(&args[1..], "--db").map(PathBuf::from),
-        }),
+        Some(v) if v == "status" => {
+            if has_flag(&args[1..], "--drivers") && has_flag(&args[1..], "--graph") {
+                return Err("--drivers is mutually exclusive with --graph".into());
+            }
+            Ok(Command::Status {
+                drivers: has_flag(&args[1..], "--drivers"),
+                graph: flag_value(&args[1..], "--graph"),
+                config: flag_value(&args[1..], "--config").map(PathBuf::from),
+                db: flag_value(&args[1..], "--db").map(PathBuf::from),
+            })
+        }
         Some(v) if v == "resume" => {
             let rest = &args[1..];
             let retry = has_flag(rest, "--retry");
@@ -454,9 +483,11 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }
         Some(v) if v == "cancel" => {
             let rest = &args[1..];
+            let driver = driver_selector(rest)?;
             let session_id = flag_value(rest, "--session-id");
             let graph = flag_value(rest, "--graph").or_else(|| session_id.clone());
             Ok(Command::Cancel {
+                driver,
                 graph,
                 task: flag_value(rest, "--task").and_then(|s| s.parse().ok()),
                 session_id,
@@ -467,10 +498,15 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
         }
         Some(v) if v == "inspect" => {
             let rest = &args[1..];
+            let driver = driver_selector(rest)?;
+            if driver.is_some() && has_flag(rest, "--attempts") {
+                return Err("--driver is mutually exclusive with --attempts".into());
+            }
             let session_id = flag_value(rest, "--session-id");
             let graph = flag_value(rest, "--graph").or_else(|| session_id.clone());
             let task = flag_value(rest, "--task").and_then(|s| s.parse().ok());
             Ok(Command::Inspect {
+                driver,
                 task,
                 graph,
                 session_id,
@@ -621,7 +657,9 @@ pub fn help_text() -> &'static str {
      \x20 meshloop review-plan --plan <path> --accept|--decline|--adjust [--reason] [--as] [--json]\n\
      \x20 meshloop run --plan <path> [--accept-plan] [--reset] [--fixture-only] [--json]\n\
      \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
-     \x20 meshloop status [--graph <id>] [--config <path>] [--db <path>] [--json]\n\
+     \x20 meshloop status [--graph <id>|--drivers] [--config <path>] [--db <path>] [--json]\n\
+     \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
+     \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
@@ -636,6 +674,22 @@ pub fn help_text() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn driver_selectors_are_exclusive_and_discoverable_without_graph() {
+        for verb in ["cancel", "inspect"] {
+            for selector in ["--graph", "--session-id", "--task"] {
+                let args = [verb, "--driver", "driver-id", selector, "1"].map(String::from);
+                assert!(
+                    super::parse(&args)
+                        .unwrap_err()
+                        .contains("mutually exclusive")
+                );
+            }
+            assert!(super::parse(&[verb, "--driver", "driver-id"].map(String::from)).is_ok());
+        }
+        assert!(super::parse(&["status", "--drivers"].map(String::from)).is_ok());
+        assert!(super::parse(&["status", "--drivers", "--graph", "g"].map(String::from)).is_err());
+    }
     use super::*;
 
     #[test]
@@ -646,7 +700,9 @@ mod tests {
             .collect();
         let inv = parse(&args).expect("parse");
         match inv.command {
-            Command::Status { graph, config, db } => {
+            Command::Status {
+                graph, config, db, ..
+            } => {
                 assert_eq!(graph.as_deref(), Some("g"));
                 assert_eq!(config, Some(PathBuf::from("x")));
                 assert_eq!(db, Some(PathBuf::from("y")));

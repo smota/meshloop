@@ -48,6 +48,23 @@ pub use detach::spawn_detached;
 pub use job::{OwnedChild, OwnedTermination, spawn_owned};
 pub use owned_spawn::{OwnedSpawnSpec, OwnedStdio};
 
+/// Identity of this owner process only; never opens or terminates an arbitrary PID.
+pub fn current_process_identity(
+    nonce: &meshloop_domain::workspace::LifecycleId,
+) -> std::io::Result<Option<meshloop_domain::workspace::ProcessIdentity>> {
+    use meshloop_domain::workspace::{LifecycleId, ProcessIdentity};
+    job::current_creation_token()?
+        .map(|token| {
+            Ok(ProcessIdentity {
+                pid: std::process::id(),
+                creation_token: LifecycleId::new(token)
+                    .map_err(|_| std::io::Error::other("driver-creation-identity-failed"))?,
+                tree_token: nonce.clone(),
+            })
+        })
+        .transpose()
+}
+
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
 /// Keeps a child from getting a console window of its own. A console-less parent (such as

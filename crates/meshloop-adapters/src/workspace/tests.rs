@@ -1828,6 +1828,210 @@ fn b1_root_bootstrap_and_control_client_are_narrow_and_bounded() {
         CancellationStatus::Blocked
     );
     assert!(client.enqueue(&overflow).is_ok());
+    assert!(
+        store
+            .acknowledge_cancellation(&lease, &id("request-1"), CancellationStatus::Applied)
+            .is_err(),
+        "a no-op terminal ack cannot claim successful persistence"
+    );
+}
+
+#[test]
+fn provisional_control_is_identity_bound_idempotent_and_pending_is_not_success() {
+    use meshloop_engine::workspace::*;
+    let f = Fixture::new();
+    let (mut store, lease, _activation) = runtime_fixture(&f);
+    let owner = ProvisionalOwner {
+        id: id("control-owner"),
+        repository_id: lease.repository().id.clone(),
+        graph_id: None,
+        kind: ProvisionalKind::Planning,
+        location: PortableLocation {
+            root_alias: alias(),
+            relative_path: RelativePath::new("control-planning").unwrap(),
+        },
+        provenance: id("control-origin"),
+    };
+    store.create_provisional(&lease, &owner).unwrap();
+    let nonce = id("real-control-nonce");
+    let Some(process) = lease.owner_process_identity(&nonce).unwrap() else {
+        return;
+    };
+    assert_eq!(process.pid, std::process::id());
+    assert_eq!(process.tree_token, nonce);
+    assert_eq!(
+        Some(process.clone()),
+        lease.owner_process_identity(&nonce).unwrap()
+    );
+    let mut driver = DriverRecord {
+        id: id("provisional-driver"),
+        nonce,
+        target: DriverTarget::Provisional {
+            repository_id: owner.repository_id.clone(),
+            owner_id: owner.id.clone(),
+        },
+        process: Some(process),
+        phase: DriverPhase::Running,
+        heartbeat: 1,
+        error_code: None,
+        diagnostic: None,
+    };
+    store.register_driver(&lease, &driver).unwrap();
+    let mut client = CancellationClient::open(Path::new("git"), &f.repo, &f.ledger).unwrap();
+    let observation = client.enqueue_driver(&driver.id).unwrap();
+    assert_eq!(
+        CancellationStatus::Pending,
+        client
+            .wait_for_acknowledgement(observation.clone(), Duration::ZERO)
+            .unwrap()
+            .status
+    );
+    let mut wrong = observation.request.clone();
+    wrong.process.creation_token = id("different-creation");
+    assert!(client.enqueue(&wrong).is_err());
+    wrong = observation.request.clone();
+    wrong.target = CancellationTarget::Provisional {
+        repository_id: owner.repository_id.clone(),
+        owner_id: id("wrong-owner"),
+        driver_id: driver.id.clone(),
+    };
+    assert!(client.enqueue(&wrong).is_err());
+    assert_eq!(1, store.cancellation_requests(&driver.id).unwrap().len());
+    store
+        .acknowledge_cancellation(&lease, &observation.request.id, CancellationStatus::Applied)
+        .unwrap();
+    driver.phase = DriverPhase::Exited;
+    store.update_driver(&lease, &driver).unwrap();
+    let repeat = client.enqueue_driver(&driver.id).unwrap();
+    assert_eq!(repeat.request, observation.request);
+    assert_eq!(repeat.status, CancellationStatus::Applied);
+    assert!(store.cancellation_requests(&driver.id).unwrap().is_empty());
+    driver.id = id("already-stale-driver");
+    store.register_driver(&lease, &driver).unwrap();
+    assert!(client.enqueue_driver(&driver.id).is_err());
+}
+
+#[test]
+fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale() {
+    use meshloop_domain::capability::{Compatibility, HarnessError, HarnessProfile};
+    use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome};
+    use meshloop_engine::workspace::*;
+    struct FinalCollectRequest {
+        repo: PathBuf,
+        ledger: PathBuf,
+        request: std::sync::Mutex<Option<CancellationObservation>>,
+    }
+    impl HarnessCapabilities for FinalCollectRequest {
+        fn probe(&self) -> Result<HarnessProfile, HarnessError> {
+            Ok(HarnessProfile {
+                harness: "fixture".into(),
+                version: "test".into(),
+                compatibility: Compatibility::Compatible,
+                supports_noninteractive: true,
+                supports_structured_output: true,
+                supports_cancellation: true,
+                reason: None,
+            })
+        }
+        fn supports_nonblocking_collection(&self) -> bool {
+            true
+        }
+        fn invoke(
+            &self,
+            _: &meshloop_engine::agent::AgentSpec,
+        ) -> Result<HarnessHandle, HarnessError> {
+            Ok(HarnessHandle {
+                attempt_id: AttemptId(0),
+                pid: None,
+                pane_id: None,
+            })
+        }
+        fn cancel(&self, _: &HarnessHandle) -> Result<(), HarnessError> {
+            panic!("legacy cancellation forbidden")
+        }
+        fn collect(&self, _: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
+            panic!("blocking collection forbidden")
+        }
+        fn try_collect(&self, _: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {
+            let store = SqliteStore::open_read_only(&self.ledger).unwrap().unwrap();
+            let driver = store
+                .observed_drivers(Path::new("git"), &self.repo)
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(driver.phase, DriverPhase::Running);
+            let mut client =
+                CancellationClient::open(Path::new("git"), &self.repo, &self.ledger).unwrap();
+            *self.request.lock().unwrap() = Some(client.enqueue_driver(&driver.id).unwrap());
+            Ok(Some(HarnessOutcome { exit_code: 0, output_redacted: r#"{"graph_id":"completion-race","nodes":[{"id":1,"description":"task","depends_on":[],"tier":null}]}"#.into(), worktree_changed: false }))
+        }
+    }
+    let f = Fixture::new();
+    let (mut store, mut lease) = bound(&f);
+    if lease
+        .owner_process_identity(&id("supported-check"))
+        .unwrap()
+        .is_none()
+    {
+        return;
+    }
+    let worktrees = f.base.join("planning");
+    let alias = RootAlias::new("planning-worktrees").unwrap();
+    lease.bootstrap_root(alias.clone(), &worktrees).unwrap();
+    store.register_root(&lease, &alias).unwrap();
+    let harness = FinalCollectRequest {
+        repo: f.repo.clone(),
+        ledger: f.ledger.clone(),
+        request: std::sync::Mutex::new(None),
+    };
+    let git = crate::git::GitWorktreeAdapter::new(f.repo.clone());
+    let process = crate::process::HostProcessView {};
+    let checks = crate::check::CommandCheckRunner;
+    let mut loop_ = meshloop_engine::run_loop::RunLoop {
+        harnesses: std::collections::HashMap::from([(
+            "fixture".into(),
+            &harness as &dyn HarnessCapabilities,
+        )]),
+        candidates: vec![meshloop_engine::router::Candidate {
+            harness: "fixture".into(),
+            model_ref: "test".into(),
+            model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+        }],
+        workspace: &git,
+        store: &mut store,
+        processes: &process,
+        checks: &checks,
+        router: meshloop_engine::router::Router::default(),
+        limits: meshloop_engine::run_loop::RunLimits {
+            max_retries: 1,
+            task_timeout: Duration::from_secs(10),
+            max_concurrent_workers: 1,
+        },
+        fixture_only: true,
+        verify_command: vec![],
+        worktree_base: worktrees,
+        active_graph: None,
+        planner: meshloop_engine::run_loop::PlannerSelection::Harness("fixture".into()),
+    };
+    assert!(loop_.plan("fixture", "fixture", &mut lease).is_ok());
+    let request = harness.request.lock().unwrap().clone().unwrap();
+    let mut client = CancellationClient::open(Path::new("git"), &f.repo, &f.ledger).unwrap();
+    assert_eq!(
+        client
+            .observation(&request.request.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        CancellationStatus::Stale
+    );
+    assert_eq!(
+        store.drivers(&lease.repository().id).unwrap()[0].phase,
+        DriverPhase::Exited
+    );
+    assert_eq!(
+        client.enqueue(&request.request).unwrap().status,
+        CancellationStatus::Stale
+    );
 }
 
 #[test]

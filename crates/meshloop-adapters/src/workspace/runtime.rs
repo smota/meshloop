@@ -313,6 +313,58 @@ fn validate_driver(
     Ok(())
 }
 impl SqliteStore {
+    /// At most the latest 64 acknowledgements for read-only driver discovery.
+    pub fn observed_driver_requests(
+        &self,
+        id: &LifecycleId,
+    ) -> Result<Vec<CancellationObservation>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT payload_json,status FROM workspace_control_requests WHERE driver_id=?1 ORDER BY rowid DESC LIMIT 64").map_err(error)?;
+        stmt.query_map([id.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(error)?
+        .map(|row| {
+            let (request, status) = row.map_err(error)?;
+            Ok(CancellationObservation {
+                request: parse(request)?,
+                status: parse(format!("\"{status}\""))?,
+            })
+        })
+        .collect()
+    }
+    /// Read-only driver discovery, bound to the current checkout's common-dir
+    /// filesystem identity. It does not acquire the writer registry fence.
+    pub fn observed_drivers(
+        &self,
+        git: &std::path::Path,
+        checkout: &std::path::Path,
+    ) -> Result<Vec<DriverRecord>, StoreError> {
+        let mut command = crate::process::OwnedSpawnSpec::new(git);
+        command.arg("-C").arg(checkout).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ]);
+        let output = super::bounded_stdout(command, std::time::Duration::from_secs(10))?;
+        let common = std::fs::canonicalize(std::path::PathBuf::from(
+            std::str::from_utf8(&output).map_err(error)?.trim(),
+        ))
+        .map_err(error)?;
+        let common_id = native_identity(&common)?;
+        let repository: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT repo_id FROM workspace_repositories WHERE common_native_id=?1",
+                [common_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        match repository {
+            Some(id) => self.drivers(&LifecycleId::new(id).map_err(error)?),
+            None => Ok(Vec::new()),
+        }
+    }
     /// Observes an existing v6 ledger without application writes or migration.
     /// SQLite may create, update, or remove its WAL/SHM coordination sidecars
     /// (ADR 0034); an absent ledger creates no files or directories.
@@ -1218,7 +1270,7 @@ impl RuntimeLedger for SqliteStore {
         &self,
         id: &LifecycleId,
     ) -> Result<Vec<CancellationObservation>, StoreError> {
-        let mut stmt=self.conn.prepare("SELECT payload_json,status FROM workspace_control_requests WHERE driver_id=?1 ORDER BY rowid").map_err(error)?;
+        let mut stmt=self.conn.prepare("SELECT payload_json,status FROM workspace_control_requests WHERE driver_id=?1 AND status='Pending' ORDER BY rowid LIMIT 64").map_err(error)?;
         stmt.query_map([id.as_str()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
@@ -1249,12 +1301,16 @@ impl RuntimeLedger for SqliteStore {
         if repo != &f.repository().id || status == CancellationStatus::Pending {
             return Err(refused());
         }
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE workspace_control_requests SET status=?1 WHERE id=?2 AND status='Pending'",
                 params![format!("{status:?}"), id.as_str()],
             )
             .map_err(error)?;
+        if changed != 1 {
+            return Err(refused());
+        }
         Ok(())
     }
     fn artifacts(&self, s: &ExecutionScope) -> Result<Vec<ArtifactRecord>, StoreError> {
@@ -1311,6 +1367,58 @@ pub struct CancellationClient {
     common_id: NativeIdentity,
 }
 impl CancellationClient {
+    /// Build a request from the exact immutable driver record, never from a PID.
+    pub fn enqueue_driver(
+        &mut self,
+        id: &LifecycleId,
+    ) -> Result<CancellationObservation, StoreError> {
+        self.validate()?;
+        let driver: DriverRecord =
+            get(&self.conn, "workspace_drivers", "id", id.as_str())?.ok_or_else(refused)?;
+        // This slice controls provisional planners only. Other producer paths
+        // retain their existing contract and cannot enter through this selector.
+        let target = match driver.target {
+            DriverTarget::Provisional {
+                repository_id,
+                owner_id,
+            } => CancellationTarget::Provisional {
+                repository_id,
+                owner_id,
+                driver_id: driver.id,
+            },
+            DriverTarget::Execution(_) => return Err(refused()),
+        };
+        let request = CancellationRequest {
+            id: LifecycleId::new(uuid::Uuid::new_v4().to_string()).map_err(error)?,
+            target,
+            process: driver.process.ok_or_else(refused)?,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(error)?
+                .as_secs(),
+        };
+        self.enqueue(&request)
+    }
+
+    /// Wait only for the acknowledgement; timeout never implies cancellation.
+    pub fn wait_for_acknowledgement(
+        &self,
+        mut observation: CancellationObservation,
+        timeout: std::time::Duration,
+    ) -> Result<CancellationObservation, StoreError> {
+        let deadline = std::time::Instant::now() + timeout.min(std::time::Duration::from_secs(5));
+        while observation.status == CancellationStatus::Pending {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+            observation = self
+                .observation(&observation.request.id)?
+                .ok_or_else(refused)?;
+        }
+        Ok(observation)
+    }
     pub fn open(
         git: &std::path::Path,
         checkout: &std::path::Path,
@@ -1395,10 +1503,7 @@ impl CancellationClient {
             .map_err(error)?;
         let d: DriverRecord =
             get(&tx, "workspace_drivers", "id", driver.as_str())?.ok_or_else(refused)?;
-        if driver_repo(&d.target) != repo
-            || d.process.as_ref() != Some(&r.process)
-            || !matches!(d.phase, DriverPhase::Starting | DriverPhase::Running)
-        {
+        if driver_repo(&d.target) != repo || d.process.as_ref() != Some(&r.process) {
             return Err(refused());
         }
         match (&r.target, &d.target) {
@@ -1449,6 +1554,9 @@ impl CancellationClient {
                 request: old,
                 status: parse(format!("\"{status}\""))?,
             });
+        }
+        if !matches!(d.phase, DriverPhase::Starting | DriverPhase::Running) {
+            return Err(refused());
         }
         let count:i64=tx.query_row("SELECT COUNT(*) FROM workspace_control_requests WHERE driver_id=?1 AND status='Pending'",[driver.as_str()],|r|r.get(0)).map_err(error)?;
         if count >= 64 {

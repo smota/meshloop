@@ -168,6 +168,7 @@ impl Capture {
     }
 }
 struct Running {
+    cancellation_attempted: bool,
     child: Option<crate::process::OwnedChild>,
     capture: Capture,
     timeout: Duration,
@@ -196,9 +197,90 @@ impl CliHarness {
     fn attempt_key(handle: &HarnessHandle) -> u32 {
         handle.attempt_id.0
     }
+    fn with_retained_attempt(
+        &self,
+        handle: &HarnessHandle,
+        operation: impl FnOnce(&mut Running) -> Result<(), HarnessError>,
+    ) -> Result<(), HarnessError> {
+        let key = Self::attempt_key(handle);
+        let (permit, mut running) = {
+            let mut registry = self.running.lock().map_err(|_| capture_fault())?;
+            let slot = registry.get_mut(&key).ok_or(HarnessError::Unsupported)?;
+            let running = slot.running.as_ref().ok_or(HarnessError::Unsupported)?;
+            if handle.pid != running.child.as_ref().map(|child| child.id())
+                || handle.pane_id.is_some()
+            {
+                return Err(HarnessError::Unsupported);
+            }
+            (
+                slot.permit.clone(),
+                slot.running.take().ok_or(HarnessError::Unsupported)?,
+            )
+        };
+        // Ownership remains reserved by the identical Arc token, while native
+        // waiting never holds the registry mutex shared by unrelated attempts.
+        let result = operation(&mut running);
+        let mut registry = self.running.lock().map_err(|_| capture_fault())?;
+        if let Some(slot) = registry.get_mut(&key)
+            && slot.running.is_none()
+            && Arc::ptr_eq(&slot.permit, &permit)
+        {
+            slot.running = Some(running);
+            return result;
+        }
+        // Another caller removed/replaced the reservation. Never resurrect it.
+        // The operation already attempted POSIX cleanup and may have reaped its
+        // leader: do not issue another PID/group signal after possible reuse.
+        // Windows still owns its private kill-on-close job until running drops.
+        drop(registry);
+        drop(running);
+        Err(capture_fault())
+    }
 }
 
 impl HarnessCapabilities for CliHarness {
+    fn supports_nonblocking_collection(&self) -> bool {
+        true
+    }
+
+    fn cancel_owned(&self, handle: &HarnessHandle, timeout: Duration) -> Result<(), HarnessError> {
+        self.with_retained_attempt(handle, |running| {
+            if running.cancellation_attempted {
+                return Err(HarnessError::Unsupported);
+            }
+            running.cancellation_attempted = true;
+            let child = running.child.as_mut().ok_or(HarnessError::Unsupported)?;
+            #[cfg(not(windows))]
+            {
+                let _ = timeout;
+                // Retained, unreaped owner only. Best effort is never Applied.
+                if running.status.is_none() {
+                    child.kill_tree();
+                    running.status = child.try_wait().map_err(|_| capture_fault())?;
+                }
+                if running.status.is_some() {
+                    // Once reaped, its numeric PID/group may be reused. No
+                    // later capture timeout may signal that identity again.
+                    running.child.take();
+                }
+                Err(HarnessError::Unsupported)
+            }
+            #[cfg(windows)]
+            {
+                let proof = child.terminate_and_observe(timeout).map_err(|_| {
+                    HarnessError::ProcessFault {
+                        detail: "owned-tree-quiescence-unproved".into(),
+                    }
+                })?;
+                if !proof.job_empty {
+                    return Err(HarnessError::Unsupported);
+                }
+                running.status = Some(proof.direct_child);
+                Ok(())
+            }
+        })
+    }
+
     /// Real, read-only: resolves the configured executable and reads its actual reported
     /// version. Never invoked with a task prompt — see module docs.
     fn probe(&self) -> Result<HarnessProfile, HarnessError> {
@@ -328,6 +410,7 @@ impl HarnessCapabilities for CliHarness {
             let capture = Capture::start(&mut child, permit.clone())?;
 
             Ok(Running {
+                cancellation_attempted: false,
                 child: Some(child),
                 capture,
                 timeout: spec.timeout,
@@ -520,6 +603,103 @@ impl HarnessCapabilities for CliHarness {
 mod capture_tests {
     use super::*;
     use crate::process::TestCommandExt;
+    #[test]
+    fn inflight_owned_cancel_releases_registry_and_never_resurrects_removed_token() {
+        let harness = CliHarness::new(CliHarnessConfig {
+            name: "test".into(),
+            executable: PathBuf::from("missing-fixture"),
+            version_args: vec![],
+            probe_timeout: Duration::from_secs(1),
+            invoke_args_template: vec!["--noop".into()],
+        });
+        let permit = CapturePermit::reserve().unwrap();
+        let failed = Arc::new(AtomicUsize::new(0));
+        let capture = Capture {
+            _permit: permit.clone(),
+            stdout: capture_reader(
+                Some(std::io::Cursor::new(Vec::<u8>::new())),
+                permit.clone(),
+                failed.clone(),
+            )
+            .unwrap(),
+            stderr: capture_reader(
+                Some(std::io::Cursor::new(Vec::<u8>::new())),
+                permit.clone(),
+                failed.clone(),
+            )
+            .unwrap(),
+            failed,
+        };
+        harness.running.lock().unwrap().insert(
+            1,
+            Slot {
+                permit,
+                running: Some(Running {
+                    cancellation_attempted: false,
+                    child: None,
+                    capture,
+                    timeout: Duration::from_secs(1),
+                    start: Instant::now(),
+                    status: None,
+                }),
+            },
+        );
+        let handle = HarnessHandle {
+            attempt_id: meshloop_domain::evidence::AttemptId(1),
+            pid: None,
+            pane_id: None,
+        };
+        let operations = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+            let harness_ref = &harness;
+            let handle_ref = &handle;
+            let operations_ref = &operations;
+            let cancel = scope.spawn(move || {
+                harness_ref.with_retained_attempt(handle_ref, |_| {
+                    operations_ref.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    Ok(())
+                })
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let start = Instant::now();
+            assert!(harness.try_collect(&handle).unwrap().is_none());
+            // A new attempt reaches admission/launch while cancellation waits.
+            let dir = std::env::temp_dir()
+                .join(format!("meshloop-cancel-inflight-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let spec = AgentSpec {
+                task_id: meshloop_domain::task_graph::TaskId(2),
+                attempt_id: meshloop_domain::evidence::AttemptId(2),
+                harness: "test".into(),
+                model_ref: "test".into(),
+                worktree_path: dir.clone(),
+                prompt: "fixture".into(),
+                timeout: Duration::from_secs(1),
+            };
+            assert!(harness.invoke(&spec).is_err());
+            assert!(start.elapsed() < Duration::from_secs(1));
+            harness.cancel(&handle).unwrap(); // remove in-flight reservation
+            let replacement = CapturePermit::reserve().unwrap();
+            harness.running.lock().unwrap().insert(
+                1,
+                Slot {
+                    permit: replacement.clone(),
+                    running: None,
+                },
+            );
+            finish_tx.send(()).unwrap();
+            assert!(cancel.join().unwrap().is_err());
+            let registry = harness.running.lock().unwrap();
+            assert!(Arc::ptr_eq(&registry[&1].permit, &replacement));
+            assert!(registry[&1].running.is_none());
+            assert_eq!(operations.load(Ordering::SeqCst), 1);
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
     #[test]
     fn bounded_capture_global_permits_survive_drop_and_recreation() {
         const CHILD: &str = "MESHLOOP_CAPTURE_POOL_TEST_CHILD";

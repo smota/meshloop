@@ -35,6 +35,36 @@ use crate::process::owned_spawn::{OwnedSpawnSpec, OwnedStdio};
 fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
+
+pub(super) fn current_creation_token() -> io::Result<String> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit = creation;
+    let mut kernel = creation;
+    let mut user = creation;
+    // SAFETY: the pseudo-handle identifies only this process and is never closed.
+    // All four writable FILETIME outputs are initialized, distinct, correctly
+    // aligned stack objects that remain live for the complete synchronous call.
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(native_error("driver-creation-identity-failed"));
+    }
+    Ok(format!(
+        "windows-{:08x}{:08x}",
+        creation.dwHighDateTime, creation.dwLowDateTime
+    ))
+}
 fn native_error(operation: &'static str) -> io::Error {
     let error = io::Error::last_os_error();
     io::Error::new(

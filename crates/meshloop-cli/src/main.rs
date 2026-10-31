@@ -83,8 +83,17 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
-        Command::Status { graph, config, db } => {
-            cmd_status(graph, config, db, inv.json, inv.origin)
+        Command::Status {
+            graph,
+            config,
+            db,
+            drivers,
+        } => {
+            if drivers {
+                cmd_drivers(None, db, "meshloop:status", inv.json, inv.origin)
+            } else {
+                cmd_status(graph, config, db, inv.json, inv.origin)
+            }
         }
         Command::Plan {
             objective,
@@ -170,32 +179,46 @@ fn dispatch(inv: Invocation) -> ExitCode {
             inv.origin,
         ),
         Command::Cancel {
+            driver,
             graph,
             task,
             session_id,
             config,
             db,
             worktree_base,
-        } => cmd_cancel(
-            graph,
-            task,
-            session_id,
-            config,
-            db,
-            worktree_base,
-            inv.json,
-            inv.origin,
-        ),
+        } => {
+            if let Some(driver) = driver {
+                cmd_cancel_driver(driver, db, inv.json, inv.origin)
+            } else {
+                cmd_cancel(
+                    graph,
+                    task,
+                    session_id,
+                    config,
+                    db,
+                    worktree_base,
+                    inv.json,
+                    inv.origin,
+                )
+            }
+        }
         Command::Inspect {
+            driver,
             task,
             graph,
             session_id,
             config,
             db,
             attempts,
-        } => cmd_inspect(
-            task, graph, session_id, config, db, attempts, inv.json, inv.origin,
-        ),
+        } => {
+            if let Some(driver) = driver {
+                cmd_drivers(Some(driver), db, "meshloop:inspect", inv.json, inv.origin)
+            } else {
+                cmd_inspect(
+                    task, graph, session_id, config, db, attempts, inv.json, inv.origin,
+                )
+            }
+        }
         Command::Watch {
             graph,
             session_id,
@@ -1118,6 +1141,102 @@ fn read_error(
         eprintln!("{message}");
     }
     ExitCode::from(2)
+}
+
+fn driver_report(
+    command: &str,
+    result: Result<serde_json::Value, &'static str>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    match result {
+        Ok(data) => {
+            if json {
+                println!("{}", json_out::ok(command, origin, data));
+            } else {
+                println!("{data}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(code) => {
+            if json {
+                println!("{}", json_out::err(command, origin, code));
+            } else {
+                eprintln!("{code}");
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_drivers(
+    id: Option<String>,
+    db: Option<PathBuf>,
+    command: &str,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let result = (|| {
+        use meshloop_adapters::store::SqliteStore;
+        let root = repo_root();
+        let path = db.unwrap_or_else(|| compose::default_db(&root));
+        let records =
+            match SqliteStore::open_read_only(&path).map_err(|_| "driver-observation-failed")? {
+                Some(store) => store
+                    .observed_drivers(std::path::Path::new("git"), &root)
+                    .map_err(|_| "driver-observation-failed")?
+                    .into_iter()
+                    .map(|driver| {
+                        let requests = store
+                            .observed_driver_requests(&driver.id)
+                            .map_err(|_| "driver-observation-failed")?;
+                        let mut value = serde_json::to_value(driver)
+                            .map_err(|_| "driver-observation-failed")?;
+                        value["cancellations"] = serde_json::to_value(requests)
+                            .map_err(|_| "driver-observation-failed")?;
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, &'static str>>()?,
+                None => Vec::new(),
+            };
+        if let Some(id) = id {
+            let driver = records
+                .into_iter()
+                .find(|d| d["id"].as_str() == Some(&id))
+                .ok_or("driver-not-found")?;
+            Ok(serde_json::json!({ "driver": driver }))
+        } else {
+            Ok(serde_json::json!({ "drivers": records }))
+        }
+    })();
+    driver_report(command, result, json, origin)
+}
+
+fn cmd_cancel_driver(
+    id: String,
+    db: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let result = (|| {
+        use meshloop_adapters::workspace::CancellationClient;
+        use meshloop_domain::workspace::LifecycleId;
+        let root = repo_root();
+        let path = db.unwrap_or_else(|| compose::default_db(&root));
+        let id = LifecycleId::new(id).map_err(|_| "driver-cancellation-refused")?;
+        let mut client = CancellationClient::open(std::path::Path::new("git"), &root, &path)
+            .map_err(|_| "driver-cancellation-refused")?;
+        let observation = client
+            .enqueue_driver(&id)
+            .map_err(|_| "driver-cancellation-refused")?;
+        let observation = client
+            .wait_for_acknowledgement(observation, std::time::Duration::from_secs(5))
+            .map_err(|_| "driver-acknowledgement-unavailable")?;
+        Ok(
+            serde_json::json!({ "driver_id": id, "request_id": observation.request.id, "status": observation.status }),
+        )
+    })();
+    driver_report("meshloop:cancel", result, json, origin)
 }
 
 fn cmd_status(
