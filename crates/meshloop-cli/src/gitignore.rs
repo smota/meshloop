@@ -22,14 +22,16 @@ pub enum Ignored {
 }
 
 fn git_ok(cwd: &Path, args: &[&str]) -> Option<(bool, i32)> {
-    let status = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
+    let status = meshloop_adapters::process::spawn_command(
+        Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .and_then(|mut child| child.wait())
+    .ok()?;
     Some((status.success(), status.code().unwrap_or(-1)))
 }
 
@@ -43,12 +45,15 @@ pub fn check_ignored(cwd: &Path, rel: &str) -> Ignored {
 }
 
 fn in_work_tree(dir: &Path) -> bool {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
+    let out = meshloop_adapters::process::spawn_command(
+        Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .and_then(|child| child.wait_with_output());
     matches!(out, Ok(o) if o.status.success() && o.stdout.starts_with(b"true"))
 }
 

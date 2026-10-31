@@ -3,26 +3,27 @@
 //! and assigns tiers — it never judges decomposition *quality* (MECE-ness), which this
 //! project cannot mechanically verify; that is the `awaiting-plan-review` human gate's job.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use meshloop_domain::capability::HarnessError;
 use meshloop_domain::evidence::AttemptId;
 use meshloop_domain::task_graph::{GraphError, TaskGraph, Tier};
 
 use crate::agent::AgentSpec;
-use crate::ports::{HarnessCapabilities, HarnessOutcome};
+use crate::ports::{HarnessCapabilities, HarnessOutcome, RunStore, StoreError, WorkspacePort};
+use crate::workspace::LifecycleAccess;
+use meshloop_domain::workspace::*;
 
 const PLAN_FILE: &str = "meshloop-plan.json";
 
-/// A plan the planner produced but Meshloop rejected, with the text that was rejected.
+/// Structural rejection; exact output stays in the protected owned file.
 struct Rejected {
     error: PlanError,
-    raw: Option<String>,
 }
 
 impl From<PlanError> for Rejected {
     fn from(error: PlanError) -> Self {
-        Self { error, raw: None }
+        Self { error }
     }
 }
 
@@ -33,10 +34,7 @@ fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, 
     } else {
         outcome.output_redacted.clone()
     };
-    let reject = |error: PlanError| Rejected {
-        error,
-        raw: Some(raw.clone()),
-    };
+    let reject = |error: PlanError| Rejected { error };
     let graph: TaskGraph =
         serde_json::from_str(&raw).map_err(|e| reject(PlanError::Malformed(e.to_string())))?;
     graph
@@ -47,11 +45,13 @@ fn parse_graph(spec: &AgentSpec, outcome: &HarnessOutcome) -> Result<TaskGraph, 
 
 #[derive(Debug)]
 pub enum PlanError {
+    Ownership(StoreError),
+    Preservation,
     Dispatch(HarnessError),
     Malformed(String),
     Invalid(GraphError),
-    /// Every allowed attempt produced a rejected plan. `saved_plan` is where the last one
-    /// was preserved for inspection, when it could be saved.
+    /// Every allowed attempt produced a rejected plan. `saved_plan` identifies the
+    /// protected output by root alias and relative path, never an absolute root.
     Exhausted {
         attempts: u32,
         last: Box<PlanError>,
@@ -62,9 +62,11 @@ pub enum PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PlanError::Dispatch(e) => write!(f, "planner dispatch failed: {e:?}"),
-            PlanError::Malformed(e) => write!(f, "plan is malformed: {e}"),
-            PlanError::Invalid(e) => write!(f, "plan is invalid: {e:?}"),
+            PlanError::Ownership(_) => write!(f, "planner-ownership-failed"),
+            PlanError::Preservation => write!(f, "planner-preservation-failed"),
+            PlanError::Dispatch(_) => write!(f, "planner-dispatch-unresolved"),
+            PlanError::Malformed(_) => write!(f, "planner-malformed-output"),
+            PlanError::Invalid(_) => write!(f, "planner-invalid-graph"),
             PlanError::Exhausted {
                 attempts,
                 last,
@@ -75,7 +77,11 @@ impl std::fmt::Display for PlanError {
                     "planner produced a rejected plan on all {attempts} attempt(s); last error: {last}"
                 )?;
                 match saved_plan {
-                    Some(p) => write!(f, "; last rejected plan saved to {}", p.display()),
+                    Some(p) => write!(
+                        f,
+                        "; last rejected plan retained at portable locator {}",
+                        p.display()
+                    ),
                     None => write!(f, "; the rejected plan could not be saved"),
                 }
             }
@@ -85,59 +91,266 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
-/// Dispatches the decomposition agent, retrying a rejected (malformed or structurally
-/// invalid) plan as a new attempt. `max_retries` is the total attempt budget, as for tasks
-/// (`[limits] max_retries`: the first dispatch counts; 0 is treated as 1). Each retry prompt carries
-/// the previous error. Dispatch errors are not retried here. The last rejected plan is
-/// copied under `rejected_dir` and its path reported in the final error.
-pub fn decompose_with_retry(
+/// Actual planner producer. Every retry gets a distinct owner, worktree and ref.
+/// An operation with no step is deliberately unresolved after an ambiguous failure.
+pub(crate) fn decompose_owned(
     harness: &dyn HarnessCapabilities,
     spec: &AgentSpec,
     max_retries: u32,
-    rejected_dir: &Path,
+    workspace: &dyn WorkspacePort,
+    store: &mut dyn RunStore,
+    access: &mut dyn LifecycleAccess,
 ) -> Result<TaskGraph, PlanError> {
-    let total = max_retries.max(1);
-    let mut attempt_spec = spec.clone();
-    for n in 0..total {
-        attempt_spec.attempt_id = AttemptId(spec.attempt_id.0.saturating_add(n));
-        // A stale file from a previous attempt must never be mistaken for this one's output.
-        let _ = std::fs::remove_file(spec.worktree_path.join(PLAN_FILE));
-        let rejected = match decompose_inner(harness, &attempt_spec) {
-            Ok(graph) => return Ok(graph),
-            Err(r) => r,
+    let owned = |e| PlanError::Ownership(e);
+    access.fence().map_err(owned)?.validate().map_err(owned)?;
+    let base = workspace
+        .current_head()
+        .map_err(|_| PlanError::Preservation)?;
+    let base = ObjectId::new(base).map_err(|_| PlanError::Preservation)?;
+    let mut prompt = spec.prompt.clone();
+    for n in 0..max_retries.max(1) {
+        let id = access.new_id().map_err(owned)?;
+        let owner = ProvisionalOwner {
+            id: id.clone(),
+            repository_id: access.fence().map_err(owned)?.repository().id.clone(),
+            graph_id: None,
+            kind: ProvisionalKind::Planning,
+            location: PortableLocation {
+                root_alias: RootAlias::new("planning-worktrees")
+                    .map_err(|_| PlanError::Preservation)?,
+                relative_path: RelativePath::new(format!("plan-{}", id.as_str()))
+                    .map_err(|_| PlanError::Preservation)?,
+            },
+            provenance: access.new_id().map_err(owned)?,
         };
-        if !matches!(
-            rejected.error,
-            PlanError::Malformed(_) | PlanError::Invalid(_)
-        ) {
-            return Err(rejected.error);
+        store
+            .create_provisional(access.fence().map_err(owned)?, &owner)
+            .map_err(owned)?;
+        let path = access.resolve(&owner.location).map_err(owned)?;
+        let branch = format!("meshloop/planning/{}", id.as_str());
+        let before = ExpectedState {
+            source_artifact: None,
+            source: None,
+            base: Some(base.clone()),
+            location: Some(owner.location.clone()),
+            native_identity: None,
+            head: None,
+            reference: Some(
+                RelativePath::new(branch.clone()).map_err(|_| PlanError::Preservation)?,
+            ),
+            registered: false,
+            exists: false,
+        };
+        let mut after = before.clone();
+        after.exists = true;
+        after.registered = true;
+        after.head = Some(base.clone());
+        let worktree = planning_intent(
+            store,
+            access,
+            &owner,
+            ProducerKind::Worktree,
+            before,
+            after.clone(),
+        )?;
+        // Refuse collisions. Never reset, adopt, or delete an older attempt.
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(PlanError::Preservation),
         }
-        if n + 1 == total {
-            let saved_plan = save_rejected(rejected_dir, rejected.raw.as_deref());
-            return Err(PlanError::Exhausted {
-                attempts: total,
-                last: Box::new(rejected.error),
-                saved_plan,
-            });
+        if workspace
+            .branch_exists(&branch)
+            .map_err(|_| PlanError::Preservation)?
+        {
+            return Err(PlanError::Preservation);
         }
-        attempt_spec.prompt = format!(
-            "{}\n\nyour previous graph failed: {}\nFix exactly that problem and rewrite {PLAN_FILE}.",
-            spec.prompt, rejected.error
-        );
+        workspace
+            .add_worktree_from(&path, &branch, base.as_str())
+            .map_err(|_| PlanError::Preservation)?;
+        if workspace.head(&path).map_err(|_| PlanError::Preservation)? != base.as_str()
+            || !workspace
+                .branch_exists(&branch)
+                .map_err(|_| PlanError::Preservation)?
+        {
+            return Err(PlanError::Preservation);
+        }
+        planning_step(store, access, &worktree, OperationState::Completed, None)?;
+        let mut attempt_spec = spec.clone();
+        attempt_spec.worktree_path = path.clone();
+        attempt_spec.attempt_id = AttemptId(n);
+        attempt_spec.prompt = prompt;
+        let process_state = ExpectedState {
+            source_artifact: None,
+            source: None,
+            base: None,
+            location: Some(owner.location.clone()),
+            native_identity: None,
+            head: None,
+            reference: None,
+            registered: false,
+            exists: true,
+        };
+        let spawn = planning_intent(
+            store,
+            access,
+            &owner,
+            ProducerKind::Spawn,
+            process_state.clone(),
+            process_state.clone(),
+        )?;
+        let mut output = process_state;
+        output.location = Some(PortableLocation {
+            root_alias: owner.location.root_alias.clone(),
+            relative_path: RelativePath::new(format!(
+                "{}/meshloop-plan.json",
+                owner.location.relative_path.as_str()
+            ))
+            .map_err(|_| PlanError::Preservation)?,
+        });
+        // Pending claims are exclusive per target. Output ownership is distinct
+        // from the process/worktree so both intents exist before invocation.
+        let output_owner = ProvisionalOwner {
+            id: access.new_id().map_err(owned)?,
+            repository_id: owner.repository_id.clone(),
+            graph_id: None,
+            kind: ProvisionalKind::Planning,
+            location: output.location.clone().ok_or(PlanError::Preservation)?,
+            provenance: owner.id.clone(),
+        };
+        store
+            .create_provisional(access.fence().map_err(owned)?, &output_owner)
+            .map_err(owned)?;
+        let mut absent = output.clone();
+        absent.exists = false;
+        let plan = planning_intent(
+            store,
+            access,
+            &output_owner,
+            ProducerKind::Plan,
+            absent,
+            output,
+        )?;
+        let output_path = access.resolve(&output_owner.location).map_err(owned)?;
+        match std::fs::symlink_metadata(&output_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(PlanError::Preservation),
+        }
+        access.fence().map_err(owned)?.validate().map_err(owned)?;
+        // Neither invoke nor collect failures prove the process tree is quiescent.
+        // Leave both intents unresolved and do not salvage or retry uncertain effects.
+        let handle = harness.invoke(&attempt_spec).map_err(PlanError::Dispatch)?;
+        let outcome = harness.collect(&handle).map_err(PlanError::Dispatch)?;
+        // Preserve stdout-only output locally before validating. A producer-written
+        // file always wins and is never overwritten, including malformed output.
+        let output_path = access.resolve(&output_owner.location).map_err(owned)?;
+        match std::fs::symlink_metadata(&output_path) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&output_path)
+                    .map_err(|_| PlanError::Preservation)?;
+                file.write_all(outcome.output_redacted.as_bytes())
+                    .map_err(|_| PlanError::Preservation)?;
+                file.sync_all().map_err(|_| PlanError::Preservation)?;
+            }
+            _ => return Err(PlanError::Preservation),
+        }
+        planning_step(store, access, &spawn, OperationState::Completed, None)?;
+        match parse_graph(&attempt_spec, &outcome) {
+            Ok(graph) if outcome.exit_code == 0 => {
+                planning_step(store, access, &plan, OperationState::Completed, None)?;
+                return Ok(graph);
+            }
+            result => {
+                let error = match result {
+                    Err(rejected) => rejected.error,
+                    Ok(_) => PlanError::Dispatch(HarnessError::ProcessFault {
+                        detail: "planner exited unsuccessfully".into(),
+                    }),
+                };
+                let code = if outcome.exit_code != 0 {
+                    "planner-nonzero-exit"
+                } else if matches!(error, PlanError::Malformed(_)) {
+                    "planner-malformed-output"
+                } else {
+                    "planner-invalid-graph"
+                };
+                planning_step(store, access, &plan, OperationState::Blocked, Some(code))?;
+                if outcome.exit_code != 0
+                    || !matches!(error, PlanError::Malformed(_) | PlanError::Invalid(_))
+                {
+                    return Err(error);
+                }
+                if n + 1 == max_retries.max(1) {
+                    return Err(PlanError::Exhausted {
+                        attempts: n + 1,
+                        last: Box::new(error),
+                        saved_plan: Some(PathBuf::from(format!(
+                            "{}/{}",
+                            output_owner.location.root_alias.as_str(),
+                            output_owner.location.relative_path.as_str()
+                        ))),
+                    });
+                }
+                prompt = format!(
+                    "{}\n\nyour previous graph failed: {}\nFix exactly that problem and rewrite {PLAN_FILE}.",
+                    spec.prompt, error
+                );
+            }
+        }
     }
-    unreachable!("total is at least 1 and the last iteration returns")
+    unreachable!("at least one planning attempt")
 }
 
-fn save_rejected(dir: &Path, raw: Option<&str>) -> Option<PathBuf> {
-    let raw = raw?;
-    std::fs::create_dir_all(dir).ok()?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let path = dir.join(format!("rejected-plan-{stamp}-{}.json", std::process::id()));
-    std::fs::write(&path, raw).ok()?;
-    Some(path)
+fn planning_intent(
+    store: &mut dyn RunStore,
+    access: &mut dyn LifecycleAccess,
+    owner: &ProvisionalOwner,
+    kind: ProducerKind,
+    before: ExpectedState,
+    after: ExpectedState,
+) -> Result<ProducerOperation, PlanError> {
+    let operation = ProducerOperation {
+        id: access.new_id().map_err(PlanError::Ownership)?,
+        repository_id: owner.repository_id.clone(),
+        graph_id: None,
+        generation_id: None,
+        target: ProducerTarget::Provisional(owner.id.clone()),
+        kind,
+        before,
+        after,
+        max_steps: 1,
+    };
+    store
+        .append_operation(access.fence().map_err(PlanError::Ownership)?, &operation)
+        .map_err(PlanError::Ownership)?;
+    Ok(operation)
+}
+
+fn planning_step(
+    store: &mut dyn RunStore,
+    access: &mut dyn LifecycleAccess,
+    operation: &ProducerOperation,
+    state: OperationState,
+    error_code: Option<&str>,
+) -> Result<(), PlanError> {
+    let step = OperationStep {
+        id: access.new_id().map_err(PlanError::Ownership)?,
+        operation_id: operation.id.clone(),
+        step: 1,
+        observed: operation.after.clone(),
+        state,
+        error_code: error_code
+            .map(LifecycleId::new)
+            .transpose()
+            .map_err(|_| PlanError::Preservation)?,
+    };
+    store
+        .append_operation_step(access.fence().map_err(PlanError::Ownership)?, &step)
+        .map_err(PlanError::Ownership)
 }
 
 /// Dispatches the decomposition agent and returns a structurally-validated graph, or a
@@ -294,114 +507,6 @@ mod tests {
             decompose(&harness, &spec()),
             Err(PlanError::Malformed(_))
         ));
-    }
-
-    /// Writes each scripted response to the worktree's plan file on invoke and records the
-    /// prompt it was given.
-    struct ScriptedPlanner {
-        responses: Vec<String>,
-        prompts: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl HarnessCapabilities for ScriptedPlanner {
-        fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
-            unimplemented!()
-        }
-        fn invoke(&self, spec: &AgentSpec) -> Result<HarnessHandle, HarnessError> {
-            let mut prompts = self.prompts.lock().unwrap();
-            let idx = prompts.len().min(self.responses.len() - 1);
-            prompts.push(spec.prompt.clone());
-            std::fs::write(spec.worktree_path.join(PLAN_FILE), &self.responses[idx]).unwrap();
-            Ok(HarnessHandle {
-                attempt_id: spec.attempt_id,
-                pid: None,
-                pane_id: None,
-            })
-        }
-        fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
-            Ok(())
-        }
-        fn collect(&self, _handle: &HarnessHandle) -> Result<HarnessOutcome, HarnessError> {
-            Ok(HarnessOutcome {
-                exit_code: 0,
-                output_redacted: String::new(),
-                worktree_changed: true,
-            })
-        }
-    }
-
-    const VALID: &str =
-        r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"Tier1"}]}"#;
-    const BAD_TIER: &str = r#"{"graph_id":"g","nodes":[{"id":1,"description":"d","depends_on":[],"tier":"analysis"}]}"#;
-
-    fn scratch(name: &str) -> (PathBuf, AgentSpec) {
-        let dir = std::env::temp_dir().join(format!("meshloop-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let spec = crate::agent::build_planning_spec(
-            "objective",
-            "scope",
-            AttemptId(0),
-            "claude-code",
-            "m",
-            dir.clone(),
-            Duration::from_secs(60),
-        );
-        (dir, spec)
-    }
-
-    #[test]
-    fn invalid_tier_then_valid_plan_succeeds_on_second_attempt_with_error_in_prompt() {
-        let (dir, spec) = scratch("retry-ok");
-        let harness = ScriptedPlanner {
-            responses: vec![BAD_TIER.into(), VALID.into()],
-            prompts: Default::default(),
-        };
-        let graph = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
-            .expect("second attempt is valid");
-        assert_eq!(graph.nodes.len(), 1);
-        let prompts = harness.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 2);
-        assert!(!prompts[0].contains("your previous graph failed"));
-        assert!(prompts[1].contains("your previous graph failed"));
-        assert!(prompts[1].contains("unknown variant `analysis`"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn all_attempts_malformed_reports_saved_rejected_plan_that_exists() {
-        let (dir, spec) = scratch("retry-exhausted");
-        let harness = ScriptedPlanner {
-            responses: vec![BAD_TIER.into()],
-            prompts: Default::default(),
-        };
-        let err = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected"))
-            .expect_err("every attempt is rejected");
-        assert_eq!(harness.prompts.lock().unwrap().len(), 2);
-        let PlanError::Exhausted {
-            attempts,
-            saved_plan: Some(path),
-            ..
-        } = &err
-        else {
-            panic!("expected Exhausted with a saved plan, got {err:?}");
-        };
-        assert_eq!(*attempts, 2);
-        assert!(path.is_file());
-        assert_eq!(std::fs::read_to_string(path).unwrap(), BAD_TIER);
-        assert!(err.to_string().contains(&path.display().to_string()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn dispatch_errors_are_not_retried() {
-        let (dir, spec) = scratch("retry-dispatch");
-        let harness = FakeHarness {
-            response: Err(HarnessError::Timeout),
-        };
-        let err = decompose_with_retry(&harness, &spec, 2, &dir.join("rejected")).unwrap_err();
-        assert!(matches!(err, PlanError::Dispatch(_)));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

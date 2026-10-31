@@ -215,7 +215,7 @@ fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
     let dir = std::env::temp_dir().join(format!("meshloop-test-{}-orphan", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let pid_file = dir.join("grandchild.pid");
-    let mut cmd = std::process::Command::new(fixture_path());
+    let mut cmd = meshloop_adapters::process::OwnedSpawnSpec::new(fixture_path());
     cmd.arg("--spawn-grandchild")
         .arg(&pid_file)
         .arg(dir.join("heartbeat.txt"));
@@ -269,15 +269,17 @@ fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
 fn cancel_leaves_an_unrelated_process_with_a_recorded_pid_alone() {
     // A recycled pid must not be killed: the recorded pid now belongs to another executable.
     #[cfg(windows)]
-    let mut other = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
-        .spawn()
+    let mut other =
+        meshloop_adapters::process::spawn_command(std::process::Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
+            "Start-Sleep -Seconds 30",
+        ]))
         .expect("spawn unrelated process");
     #[cfg(not(windows))]
-    let mut other = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn unrelated process");
+    let mut other =
+        meshloop_adapters::process::spawn_command(std::process::Command::new("sleep").arg("30"))
+            .expect("spawn unrelated process");
     let harness = CliHarness::new(CliHarnessConfig {
         name: "fixture".into(),
         executable: fixture_path(),
@@ -301,4 +303,153 @@ fn cancel_leaves_an_unrelated_process_with_a_recorded_pid_alone() {
         still_running,
         "cancel killed a process that is not this harness"
     );
+}
+
+fn capture_harness(args: &[&str]) -> CliHarness {
+    CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(5),
+        invoke_args_template: args.iter().map(|s| (*s).into()).collect(),
+    })
+}
+
+fn capture_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("meshloop-capture-{tag}-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn bounded_capture_drains_large_simultaneous_pipes_without_deadlock() {
+    let dir = capture_dir("large");
+    let harness = capture_harness(&["--large-output", "262144"]);
+    let handle = harness.invoke(&spec(dir.clone(), 700)).unwrap();
+    let outcome = harness.collect(&handle).unwrap();
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(
+        outcome.output_redacted,
+        format!("{}\u{2026}", "x".repeat(2048))
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_overflow_is_fault_not_partial_success() {
+    let dir = capture_dir("overflow");
+    let harness = capture_harness(&["--large-output", "4194305"]);
+    let handle = harness.invoke(&spec(dir.clone(), 701)).unwrap();
+    assert!(
+        matches!(harness.collect(&handle), Err(HarnessError::ProcessFault { detail }) if detail == "harness-output-overflow")
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_live_poll_and_cancel_do_not_wait_for_pipe_eof() {
+    let dir = capture_dir("poll");
+    let harness = capture_harness(&["--sleep-ms", "30000"]);
+    let handle = harness.invoke(&spec(dir.clone(), 702)).unwrap();
+    let start = std::time::Instant::now();
+    assert!(harness.try_collect(&handle).unwrap().is_none());
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let start = std::time::Instant::now();
+    harness.cancel(&handle).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_inherited_pipes_do_not_block_polling_or_collection() {
+    let dir = capture_dir("inherited");
+    let harness = capture_harness(&["--exit-with-inherited-pipes"]);
+    let mut input = spec(dir.clone(), 703);
+    input.timeout = Duration::from_millis(500);
+    let handle = harness.invoke(&input).unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let poll = std::time::Instant::now();
+        let result = harness.try_collect(&handle);
+        assert!(poll.elapsed() < Duration::from_secs(1));
+        match result {
+            Ok(Some(outcome)) => {
+                assert_eq!(outcome.exit_code, 0);
+                break;
+            }
+            Err(HarnessError::ProcessFault { detail })
+                if detail == "harness-output-eof-timeout" =>
+            {
+                break;
+            }
+            other => {
+                assert!(matches!(other, Ok(None)), "{other:?}");
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_preserves_capacity_exhaustion_signal() {
+    let dir = capture_dir("quota");
+    let harness = capture_harness(&["--exhausted"]);
+    let handle = harness.invoke(&spec(dir.clone(), 704)).unwrap();
+    assert!(matches!(
+        harness.collect(&handle),
+        Err(HarnessError::CapacityExhausted { .. })
+    ));
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_probe_overflow_reports_capture_fault() {
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--large-output".into(), "4194305".into()],
+        probe_timeout: Duration::from_secs(5),
+        invoke_args_template: vec!["--noop".into()],
+    });
+    assert!(
+        matches!(harness.probe(), Err(HarnessError::ProcessFault { detail }) if detail == "harness-output-overflow")
+    );
+}
+
+#[test]
+fn bounded_capture_duplicate_live_attempt_preserves_first_prompt_and_handle() {
+    let dir = capture_dir("duplicate");
+    let harness = capture_harness(&["--sleep-ms", "30000"]);
+    let first = spec(dir.clone(), 705);
+    let handle = harness.invoke(&first).unwrap();
+    let mut duplicate = first.clone();
+    duplicate.prompt = "must not replace first".into();
+    let result = harness.invoke(&duplicate);
+    let original = fs::read_to_string(dir.join(".meshloop-prompt-705")).unwrap();
+    let poll = harness.try_collect(&handle);
+    harness.cancel(&handle).unwrap();
+    assert!(result.is_err());
+    assert_eq!(original, first.prompt);
+    assert!(poll.unwrap().is_none());
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn bounded_capture_failed_spawn_releases_admission_and_attempt_reservation() {
+    let dir = capture_dir("failed-spawn");
+    let harness = CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: dir.join("missing-executable"),
+        version_args: vec![],
+        probe_timeout: Duration::from_secs(5),
+        invoke_args_template: vec!["--noop".into()],
+    });
+    for _ in 0..20 {
+        assert!(
+            matches!(harness.invoke(&spec(dir.clone(), 706)), Err(HarnessError::ProcessFault { detail }) if detail != "harness-output-capacity-blocked" && detail != "harness-output-capture-failed")
+        );
+    }
+    fs::remove_dir_all(dir).ok();
 }

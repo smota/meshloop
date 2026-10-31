@@ -106,7 +106,7 @@ pub struct RootRecord {
 pub struct GenerationRecord {
     pub id: LifecycleId,
     pub repository_id: LifecycleId,
-    pub graph_id: LifecycleId,
+    pub graph_id: GraphId,
     pub ordinal: u32,
     pub accepted_plan_hash: PlanHash,
     pub root_alias: RootAlias,
@@ -223,7 +223,7 @@ mod tests {
         let generation = GenerationRecord {
             id: LifecycleId::new("generation-1").unwrap(),
             repository_id: repository.id.clone(),
-            graph_id: LifecycleId::new("graph-1").unwrap(),
+            graph_id: GraphId::new("graph-1").unwrap(),
             ordinal: 1,
             accepted_plan_hash: PlanHash::new("b".repeat(64)).unwrap(),
             root_alias: RootAlias::new("worktrees").unwrap(),
@@ -255,5 +255,247 @@ mod tests {
         let mut invalid_record = serde_json::to_value(&generation).unwrap();
         invalid_record["relative_path"] = serde_json::Value::String("C:/external/root".into());
         assert!(serde_json::from_value::<GenerationRecord>(invalid_record).is_err());
+    }
+}
+
+// Graph identity deliberately preserves the complete pre-S3 logical grammar.
+text_type!(GraphId, crate::task_graph::graph_id_is_legal);
+text_type!(ObjectId, |s: &str| (s.len() == 40 || s.len() == 64)
+    && s.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortableLocation {
+    pub root_alias: RootAlias,
+    pub relative_path: RelativePath,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunBinding {
+    pub graph_id: GraphId,
+    pub repository_id: LifecycleId,
+    pub location: PortableLocation,
+    pub layout_version: u32,
+    pub active_generation: Option<LifecycleId>,
+    pub current_revision: Option<LifecycleId>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProvisionalKind {
+    Planning,
+    ControlOutput,
+    ReviewPack,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionalOwner {
+    pub id: LifecycleId,
+    pub repository_id: LifecycleId,
+    pub graph_id: Option<GraphId>,
+    pub kind: ProvisionalKind,
+    pub location: PortableLocation,
+    pub provenance: LifecycleId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionalPromotion {
+    pub owner_id: LifecycleId,
+    pub generation_id: LifecycleId,
+    pub artifact_id: LifecycleId,
+}
+/// Metadata is exportable; exact protected plan JSON is held by the engine snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRevision {
+    pub id: LifecycleId,
+    pub repository_id: LifecycleId,
+    pub graph_id: GraphId,
+    pub generation_id: Option<LifecycleId>,
+    pub predecessor: Option<LifecycleId>,
+    pub plan_hash: PlanHash,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthorizationKind {
+    Human,
+    InheritedAdr0028,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RevisionDecision {
+    Accepted,
+    Declined,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionAuthorization {
+    pub id: LifecycleId,
+    pub revision_id: LifecycleId,
+    pub kind: AuthorizationKind,
+    pub decision: RevisionDecision,
+    pub actor: LifecycleId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionScope {
+    pub repository_id: LifecycleId,
+    pub graph_id: GraphId,
+    pub generation_id: LifecycleId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunScope {
+    ActiveGeneration,
+    Generation(LifecycleId),
+    Legacy,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProducerTarget {
+    RootBootstrap(RootAlias),
+    Provisional(LifecycleId),
+    Artifact(LifecycleId),
+    Driver(LifecycleId),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProducerKind {
+    BootstrapRoot,
+    Plan,
+    Cache,
+    Spawn,
+    Worktree,
+    Commit,
+    Merge,
+    RetainRef,
+    ReviewPack,
+    Deliverable,
+    Landing,
+    Verify,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedState {
+    pub source_artifact: Option<LifecycleId>,
+    pub source: Option<ObjectId>,
+    pub base: Option<ObjectId>,
+    pub location: Option<PortableLocation>,
+    pub native_identity: Option<NativeIdentity>,
+    pub head: Option<ObjectId>,
+    pub reference: Option<RelativePath>,
+    pub registered: bool,
+    pub exists: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducerOperation {
+    pub id: LifecycleId,
+    pub repository_id: LifecycleId,
+    pub graph_id: Option<GraphId>,
+    pub generation_id: Option<LifecycleId>,
+    pub target: ProducerTarget,
+    pub kind: ProducerKind,
+    pub before: ExpectedState,
+    pub after: ExpectedState,
+    pub max_steps: u32,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationState {
+    Completed,
+    Blocked,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationStep {
+    pub id: LifecycleId,
+    pub operation_id: LifecycleId,
+    pub step: u32,
+    pub observed: ExpectedState,
+    pub state: OperationState,
+    pub error_code: Option<LifecycleId>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub creation_token: LifecycleId,
+    pub tree_token: LifecycleId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DriverTarget {
+    Execution(ExecutionScope),
+    Provisional {
+        repository_id: LifecycleId,
+        owner_id: LifecycleId,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DriverPhase {
+    HandoffPending,
+    Starting,
+    Running,
+    Exited,
+    Lost,
+    Blocked,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverRecord {
+    pub id: LifecycleId,
+    pub nonce: LifecycleId,
+    pub target: DriverTarget,
+    pub process: Option<ProcessIdentity>,
+    pub phase: DriverPhase,
+    pub heartbeat: u64,
+    pub error_code: Option<LifecycleId>,
+    pub diagnostic: Option<PortableLocation>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancellationTarget {
+    Execution {
+        scope: ExecutionScope,
+        driver_id: LifecycleId,
+        task_id: Option<crate::task_graph::TaskId>,
+    },
+    Provisional {
+        repository_id: LifecycleId,
+        owner_id: LifecycleId,
+        driver_id: LifecycleId,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancellationRequest {
+    pub id: LifecycleId,
+    pub target: CancellationTarget,
+    pub process: ProcessIdentity,
+    pub created_at: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancellationStatus {
+    Pending,
+    Applied,
+    Blocked,
+    Stale,
+    OwnerLost,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancellationObservation {
+    pub request: CancellationRequest,
+    pub status: CancellationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactBinding {
+    pub artifact_id: LifecycleId,
+    pub revision_id: LifecycleId,
+    pub logical_tag: Option<GraphId>,
+}
+
+#[cfg(test)]
+mod graph_identity_tests {
+    use super::*;
+    #[test]
+    fn b1_graph_identity_preserves_complete_existing_grammar() {
+        for value in [
+            ".".to_string(),
+            "..".to_string(),
+            "release.1".to_string(),
+            "._-Az09".to_string(),
+            "a".repeat(5000),
+        ] {
+            let id = GraphId::new(value.clone()).unwrap();
+            assert_eq!(id.as_str(), value);
+            let encoded = serde_json::to_string(&id).unwrap();
+            assert_eq!(id, serde_json::from_str::<GraphId>(&encoded).unwrap());
+        }
+        for value in ["", "/", "a/b", "a\\b", "white space", "é"] {
+            assert!(GraphId::new(value).is_err());
+        }
+        for path in [".", "..", "run/../escape", "/root", "C:/root"] {
+            assert!(RelativePath::new(path).is_err());
+        }
+        assert!(RelativePath::new("run/opaque-generation/artifact").is_ok());
     }
 }

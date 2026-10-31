@@ -32,6 +32,8 @@ pub fn spawn_detached(mut cmd: Command) -> std::io::Result<Child> {
 
 #[cfg(windows)]
 fn spawn_windows(mut cmd: Command) -> std::io::Result<Child> {
+    // Includes clear/spawn/restore and coordinates with owned child-only duplicates.
+    let _guard = super::spawn_guard()?;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{
         GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,

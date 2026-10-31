@@ -45,7 +45,14 @@ fn many<T: DeserializeOwned>(
         .collect()
 }
 impl SqliteStore {
-    fn validate_fence(&self, fence: &dyn RepositoryFence, bound: bool) -> Result<(), StoreError> {
+    pub(super) fn validate_fence(
+        &self,
+        fence: &dyn RepositoryFence,
+        bound: bool,
+    ) -> Result<(), StoreError> {
+        if self.read_only {
+            return Err(StoreError::ReadOnly);
+        }
         fence.validate()?;
         let path = self
             .conn
@@ -215,7 +222,7 @@ impl WorkspaceLedger for SqliteStore {
     fn generations(
         &self,
         repository: &LifecycleId,
-        graph: &LifecycleId,
+        graph: &GraphId,
     ) -> Result<Vec<GenerationRecord>, StoreError> {
         let mut stmt=self.conn.prepare("SELECT payload_json FROM workspace_generations WHERE repo_id=?1 AND graph_id=?2 ORDER BY ordinal").map_err(sql_error)?;
         stmt.query_map(params![repository.as_str(), graph.as_str()], |r| {

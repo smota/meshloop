@@ -13,6 +13,93 @@ CI double, `meshloop:review-plan` as the plan gate). Residuals (WSL2, concurrenc
 > 1, packaging, queried quota) are tracked as GitHub `limitation` issues. Do not read
 unverified paragraphs as product. Operator path: [Getting started](../start.md).
 
+### Bounded S3 public observation milestone (issue #74)
+
+For lifecycle-bound runs, status, inspect and watch capture the active generation and
+immutable current plan revision once per command. Events, attempts and evidence are
+selected within that generation; earlier revisions within it remain part of replay,
+validated through the exact activation revision and predecessor chain (maximum 4096
+revisions). Inconsistent bindings or revision linkage refuse observation. Only runs
+without a lifecycle binding retain the legacy read path. Bound output labels generation
+and revision and uses root aliases plus relative locations; it never resolves external
+roots for display. Bound Git export is explicitly unavailable until artifact-based
+export is implemented.
+Bound attempt process liveness remains `Ambiguous` until process-identity observation
+is implemented; an attempt completion timestamp does not establish OS process death.
+Attempt JSON carries its own generation and plan revision, including retained attempts
+from earlier revisions. The exact activation association permits restart to reuse an
+immutable revision originating in a prior generation. Revision metadata with no
+generation remains valid under the existing projection contract; an explicit conflicting
+generation after the activation revision refuses observation.
+
+Each command's selection and frame share one consistent SQLite read transaction;
+nested observations reuse that transaction and never close a caller-owned transaction.
+Observation ends its own transaction through explicit rollback, propagating failures.
+The activation revision and every revision with executed events or attempts must have
+historical accepted authorization. Later declines preserve that execution provenance.
+Current plan state follows the latest authorization, refreshed per frame: accepted means
+`PlanAccepted`; missing or declined authorization means `AwaitingPlanReview`, matching
+the existing revision projection contract.
+
+Watch refreshes events in its captured scope. A generation or revision change returns
+`ReadScopeChanged` and requires a new observation, so newer-revision events are never
+folded against the captured older plan. This milestone does not implement generation
+producers, restart preservation, historical CLI selectors, or the complete S3 oracle.
+SQLite observation sidecars follow accepted ADR 0034.
+Every watch poll opens a fresh read snapshot, allowing committed events and same-revision
+authorization changes to appear without mixing records from different database states.
+
+### Bounded RunLoop mutation admission (issue #74)
+
+Graph-targeted `RunLoop` mutation entry points check the lifecycle binding before
+filesystem, Git, process or store effects. Pending and active bindings return
+`LegacyOwnershipUnresolved`; lookup errors propagate without legacy fallback.
+This includes start/stage, plan decisions/mutations, tick, resume/restart, cancel,
+human acceptance, integration/deliverable paths and Git export. Unbound runs keep
+the existing legacy path. This is a snapshot admission check, not a cross-process
+fence or complete exclusion of binding changes after the check. It does not cover
+orchestration outside `RunLoop`, activate generations, implement successful bound
+producers or safe cleanup, or complete S3.
+
+### Bounded provisional planner producer (issue #74)
+
+`RunLoop::plan` requires writable `LifecycleAccess`. Both `plan` and
+`review-plan --adjust` acquire the repository fence, bind the same ledger, and
+retain the lease through dispatch and collection. This covers root and planner
+production; initial SQLite opening/creation/migration still precedes acquisition.
+The requested CLI `--out` export retains its existing behavior and is outside this
+managed attempt ownership journal.
+It does not extend the fence to legacy graph execution or other producers.
+
+Each invocation and bounded validation retry creates a fresh opaque worktree/ref.
+A provisional worktree owner and a distinct protected output owner permit typed
+Worktree, Spawn and Plan intents before effects under the existing exclusive
+pending-target rule. No accepted hash, generation or execution binding is created.
+Existing bound-run mutation refusal and the acceptance gate remain in force.
+
+The selected existing root is registered without adopting artifacts. Missing root
+parents use one retained registry intent containing the full relative suffix before
+any directory creation. Reparse ancestors and ambiguous partially created trees
+are refused and retained for reconciliation; automatic recovery is not implemented.
+The current default root and explicit configuration behavior are preserved.
+Windows canonical drive/UNC prefixes are converted only after identity and
+containment validation so native Git can consume equivalent absolute paths.
+
+Planner-written output is preserved in its owned attempt. If no file was produced,
+collected stdout is written there before validation. Preexisting tracked output is
+refused before dispatch. Rejected plans, failed worktrees and old attempts are never
+reset, overwritten or deleted. Operation records contain aliases, relative locations
+and stable error codes only; output, source and prompts stay outside durable
+telemetry. Rejection diagnostics identify portable locators rather than external
+absolute paths. Filesystem failures propagate as stable public errors.
+
+Successful collection completes Spawn; only a validated successful output completes
+Plan. Rejected output blocks Plan with a stable classification and may use the
+bounded validation retry budget. Invoke/collect failures leave their intents
+unresolved and stop retries. Full process identity, cancellation, driver control,
+recovery and crash reconciliation remain outstanding; these records are not proof
+that an uncertain process tree has stopped. This milestone is not full S3 acceptance.
+
 ## 1. Product scope, platforms, and operating surface (ADR 0001)
 
 **Platforms.** R1 stamp: native Windows 10/11 only. v1 target Tier A also includes
@@ -193,6 +280,14 @@ once this ADR is accepted, per `schemas/README.md`):
 - `routing_feedback(harness, model_ref, tier, success_count, failure_count, updated_at)` —
   aggregate counters only, feeding §5's routing scores.
 
+**Existing-ledger observation (ADR 0034).** A read-only SQLite connection may let
+SQLite create, update, or remove its WAL/SHM coordination sidecars so readers see
+committed live WAL data while a writer holds the repository fence. Observation
+does not migrate schemas, set journal mode, write application schema/data, initialize
+identity, register roots, or adopt runs. An absent ledger creates no files or
+directories. Permission and compatibility errors remain explicit; immutable live-source
+fallbacks are forbidden. This contract does not claim full S3 implementation.
+
 **Redaction.** No raw prompt text, no full model completions, no file contents, no
 credentials or tokens are persisted. [ADR 0033](adr/0033-workspace-lifecycle.md),
 accepted 2026-10-28 with implementation not-started, narrowly permits absolute
@@ -361,3 +456,50 @@ via domain event `Event::GraphMutated`:
 **Operator governance.** If invoked with `--require-review`, `RunLoop::mutate_plan` transitions the
 run to `PlanState::AwaitingPlanReview`. `meshloop resume` is refused until the operator accepts the
 modified plan via `meshloop review-plan --plan .meshloop/plan.json --accept --as <identity>`.
+
+### Bounded CLI harness output collection
+
+CLI invocation and version probes drain stdout and stderr concurrently. Each stream
+retains at most 4 MiB; overflow, read failure, invalid UTF-8 or reader failure is a
+capture fault. The existing 2048-byte redacted outcome limit remains in effect;
+large planner JSON uses its protected owned plan file. Sixteen capture pairs are
+admitted process-wide before spawn (at most 32 reader threads and 128 MiB of retained
+stream bytes, excluding ordinary transient parsing/redaction allocations). Both
+workers and capture state retain admission until released. Escaped external writers
+holding a pipe can consume a slot even after harness destruction; subsequent harness
+instances refuse new admission when capacity is exhausted. This bounds accumulation,
+without promising termination of an escaped writer. Probes share the admission budget.
+
+Polling never reads a pipe or joins an unfinished reader under the harness registry
+mutex. The CLI dispatch wrapper delegates nonblocking collection. Owned handles remain
+available through output collection so deadline failure can terminate owned descendants.
+Pending pipe EOF at the deadline reports an explicit EOF timeout; a still-running leader
+reports the existing attempt Timeout. Existing cancellation remains best effort and does
+not prove process tree quiescence. Public provisional driver cancellation and full S3
+producer/recovery integration remain outstanding.
+
+### Atomic owned Windows startup (ADR 0035)
+
+Owned harnesses, checks and bounded Git probes use an explicit adapter spawn
+specification. Windows creates the child directly inside a private kill-on-close
+job with `CreateProcessW` job-list attributes; its explicit standard-handle allowlist
+excludes the job and unrelated handles. Private inheritable duplicates are closed
+before the shared launch guard releases. Meshloop-controlled ordinary and detached
+launches share this guard; embedders must use `process::spawn_command` for other
+launches in the same host process. The guard covers launch rather than process wait.
+Detached handoff policy and POSIX process-group/recovery policy remain unchanged.
+
+The native wrapper supports structured arguments, UTF-16 environment changes,
+working directories and null/piped/inherited standard streams. Batch launch forms
+are explicitly rejected. Executable search is checked against stable Rust's
+Windows behavior, including changed child PATH precedence and parent-relative
+explicit executable paths. Native failures expose operation names and error codes,
+without arguments, environment values or private absolute paths.
+
+`OwnedChild::terminate_and_observe` retains the job while it observes direct-child
+exit, caches that status, releases its own process reference and queries for zero
+active job processes within a deadline. Failure and unresolved membership return
+errors. This adapter observation is not a driver acknowledgement. Legacy cleanup
+still provides no quiescence proof. Focused native fixtures and their negative
+controls are recorded in ADR 0035; independent review, concrete unsafe-code human
+acceptance and the remaining driver-control evidence are still pending.

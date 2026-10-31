@@ -129,6 +129,47 @@ pub fn attempt_json(a: &AttemptView) -> serde_json::Value {
     })
 }
 
+pub fn scoped_attempt_json(
+    a: &AttemptView,
+    frame: &meshloop_engine::workspace::read::ReadFrame,
+) -> serde_json::Value {
+    let mut value = attempt_json(a);
+    if let Some(location) = frame.attempt_locations.get(&a.attempt_id.0) {
+        value["location"] = serde_json::to_value(location).unwrap_or(serde_json::Value::Null);
+        value["generation_id"] =
+            serde_json::to_value(&frame.generation_id).unwrap_or(serde_json::Value::Null);
+        value["revision_id"] = serde_json::to_value(frame.attempt_revisions.get(&a.attempt_id.0))
+            .unwrap_or(serde_json::Value::Null);
+    }
+    value
+}
+
+pub fn format_read_scope(frame: &meshloop_engine::workspace::read::ReadFrame) -> String {
+    let (Some(generation), Some(revision)) = (&frame.generation_id, &frame.revision_id) else {
+        return String::new();
+    };
+    let mut text = format!(
+        "generation={} revision={}\n",
+        generation.as_str(),
+        revision.as_str()
+    );
+    for node in &frame.status.nodes {
+        if let Some(location) = frame.locations.get(&node.task_id) {
+            text += &format!(
+                "  [{}] location={}:{}\n",
+                node.task_id.0,
+                location.root_alias.as_str(),
+                location.relative_path.as_str()
+            );
+        }
+    }
+    text += &format!(
+        "git_export unavailable: {}\n",
+        meshloop_engine::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE
+    );
+    text
+}
+
 pub fn format_attempt(a: &AttemptView) -> String {
     format!(
         "  attempt {} harness={} model={} duration={} outcome={} evidence={}",

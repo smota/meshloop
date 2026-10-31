@@ -364,9 +364,16 @@ fn cmd_plan(
         fixture_only: false,
     }) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
+        Err(_) => {
+            eprintln!("planner-access-failed");
             return ExitCode::from(2);
+        }
+    };
+    let mut planning_access = match compose::planning_access(&mut composed) {
+        Ok(access) => access,
+        Err(_) => {
+            eprintln!("planner-access-failed");
+            return ExitCode::from(1);
         }
     };
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
@@ -397,13 +404,12 @@ fn cmd_plan(
     let (graph, planner) = match saga.plan(
         &objective,
         scope.as_deref().unwrap_or("scope: this repository only"),
+        &mut planning_access,
     ) {
         Ok(p) => (p.graph, p.planner),
-        Err(OrchestratorError::NoCandidate(rejections)) => {
-            eprintln!("Decomposition failed: no harness can run the planner.");
-            for r in &rejections {
-                eprintln!("  {}: {}", r.harness, r.reason);
-            }
+        Err(OrchestratorError::NoCandidate(_)) => {
+            // Probe/router reasons may contain process output or private paths.
+            eprintln!("planner-no-candidate");
             if cfg.planner.harness.is_none() {
                 eprintln!("{}", report::PLANNER_ROUTING_HINT);
             }
@@ -414,8 +420,8 @@ fn cmd_plan(
             eprintln!("Decomposition failed: {e}");
             return ExitCode::from(1);
         }
-        Err(e) => {
-            eprintln!("Decomposition failed: {e:?}");
+        Err(_) => {
+            eprintln!("planner-operation-failed");
             return ExitCode::from(1);
         }
     };
@@ -526,9 +532,24 @@ fn cmd_review_plan(
     }) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{e}");
+            if decision == PlanDecision::Adjust {
+                eprintln!("planner-access-failed");
+            } else {
+                eprintln!("{e}");
+            }
             return ExitCode::from(2);
         }
+    };
+    let mut planning_access = if decision == PlanDecision::Adjust {
+        match compose::planning_access(&mut composed) {
+            Ok(access) => Some(access),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
     };
     let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
         .harnesses
@@ -582,9 +603,14 @@ fn cmd_review_plan(
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+        let Some(access) = planning_access.as_mut() else {
+            eprintln!("planner-access-failed");
+            return ExitCode::from(1);
+        };
         match saga.plan(
             &prompt,
             scope.as_deref().unwrap_or("scope: this repository only"),
+            access,
         ) {
             Ok(p) => graph = p.graph,
             Err(e) => {
@@ -592,7 +618,7 @@ fn cmd_review_plan(
                     OrchestratorError::Plan(p) => {
                         eprintln!("Adjust decomposition failed: {p}")
                     }
-                    _ => eprintln!("Adjust decomposition failed: {e:?}"),
+                    _ => eprintln!("planner-operation-failed"),
                 }
                 return ExitCode::from(1);
             }
@@ -994,6 +1020,106 @@ fn with_saga(
     f(&mut saga)
 }
 
+struct ReadRequest<'a> {
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    command: &'a str,
+    empty_status: bool,
+    requested_graph: Option<&'a str>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+}
+
+fn with_read_only_saga(
+    request: ReadRequest<'_>,
+    f: impl FnOnce(&mut RunLoop<'_>) -> ExitCode,
+) -> ExitCode {
+    let ReadRequest {
+        config,
+        db,
+        command,
+        empty_status,
+        requested_graph,
+        json,
+        origin,
+    } = request;
+    let (cfg, _) = match load_cfg(config) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let mut composed = match compose::compose_read_only(compose::ComposeRequest {
+        config: &cfg,
+        repo_root: repo_root(),
+        db_path: db.as_deref(),
+        worktree_base: None,
+        origin: origin.clone(),
+        fixture_only: false,
+    }) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            if empty_status {
+                if json {
+                    println!(
+                        "{}",
+                        json_out::ok(
+                            command,
+                            origin,
+                            serde_json::json!({
+                                "banner": report::banner(), "runs": []
+                            })
+                        )
+                    );
+                } else {
+                    print!("{}", report::banner());
+                }
+                return ExitCode::SUCCESS;
+            }
+            let message = requested_graph.map_or_else(
+                || "graph not found: no managed runs".to_string(),
+                |id| format!("graph '{id}' not found: no managed runs"),
+            );
+            return read_error(command, origin, json, message);
+        }
+        Err(e) => return read_error(command, origin, json, e),
+    };
+    let harness_refs: HashMap<String, &dyn HarnessCapabilities> = composed
+        .harnesses
+        .iter()
+        .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
+        .collect();
+    let mut saga = RunLoop {
+        harnesses: harness_refs,
+        candidates: composed.candidates.clone(),
+        workspace: &composed.git,
+        store: &mut composed.store,
+        processes: &composed.processes,
+        checks: &composed.checks,
+        router: Router::default(),
+        limits: composed.limits,
+        fixture_only: false,
+        verify_command: composed.verify_command.clone(),
+        worktree_base: composed.worktree_base.clone(),
+        active_graph: None,
+        planner: composed.planner.clone(),
+    };
+    f(&mut saga)
+}
+
+fn read_error(
+    command: &str,
+    origin: meshloop_engine::origin::Origin,
+    json: bool,
+    message: impl Into<String>,
+) -> ExitCode {
+    let message = message.into();
+    if json {
+        println!("{}", json_out::err(command, origin, message));
+    } else {
+        eprintln!("{message}");
+    }
+    ExitCode::from(2)
+}
+
 fn cmd_status(
     graph: Option<String>,
     config: Option<PathBuf>,
@@ -1010,7 +1136,16 @@ fn cmd_status(
         }
         return ExitCode::from(2);
     }
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:status",
+        empty_status: graph.is_none(),
+        requested_graph: graph.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(graph.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1038,19 +1173,11 @@ fn cmd_status(
                 return ExitCode::SUCCESS;
             }
         };
-        match saga.status(&id) {
-            Ok(s) => {
+        match saga.read_current_frame(&id) {
+            Ok(frame) => {
+                let s = &frame.status;
                 if json {
-                    let summary = match saga.run_summary(&id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            println!(
-                                "{}",
-                                json_out::err("meshloop:status", origin.clone(), format!("{e:?}"))
-                            );
-                            return ExitCode::from(2);
-                        }
-                    };
+                    let summary = frame.summary;
                     println!(
                         "{}",
                         json_out::ok(
@@ -1058,6 +1185,9 @@ fn cmd_status(
                             origin.clone(),
                             serde_json::json!({
                                 "graph_id": s.graph_id,
+                                "generation_id": frame.generation_id,
+                                "revision_id": frame.revision_id,
+                                "git_export_unavailable": frame.generation_id.as_ref().map(|_| meshloop_engine::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE),
                                 "summary": {
                                     "attempts": summary.attempts,
                                     "retries": summary.retries,
@@ -1070,6 +1200,7 @@ fn cmd_status(
                                     "description": n.description,
                                     "pane_id": n.pane_id,
                                     "live": n.live,
+                                    "location": frame.locations.get(&n.task_id),
                                     "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                     "note": n.note,
                                     "waiting_for": n.waiting_for.map(|w| w.as_str()),
@@ -1080,7 +1211,11 @@ fn cmd_status(
                         )
                     );
                 } else {
-                    print!("{}", report::format_status(&s));
+                    print!(
+                        "{}{}",
+                        report::format_read_scope(&frame),
+                        report::format_status(s)
+                    );
                 }
                 ExitCode::SUCCESS
             }
@@ -1239,7 +1374,16 @@ fn cmd_inspect(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let resolved_id = graph.or(session_id);
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:inspect",
+        empty_status: false,
+        requested_graph: resolved_id.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1254,24 +1398,12 @@ fn cmd_inspect(
                 return ExitCode::from(2);
             }
         };
-        match saga.status(&id) {
-            Ok(s) => {
+        match saga.read_current_frame(&id) {
+            Ok(frame) => {
+                let s = &frame.status;
                 if let Some(t) = task {
                     if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == t) {
-                        let attempts = match saga.attempts(&id, n.task_id) {
-                            Ok(a) => a,
-                            Err(e) => {
-                                if json {
-                                    println!(
-                                        "{}",
-                                        json_out::err("meshloop:inspect", origin, format!("{e:?}"))
-                                    );
-                                } else {
-                                    eprintln!("{e:?}");
-                                }
-                                return ExitCode::from(1);
-                            }
-                        };
+                        let attempts = frame.attempts.get(&n.task_id).cloned().unwrap_or_default();
                         if json {
                             println!(
                                 "{}",
@@ -1280,21 +1412,25 @@ fn cmd_inspect(
                                     origin.clone(),
                                     serde_json::json!({
                                         "session_id": id,
+                                        "generation_id": frame.generation_id,
+                                        "revision_id": frame.revision_id,
                                         "task_id": n.task_id.0,
                                         "state": format!("{:?}", n.state),
                                         "description": n.description,
-                                        "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                        "location": frame.locations.get(&n.task_id),
+                                    "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                         "pane_id": n.pane_id,
                                         "live": n.live,
                                         "note": n.note,
                                         "waiting_for": n.waiting_for.map(|w| w.as_str()),
                                         "deliverable": n.deliverable,
                                         "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
-                                        "attempts": attempts.iter().map(report::attempt_json).collect::<Vec<_>>(),
+                                        "attempts": attempts.iter().map(|a| report::scoped_attempt_json(a, &frame)).collect::<Vec<_>>(),
                                     }),
                                 )
                             );
                         } else {
+                            print!("{}", report::format_read_scope(&frame));
                             println!(
                                 "task {} state={:?} {} worktree={:?}",
                                 n.task_id.0, n.state, n.description, n.worktree
@@ -1316,12 +1452,19 @@ fn cmd_inspect(
                         ExitCode::from(2)
                     }
                 } else {
-                    let git_export = saga.export_git_metadata(&id).ok().flatten();
-                    let overall_status = compute_overall_status(&s);
+                    let git_export = if frame.generation_id.is_some() {
+                        None
+                    } else {
+                        saga.export_git_metadata(&id).ok().flatten()
+                    };
+                    let overall_status = compute_overall_status(s);
                     if json {
                         let mut data = serde_json::json!({
                             "session_id": id,
                             "graph_id": s.graph_id,
+                                "generation_id": frame.generation_id,
+                                "revision_id": frame.revision_id,
+                                "git_export_unavailable": frame.generation_id.as_ref().map(|_| meshloop_engine::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE),
                             "status": overall_status,
                             "plan_state": format!("{:?}", s.plan_state),
                             "nodes": s.nodes.iter().map(|n| serde_json::json!({
@@ -1330,7 +1473,8 @@ fn cmd_inspect(
                                 "description": n.description,
                                 "pane_id": n.pane_id,
                                 "live": n.live,
-                                "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                "location": frame.locations.get(&n.task_id),
+                                    "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
                                 "note": n.note,
                                 "waiting_for": n.waiting_for.map(|w| w.as_str()),
                                 "deliverable": n.deliverable,
@@ -1340,24 +1484,15 @@ fn cmd_inspect(
                         if with_attempts {
                             for node in data["nodes"].as_array_mut().into_iter().flatten() {
                                 let tid = TaskId(node["id"].as_u64().unwrap_or(0) as u32);
-                                match saga.attempts(&id, tid) {
-                                    Ok(a) => {
-                                        node["attempts"] = serde_json::Value::Array(
-                                            a.iter().map(report::attempt_json).collect(),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        println!(
-                                            "{}",
-                                            json_out::err(
-                                                "meshloop:inspect",
-                                                origin,
-                                                format!("{e:?}")
-                                            )
-                                        );
-                                        return ExitCode::from(1);
-                                    }
-                                }
+                                node["attempts"] = serde_json::Value::Array(
+                                    frame
+                                        .attempts
+                                        .get(&tid)
+                                        .into_iter()
+                                        .flatten()
+                                        .map(|a| report::scoped_attempt_json(a, &frame))
+                                        .collect(),
+                                );
                             }
                         }
                         if let Some(export) = git_export {
@@ -1366,7 +1501,11 @@ fn cmd_inspect(
                         }
                         println!("{}", json_out::ok("meshloop:inspect", origin.clone(), data));
                     } else {
-                        print!("{}", report::format_status(&s));
+                        print!(
+                            "{}{}",
+                            report::format_read_scope(&frame),
+                            report::format_status(s)
+                        );
                     }
                     ExitCode::SUCCESS
                 }
@@ -1380,7 +1519,11 @@ fn cmd_inspect(
                 } else {
                     eprintln!("{e:?}");
                 }
-                ExitCode::from(1)
+                ExitCode::from(if matches!(e, OrchestratorError::MissingGraph(_)) {
+                    2
+                } else {
+                    1
+                })
             }
         }
     })
@@ -1433,7 +1576,16 @@ fn cmd_watch(
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
     let resolved_id = graph.or(session_id);
-    with_saga(config, db, None, false, origin.clone(), |saga| {
+    let request = ReadRequest {
+        config,
+        db,
+        command: "meshloop:watch",
+        empty_status: false,
+        requested_graph: resolved_id.as_deref(),
+        json,
+        origin: origin.clone(),
+    };
+    with_read_only_saga(request, |saga| {
         let id = match saga.resolve_graph_id(resolved_id.as_deref()) {
             Ok(id) => id,
             Err(e) => {
@@ -1446,13 +1598,25 @@ fn cmd_watch(
                 return ExitCode::from(2);
             }
         };
+        let selection =
+            match meshloop_engine::workspace::read::ReadSelection::capture(saga.store, &id) {
+                Ok(selection) => selection,
+                Err(e) => {
+                    let message = if matches!(e, OrchestratorError::MissingGraph(_)) {
+                        format!("graph '{id}' not found: {e:?}")
+                    } else {
+                        format!("{e:?}")
+                    };
+                    return read_error("meshloop:watch", origin, json, message);
+                }
+            };
         let started = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);
         let interval = std::time::Duration::from_secs(interval_secs);
         let mut seen: HashMap<u32, TaskState> = HashMap::new();
         loop {
-            let s = match saga.status(&id) {
-                Ok(s) => s,
+            let frame = match saga.read_frame(&selection) {
+                Ok(frame) => frame,
                 Err(e) => {
                     let missing = matches!(e, OrchestratorError::MissingGraph(_));
                     let msg = if missing {
@@ -1468,10 +1632,14 @@ fn cmd_watch(
                     return ExitCode::from(if missing { 2 } else { 1 });
                 }
             };
+            let s = &frame.status;
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            if seen.is_empty() && !json {
+                print!("{}", report::format_read_scope(&frame));
+            }
             for n in &s.nodes {
                 let prev = seen.insert(n.task_id.0, n.state);
                 if prev == Some(n.state) {
@@ -1479,17 +1647,19 @@ fn cmd_watch(
                 }
                 let waiting = n.waiting_for.map(|w| w.as_str());
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "ts": ts,
-                            "graph_id": s.graph_id,
-                            "node": n.task_id.0,
-                            "from": prev.map(|p| format!("{p:?}")),
-                            "to": format!("{:?}", n.state),
-                            "waiting_for": waiting,
-                        })
-                    );
+                    let mut event = serde_json::json!({
+                        "ts": ts,
+                        "graph_id": s.graph_id,
+                        "node": n.task_id.0,
+                        "from": prev.map(|p| format!("{p:?}")),
+                        "to": format!("{:?}", n.state),
+                        "waiting_for": waiting,
+                    });
+                    if frame.generation_id.is_some() {
+                        event["generation_id"] = serde_json::json!(frame.generation_id);
+                        event["revision_id"] = serde_json::json!(frame.revision_id);
+                    }
+                    println!("{event}");
                 } else {
                     let from = prev.map_or("-".to_string(), |p| format!("{p:?}"));
                     let wait = waiting.map_or(String::new(), |w| format!(" (waiting: {w})"));
@@ -1499,7 +1669,7 @@ fn cmd_watch(
                     );
                 }
             }
-            let (reason, nodes, code) = match watch_exit(&s) {
+            let (reason, nodes, code) = match watch_exit(s) {
                 Some((reason, nodes)) => {
                     let code = match reason {
                         "failed" | "cancelled" => 1,
@@ -1520,7 +1690,12 @@ fn cmd_watch(
                 }
             };
             if json {
-                println!("{}", serde_json::json!({ "exit": reason, "nodes": nodes }));
+                let mut exit = serde_json::json!({ "exit": reason, "nodes": nodes });
+                if frame.generation_id.is_some() {
+                    exit["generation_id"] = serde_json::json!(frame.generation_id);
+                    exit["revision_id"] = serde_json::json!(frame.revision_id);
+                }
+                println!("{exit}");
             } else {
                 let ids: Vec<String> = nodes.iter().map(u32::to_string).collect();
                 println!("exit: {reason} nodes=[{}]", ids.join(","));

@@ -50,6 +50,12 @@ impl HarnessCapabilities for DispatchHarness {
         }
     }
 
+    fn try_collect(&self, handle: &HarnessHandle) -> Result<Option<HarnessOutcome>, HarnessError> {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.try_collect(handle),
+        }
+    }
+
     fn session_live(&self, handle: &HarnessHandle) -> meshloop_engine::ports::LiveCheck {
         match self {
             Self::Fixture(h) | Self::Direct(h) => h.session_live(handle),
@@ -74,6 +80,7 @@ pub struct Composed {
     pub candidates: Vec<Candidate>,
     pub git: GitWorktreeAdapter,
     pub store: SqliteStore,
+    pub db_path: PathBuf,
     pub processes: HostProcessView,
     pub checks: CommandCheckRunner,
     pub limits: RunLimits,
@@ -129,6 +136,55 @@ pub struct ComposeRequest<'a> {
 }
 
 pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
+    compose_store(req, false)?.ok_or_else(|| "writable store unexpectedly absent".into())
+}
+
+/// Observes an existing ledger without migration, identity or gitignore maintenance.
+/// Existing ledgers may have SQLite-managed WAL/SHM effects (ADR 0034).
+pub fn compose_read_only(req: ComposeRequest<'_>) -> Result<Option<Composed>, String> {
+    compose_store(req, true)
+}
+
+/// The caller retains this fence through planner dispatch and collection. Opening
+/// the existing writable SQLite store precedes this producer-specific fence.
+pub fn planning_access(
+    composed: &mut Composed,
+) -> Result<meshloop_adapters::workspace::RepositoryLease, String> {
+    use meshloop_adapters::workspace::GitRepositoryIdentity;
+    use meshloop_domain::workspace::RootAlias;
+    use meshloop_engine::ports::WorkspacePort;
+    use meshloop_engine::workspace::{LifecycleAccess, RepositoryIdentity, WorkspaceLedger};
+    let db = &composed.db_path;
+    let mut lease = GitRepositoryIdentity::new("git")
+        .acquire(composed.git.repo_root(), db)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    composed
+        .store
+        .bind_repository(&lease)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    let alias =
+        RootAlias::new("planning-worktrees").map_err(|_| "planner-access-failed".to_string())?;
+    match std::fs::symlink_metadata(&composed.worktree_base) {
+        Ok(_) => {
+            lease
+                .register_root(alias.clone(), &composed.worktree_base)
+                .map_err(|_| "planner-access-failed".to_string())?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            lease
+                .bootstrap_root(alias.clone(), &composed.worktree_base)
+                .map_err(|_| "planner-access-failed".to_string())?;
+        }
+        Err(_) => return Err("planner root inspection failed".into()),
+    }
+    composed
+        .store
+        .register_root(&lease, &alias)
+        .map_err(|_| "planner-access-failed".to_string())?;
+    Ok(lease)
+}
+
+fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Composed>, String> {
     let mut harnesses = HashMap::new();
     let mut candidates = Vec::new();
     for name in &req.config.selected_harnesses {
@@ -157,17 +213,26 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
         .db_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_db(&req.repo_root));
-    let store = SqliteStore::open(&db).map_err(|e: StoreError| format!("{e:?}"))?;
-    crate::gitignore::ensure_store_ignored(&db);
+    let store = if read_only {
+        match SqliteStore::open_read_only(&db).map_err(|e: StoreError| format!("{e:?}"))? {
+            Some(store) => store,
+            None => return Ok(None),
+        }
+    } else {
+        let store = SqliteStore::open(&db).map_err(|e: StoreError| format!("{e:?}"))?;
+        crate::gitignore::ensure_store_ignored(&db);
+        store
+    };
     let wt = req
         .worktree_base
         .unwrap_or_else(|| default_worktree_base(&req.repo_root));
 
-    Ok(Composed {
+    Ok(Some(Composed {
         harnesses,
         candidates,
         git,
         store,
+        db_path: db,
         processes: HostProcessView {},
         checks: CommandCheckRunner,
         limits: RunLimits {
@@ -183,7 +248,7 @@ pub fn compose(req: ComposeRequest<'_>) -> Result<Composed, String> {
             .planner
             .selection()
             .map_err(|e| format!("{e:?}"))?,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -249,5 +314,54 @@ mod tests {
             assert!(matches!(harness, DispatchHarness::Direct(_)));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod collection_delegation_tests {
+    use super::*;
+    #[test]
+    fn dispatch_harness_try_collect_does_not_delegate_to_blocking_collect() {
+        #[cfg(windows)]
+        let (executable, invoke_args_template) = (
+            PathBuf::from("powershell.exe"),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 30".into(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (executable, invoke_args_template) = (
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "sleep 30".into()],
+        );
+        let dir =
+            std::env::temp_dir().join(format!("meshloop-dispatch-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let harness = DispatchHarness::Direct(CliHarness::new(CliHarnessConfig {
+            name: "fixture".into(),
+            executable,
+            version_args: vec!["--version".into()],
+            probe_timeout: Duration::from_secs(5),
+            invoke_args_template,
+        }));
+        let spec = AgentSpec {
+            task_id: meshloop_domain::task_graph::TaskId(1),
+            attempt_id: meshloop_domain::evidence::AttemptId(99),
+            harness: "fixture".into(),
+            model_ref: "fixture".into(),
+            worktree_path: dir.clone(),
+            prompt: "test".into(),
+            timeout: Duration::from_secs(5),
+        };
+        let handle = harness.invoke(&spec).unwrap();
+        let start = std::time::Instant::now();
+        let result = harness.try_collect(&handle);
+        let elapsed = start.elapsed();
+        harness.cancel(&handle).unwrap();
+        assert!(result.unwrap().is_none());
+        assert!(elapsed < Duration::from_secs(1), "poll took {elapsed:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

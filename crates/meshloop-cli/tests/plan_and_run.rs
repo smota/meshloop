@@ -6,6 +6,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// This integration binary also embeds adapters directly. Every launch in this
+// host process must coordinate with native owned-spawn's private handle window.
+// Keep the test suite parallel and release the launch guard before waiting.
+trait GuardedCommand {
+    fn guarded_spawn(&mut self) -> std::io::Result<std::process::Child>;
+    fn guarded_status(&mut self) -> std::io::Result<std::process::ExitStatus>;
+    fn guarded_output(&mut self) -> std::io::Result<std::process::Output>;
+}
+impl GuardedCommand for Command {
+    fn guarded_spawn(&mut self) -> std::io::Result<std::process::Child> {
+        meshloop_adapters::process::spawn_command(self)
+    }
+    fn guarded_status(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.guarded_spawn()?.wait()
+    }
+    fn guarded_output(&mut self) -> std::io::Result<std::process::Output> {
+        // All output call sites below use Command::output's default stream policy;
+        // the explicitly-null detached fixture uses guarded_spawn instead.
+        self.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        self.guarded_spawn()?.wait_with_output()
+    }
+}
+
 fn fixture_path() -> String {
     let exe = format!("fixture_harness{}", std::env::consts::EXE_SUFFIX);
     let mut dir = std::env::current_exe().expect("current test executable path");
@@ -27,28 +52,28 @@ fn disposable_repo(tag: &str) -> PathBuf {
     Command::new("git")
         .current_dir(&dir)
         .args(["init", "-q"])
-        .status()
+        .guarded_status()
         .unwrap();
     Command::new("git")
         .current_dir(&dir)
         .args(["config", "user.email", "test@test"])
-        .status()
+        .guarded_status()
         .unwrap();
     Command::new("git")
         .current_dir(&dir)
         .args(["config", "user.name", "test"])
-        .status()
+        .guarded_status()
         .unwrap();
     fs::write(dir.join("README.md"), "seed").unwrap();
     Command::new("git")
         .current_dir(&dir)
         .args(["add", "."])
-        .status()
+        .guarded_status()
         .unwrap();
     Command::new("git")
         .current_dir(&dir)
         .args(["commit", "-q", "-m", "seed"])
-        .status()
+        .guarded_status()
         .unwrap();
     dir
 }
@@ -129,7 +154,7 @@ fn plan_writes_the_canned_fixture_graph() {
         .arg(&config_path)
         .arg("--out")
         .arg(&out_path)
-        .output()
+        .guarded_output()
         .expect("run meshloop plan");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -169,7 +194,7 @@ fn run_refuses_without_accept_plan_flag() {
         .arg(&plan_path)
         .args(["--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("run meshloop run");
 
     assert!(!output.status.success());
@@ -202,7 +227,7 @@ fn inspect_reports_real_attempt_timing_and_outcome() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run");
     assert!(
         run.status.success(),
@@ -218,7 +243,7 @@ fn inspect_reports_real_attempt_timing_and_outcome() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("inspect");
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     let attempt = &parsed["data"]["attempts"][0];
@@ -253,7 +278,7 @@ fn run_pauses_for_human_accept_then_resume_integrates() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run meshloop run");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -275,7 +300,7 @@ fn run_pauses_for_human_accept_then_resume_integrates() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept");
     assert!(
         accept.status.success(),
@@ -291,7 +316,7 @@ fn run_pauses_for_human_accept_then_resume_integrates() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume");
     let resume_out = String::from_utf8_lossy(&resume.stdout);
     assert!(
@@ -330,7 +355,7 @@ fn empty_diff_fails_verification() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run");
     let stdout = format!(
         "{}{}",
@@ -368,7 +393,7 @@ fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("first run");
     let fail_out = format!(
         "{}{}",
@@ -392,7 +417,7 @@ fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("duplicate run");
     let again_err = String::from_utf8_lossy(&again.stderr);
     assert!(
@@ -413,7 +438,7 @@ fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("restart");
     let restart_out = format!(
         "{}{}",
@@ -436,7 +461,7 @@ fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
 fn roles_json_is_prefixed_and_namespaced_alias_works() {
     let output = meshloop()
         .args(["roles", "--json"])
-        .output()
+        .guarded_output()
         .expect("roles");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
@@ -447,7 +472,7 @@ fn roles_json_is_prefixed_and_namespaced_alias_works() {
 
     let aliased = meshloop()
         .args(["meshloop:roles", "--json"])
-        .output()
+        .guarded_output()
         .expect("alias");
     assert!(String::from_utf8_lossy(&aliased.stdout).contains("meshloop:origin"));
 }
@@ -460,7 +485,7 @@ fn doctor_json_includes_origin_and_live_default() {
         .current_dir(&dir)
         .args(["doctor", "--json", "--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
@@ -480,7 +505,7 @@ fn doctor_without_a_config_is_not_ok() {
     let output = meshloop()
         .current_dir(&dir)
         .args(["doctor", "--json"])
-        .output()
+        .guarded_output()
         .expect("doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success(), "{stdout}");
@@ -497,7 +522,7 @@ fn doctor_reports_why_each_harness_is_not_ready() {
         .current_dir(&dir)
         .args(["doctor", "--json", "--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success(), "{stdout}");
@@ -507,7 +532,7 @@ fn doctor_reports_why_each_harness_is_not_ready() {
 }
 
 #[test]
-fn plan_fails_fast_with_reasons_when_the_probe_hangs() {
+fn plan_fails_fast_with_stable_code_when_the_probe_hangs() {
     // Issue #9: a harness whose version call never exits blocked `plan` forever.
     let dir = disposable_repo("plan-hang");
     let config_path = dir.join("meshloop.toml");
@@ -542,7 +567,7 @@ model_tier = "top"
         .arg(&config_path)
         .arg("--out")
         .arg(dir.join("plan.json"))
-        .output()
+        .guarded_output()
         .expect("run meshloop plan");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -551,17 +576,20 @@ model_tier = "top"
         start.elapsed()
     );
     assert!(!output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("fixture: probe timed out after 1s"),
-        "{stderr}"
-    );
+    // Issue #74: bounded probing remains required; public plan diagnostics now
+    // expose stable codes because probe reasons can contain private process text.
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
+    assert!(stderr.contains("meshloop doctor"), "{stderr}");
     assert!(!dir.join("plan.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn unprefixed_reviewer_is_rejected() {
-    let output = meshloop().args(["reviewer"]).output().expect("reviewer");
+    let output = meshloop()
+        .args(["reviewer"])
+        .guarded_output()
+        .expect("reviewer");
     assert!(!output.status.success());
     let err = format!(
         "{}{}",
@@ -584,7 +612,7 @@ fn orchestrate_prints_prefixed_reviewer_matrix() {
             "codex",
             "--json",
         ])
-        .output()
+        .guarded_output()
         .expect("orchestrate");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -611,7 +639,7 @@ fn orchestrate_without_origin_session_is_matrix_only() {
             "codex",
             "--json",
         ])
-        .output()
+        .guarded_output()
         .expect("orchestrate without origin");
     assert!(
         output.status.success(),
@@ -646,7 +674,7 @@ fn orchestrate_pins_fixture_attempt_diff() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run");
     assert!(
         run.status.success(),
@@ -674,7 +702,7 @@ fn orchestrate_pins_fixture_attempt_diff() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("orchestrate pin");
     let stdout = String::from_utf8_lossy(&orch.stdout);
     assert!(
@@ -703,7 +731,7 @@ fn orchestrate_pins_fixture_attempt_diff() {
 fn review_plan_requires_exactly_one_decision() {
     let output = meshloop()
         .args(["review-plan", "--plan", "meshloop-plan.json"])
-        .output()
+        .guarded_output()
         .expect("review-plan");
     assert!(!output.status.success());
     let err = format!(
@@ -737,7 +765,7 @@ fn review_plan_accept_then_run_without_accept_plan_flag() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan accept");
     let stdout = String::from_utf8_lossy(&reviewed.stdout);
     assert!(
@@ -758,7 +786,7 @@ fn review_plan_accept_then_run_without_accept_plan_flag() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(dir.join("worktrees"))
-        .output()
+        .guarded_output()
         .expect("run after review-plan accept");
     assert!(
         run.status.success(),
@@ -796,7 +824,7 @@ fn review_plan_decline_blocks_run() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan decline");
     assert!(reviewed.status.success());
     let stdout = String::from_utf8_lossy(&reviewed.stdout);
@@ -810,7 +838,7 @@ fn review_plan_decline_blocks_run() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run after decline");
     assert!(!run.status.success());
     let err = format!(
@@ -849,7 +877,7 @@ fn review_plan_adjust_rewrites_and_stays_awaiting_review() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan adjust");
     let stdout = String::from_utf8_lossy(&reviewed.stdout);
     assert!(
@@ -869,7 +897,7 @@ fn status_json(dir: &Path, config: &Path, db: &Path) -> serde_json::Value {
         .arg(config)
         .args(["--db"])
         .arg(db)
-        .output()
+        .guarded_output()
         .expect("status");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "status stdout: {stdout}");
@@ -900,7 +928,7 @@ fn status_reports_waiting_for_acceptance_and_dependency() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run");
     assert!(
         output.status.success(),
@@ -928,7 +956,7 @@ fn json_cmd(dir: &Path, config: &Path, db: &Path, args: &[&str]) -> serde_json::
         .arg(config)
         .args(["--db"])
         .arg(db)
-        .output()
+        .guarded_output()
         .expect("meshloop json command");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{args:?} stdout: {stdout}");
@@ -965,7 +993,7 @@ fn inspect_lists_attempts_with_redacted_evidence_and_status_summarizes_run() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run");
     assert!(output.status.success());
 
@@ -1106,7 +1134,7 @@ fn review_plan_lists_acceptance_required_and_nodes_wait_for_plan_acceptance() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan");
     let stdout = String::from_utf8_lossy(&reviewed.stdout);
     assert!(reviewed.status.success(), "stdout={stdout}");
@@ -1148,7 +1176,7 @@ fn bundle_emits_version_locked_session_pack() {
     let output = meshloop()
         .args(["bundle", "--dest"])
         .arg(&dest)
-        .output()
+        .guarded_output()
         .expect("meshloop bundle");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -1196,7 +1224,7 @@ fn run_concurrent_workers_executes_parallel_tasks() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run meshloop run with concurrency=2");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1216,7 +1244,7 @@ fn run_concurrent_workers_executes_parallel_tasks() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("status");
     let status_str = String::from_utf8_lossy(&status_out.stdout);
     assert!(
@@ -1238,7 +1266,7 @@ fn run_concurrent_workers_executes_parallel_tasks() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 1");
     assert!(
         accept1.status.success(),
@@ -1254,7 +1282,7 @@ fn run_concurrent_workers_executes_parallel_tasks() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 2");
     assert!(
         accept2.status.success(),
@@ -1270,7 +1298,7 @@ fn run_concurrent_workers_executes_parallel_tasks() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume");
     let resume_out = String::from_utf8_lossy(&resume.stdout);
     let resume_err = String::from_utf8_lossy(&resume.stderr);
@@ -1311,7 +1339,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run initial plan");
     assert!(
         run_out.status.success(),
@@ -1328,7 +1356,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 1");
     assert!(
         accept1.status.success(),
@@ -1359,7 +1387,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("mutate-plan");
     let mutate_str = String::from_utf8_lossy(&mutate_out.stdout);
     assert!(
@@ -1381,7 +1409,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 1");
     let r1_out = String::from_utf8_lossy(&resume1.stdout);
     assert!(resume1.status.success(), "resume 1 failed: {r1_out}");
@@ -1399,7 +1427,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 3");
     assert!(
         accept3.status.success(),
@@ -1416,7 +1444,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 2");
     let r2_out = String::from_utf8_lossy(&resume2.stdout);
     assert!(resume2.status.success(), "resume 2 failed: {r2_out}");
@@ -1434,7 +1462,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 2");
     assert!(
         accept2.status.success(),
@@ -1451,7 +1479,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 4");
     let r4_out = String::from_utf8_lossy(&resume4.stdout);
     assert!(resume4.status.success(), "resume 4 failed: {r4_out}");
@@ -1467,7 +1495,7 @@ fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("status");
     let status_str = String::from_utf8_lossy(&status_out.stdout);
     assert!(
@@ -1504,7 +1532,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("run initial");
     assert!(run_out.status.success());
 
@@ -1515,7 +1543,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 1");
     assert!(accept1.status.success());
 
@@ -1527,7 +1555,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 1");
     assert!(resume1.status.success());
 
@@ -1549,7 +1577,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("mutate-plan");
     assert!(mutate_out.status.success());
 
@@ -1562,7 +1590,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume blocked");
     assert!(
         !resume_blocked.status.success(),
@@ -1586,7 +1614,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan accept");
     assert!(
         review_out.status.success(),
@@ -1603,7 +1631,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 2");
     assert!(resume2.status.success());
 
@@ -1615,7 +1643,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("accept 2");
     assert!(accept2.status.success());
 
@@ -1627,7 +1655,7 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("resume 3");
     assert!(resume3.status.success());
 
@@ -1662,7 +1690,7 @@ fn status_honours_config_and_db_outside_cwd() {
         .arg(&db_path)
         .arg("--worktree-base")
         .arg(dir.join("worktrees"))
-        .output()
+        .guarded_output()
         .expect("run CLI");
     assert!(run.status.success(), "run failed: {:?}", run);
 
@@ -1674,7 +1702,7 @@ fn status_honours_config_and_db_outside_cwd() {
         .arg("--db")
         .arg(&db_path)
         .arg("--json")
-        .output()
+        .guarded_output()
         .expect("status CLI");
     assert!(out.status.success(), "status failed: {:?}", out);
     let parsed: serde_json::Value =
@@ -1699,7 +1727,7 @@ fn status_without_any_config_is_an_error() {
     let out = meshloop()
         .current_dir(&elsewhere)
         .args(["status", "--json"])
-        .output()
+        .guarded_output()
         .expect("status CLI");
     assert!(!out.status.success());
     let parsed: serde_json::Value =
@@ -1722,7 +1750,7 @@ fn status_with_unknown_graph_is_an_error_naming_it() {
         .arg(&config_path)
         .arg("--db")
         .arg(dir.join("state.sqlite"))
-        .output()
+        .guarded_output()
         .expect("status CLI");
     assert!(!out.status.success());
     let parsed: serde_json::Value =
@@ -1756,7 +1784,7 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("run CLI");
 
     let stdout_str = String::from_utf8_lossy(&run.stdout);
@@ -1830,7 +1858,7 @@ fn run_with_json_outputs_clean_rfc8259_and_authentic_sha256() {
     let probe = std::process::Command::new("git")
         .args(["cat-file", "-e", commit_sha])
         .current_dir(&dir)
-        .output()
+        .guarded_output()
         .expect("git probe");
     assert!(
         probe.status.success(),
@@ -1869,7 +1897,7 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("run detached CLI");
     let elapsed = start.elapsed();
 
@@ -1901,7 +1929,7 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
         .arg(&config_path)
         .args(["--db"])
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("inspect CLI");
     assert!(
         inspect.status.success(),
@@ -1925,7 +1953,7 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
         .arg(&db_path)
         .args(["--worktree-base"])
         .arg(&worktree_base)
-        .output()
+        .guarded_output()
         .expect("cancel CLI");
     assert!(
         cancel.status.success(),
@@ -1953,7 +1981,7 @@ fn doctor_warnings(tag: &str, verify_command: &str) -> Vec<String> {
         .current_dir(&dir)
         .args(["doctor", "--json", "--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("doctor");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
@@ -2008,7 +2036,7 @@ fn run_fixture_plan(dir: &Path, config: &Path, db: &Path, graph_id: &str) {
         .arg(db)
         .arg("--worktree-base")
         .arg(dir.join("worktrees"))
-        .output()
+        .guarded_output()
         .expect("run");
 }
 
@@ -2026,7 +2054,7 @@ fn watch_exits_zero_when_a_node_awaits_review() {
         .arg(&config_path)
         .arg("--db")
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("watch");
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let lines = watch_lines(&out);
@@ -2059,7 +2087,7 @@ fn watch_exits_nonzero_naming_a_failed_node() {
         .arg(&config_path)
         .arg("--db")
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("watch");
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let lines = watch_lines(&out);
@@ -2081,7 +2109,7 @@ fn watch_with_unknown_graph_is_an_error_naming_it() {
         .arg(&config_path)
         .arg("--db")
         .arg(dir.join("state.sqlite"))
-        .output()
+        .guarded_output()
         .expect("watch");
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
@@ -2110,7 +2138,7 @@ fn watch_times_out_when_the_run_does_not_change() {
         .arg(&config_path)
         .arg("--db")
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("review-plan");
     assert!(reviewed.status.success(), "{reviewed:?}");
 
@@ -2129,7 +2157,7 @@ fn watch_times_out_when_the_run_does_not_change() {
         .arg(&config_path)
         .arg("--db")
         .arg(&db_path)
-        .output()
+        .guarded_output()
         .expect("watch");
     assert_eq!(out.status.code(), Some(3), "{out:?}");
     assert!(started.elapsed().as_secs() < 5);
@@ -2182,11 +2210,11 @@ fn plan_with_only_a_mid_tier_harness_names_the_planner_override() {
         .current_dir(&dir)
         .args(["plan", "--objective", "x", "--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("plan");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("does not fit task Tier3"), "{stderr}");
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
     assert!(stderr.contains("[planner] harness"), "{stderr}");
     fs::remove_dir_all(&dir).ok();
 }
@@ -2206,7 +2234,7 @@ harness = \"fixture\"",
         .arg(&config_path)
         .arg("--out")
         .arg(&out_path)
-        .output()
+        .guarded_output()
         .expect("plan");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -2248,7 +2276,7 @@ tier = \"Tier2\"",
             .current_dir(&dir)
             .args(["doctor", "--json", "--config"])
             .arg(&config_path)
-            .output()
+            .guarded_output()
             .expect("doctor");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor json");
@@ -2270,7 +2298,7 @@ fn commit_subjects(repo: &Path, base: &str, rev: &str) -> Vec<String> {
     let out = Command::new("git")
         .current_dir(repo)
         .args(["log", "--format=%s", &format!("{base}..{rev}")])
-        .output()
+        .guarded_output()
         .expect("git log");
     String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -2322,14 +2350,14 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
         Command::new("git")
             .current_dir(&dir)
             .args(args)
-            .status()
+            .guarded_status()
             .unwrap();
     }
     let seed = String::from_utf8_lossy(
         &Command::new("git")
             .current_dir(&dir)
             .args(["rev-parse", "HEAD"])
-            .output()
+            .guarded_output()
             .unwrap()
             .stdout,
     )
@@ -2350,7 +2378,7 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
         .arg(&plan_path)
         .arg("--accept-plan");
     common(&mut run);
-    let out = run.output().expect("run");
+    let out = run.guarded_output().expect("run");
     assert!(
         out.status.success(),
         "run: {}",
@@ -2377,12 +2405,12 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
                 "tester",
             ]);
             common(&mut accept);
-            assert!(accept.output().unwrap().status.success());
+            assert!(accept.guarded_output().unwrap().status.success());
         }
         let mut resume = meshloop();
         resume.current_dir(&dir).arg("resume");
         common(&mut resume);
-        resume.output().expect("resume");
+        resume.guarded_output().expect("resume");
     }
     let status = status_json(&dir, &config_path, &db_path);
     let nodes = status["data"]["nodes"].as_array().unwrap();
@@ -2407,7 +2435,7 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
             "--json",
         ]);
         common(&mut cmd);
-        let out = cmd.output().expect("integrate --deliverable");
+        let out = cmd.guarded_output().expect("integrate --deliverable");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         (out.status.success(), stdout)
     };
@@ -2439,7 +2467,7 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
     Command::new("git")
         .current_dir(&dir)
         .args(["branch", "work/issue-a", &seed])
-        .status()
+        .guarded_status()
         .unwrap();
     let mut land = meshloop();
     land.current_dir(&dir).args([
@@ -2453,7 +2481,7 @@ fn integrate_deliverable_replays_only_that_group_and_its_dependencies() {
         "--accept-integrate",
     ]);
     common(&mut land);
-    let out = land.output().expect("land");
+    let out = land.guarded_output().expect("land");
     assert!(
         out.status.success(),
         "land: {}{}",
@@ -2485,7 +2513,7 @@ fn plan_rejects_an_illegal_deliverable_tag() {
         .arg(&plan_path)
         .args(["--accept", "--config"])
         .arg(&config_path)
-        .output()
+        .guarded_output()
         .expect("review-plan");
     let all = format!(
         "{}{}",
@@ -2495,4 +2523,577 @@ fn plan_rejects_an_illegal_deliverable_tag() {
     assert!(!out.status.success(), "{all}");
     assert!(all.contains("IllegalDeliverable"), "{all}");
     fs::remove_dir_all(&dir).ok();
+}
+
+// These tests exercise the public producer, not a separate ownership helper.
+fn planning_owners(dir: &Path) -> Vec<serde_json::Value> {
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    let mut query = db
+        .prepare("SELECT payload_json FROM workspace_provisional_owners ORDER BY rowid")
+        .unwrap();
+    query
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
+        .collect()
+}
+fn owned_plan_path(dir: &Path, owner: &serde_json::Value) -> PathBuf {
+    dir.parent()
+        .unwrap()
+        .join(".meshloop-worktrees")
+        .join(dir.file_name().unwrap())
+        .join(owner["location"]["relative_path"].as_str().unwrap())
+}
+fn invoke_owned_plan(dir: &Path, config: &Path) -> std::process::Output {
+    meshloop()
+        .current_dir(dir)
+        .args([
+            "plan",
+            "--objective",
+            "private-objective-marker",
+            "--config",
+        ])
+        .arg(config)
+        .args(["--out"])
+        .arg(dir.join("result.json"))
+        .guarded_output()
+        .unwrap()
+}
+#[test]
+fn provisional_planning_preserves_each_invocation_and_metadata_privacy() {
+    let dir = disposable_repo("owned-repeat");
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    assert!(invoke_owned_plan(&dir, &config).status.success());
+    let first = planning_owners(&dir);
+    assert_eq!(first.len(), 2);
+    let first_path = owned_plan_path(&dir, &first[1]);
+    let original = fs::read(&first_path).unwrap();
+    fs::write(
+        first_path.parent().unwrap().join("preserved.txt"),
+        "do not reset",
+    )
+    .unwrap();
+    assert!(invoke_owned_plan(&dir, &config).status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 4);
+    assert_ne!(owners[0]["id"], owners[2]["id"]);
+    assert_eq!(fs::read(&first_path).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(first_path.parent().unwrap().join("preserved.txt")).unwrap(),
+        "do not reset"
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    for (table, expected) in [
+        ("workspace_generations", 0),
+        ("workspace_operations", 6),
+        ("workspace_operation_steps", 6),
+    ] {
+        assert_eq!(
+            db.query_row::<u32, _, _>(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap(),
+            expected
+        );
+    }
+    let mut query = db.prepare("SELECT payload_json FROM workspace_operations UNION ALL SELECT payload_json FROM workspace_operation_steps UNION ALL SELECT payload_json FROM workspace_provisional_owners").unwrap();
+    for value in query.query_map([], |r| r.get::<_, String>(0)).unwrap() {
+        let value = value.unwrap();
+        assert!(!value.contains("private-objective-marker"));
+        assert!(!value.contains("first task"));
+        assert!(!value.contains(&dir.to_string_lossy().to_string()));
+    }
+}
+#[test]
+fn provisional_planning_retries_rejected_stdout_in_separate_preserved_worktrees() {
+    let dir = disposable_repo("owned-retry");
+    let config = write_config(&dir, r#"["--noop"]"#);
+    let result = invoke_owned_plan(&dir, &config);
+    assert!(!result.status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        owners.len(),
+        4,
+        "two owners for each of two bounded attempts"
+    );
+    assert_ne!(owners[0]["location"], owners[2]["location"]);
+    for owner in [&owners[1], &owners[3]] {
+        assert_eq!(fs::read(owned_plan_path(&dir, owner)).unwrap(), b"");
+    }
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(db.query_row::<u32,_,_>("SELECT COUNT(*) FROM workspace_operation_steps WHERE json_extract(payload_json,'$.state')='Blocked'", [], |r|r.get(0)).unwrap(), 2);
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_generations", [], |r| r
+            .get(0))
+            .unwrap(),
+        0
+    );
+    // Operator diagnostics use portable aliases, not the external root.
+    assert!(
+        !String::from_utf8_lossy(&result.stderr)
+            .contains(&owned_plan_path(&dir, &owners[0]).display().to_string())
+    );
+}
+#[test]
+fn provisional_planning_timeout_retains_unresolved_intents_without_retry() {
+    let dir = disposable_repo("owned-timeout");
+    let config = write_config(&dir, r#"["--hang"]"#);
+    fs::write(
+        &config,
+        fs::read_to_string(&config)
+            .unwrap()
+            .replace("task_timeout_seconds = 30", "task_timeout_seconds = 1"),
+    )
+    .unwrap();
+    assert!(!invoke_owned_plan(&dir, &config).status.success());
+    assert_eq!(
+        planning_owners(&dir).len(),
+        2,
+        "uncertain effects must not retry"
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_operation_steps", [], |r| r
+            .get(0))
+            .unwrap(),
+        1,
+        "only worktree is completed"
+    );
+}
+#[test]
+fn provisional_planning_refuses_stale_tracked_output_without_reuse() {
+    let dir = disposable_repo("owned-stale");
+    let stale = r#"{"graph_id":"stale","nodes":[{"id":1,"description":"stale","depends_on":[],"tier":null}]}"#;
+    fs::write(dir.join("meshloop-plan.json"), stale).unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["add", "meshloop-plan.json"])
+            .guarded_status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&dir)
+            .args(["commit", "-q", "-m", "stale fixture"])
+            .guarded_status()
+            .unwrap()
+            .success()
+    );
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    assert!(!invoke_owned_plan(&dir, &config).status.success());
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 2);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        stale
+    );
+    assert!(!dir.join("result.json").exists());
+}
+#[test]
+fn provisional_planning_holds_cross_process_fence_through_collection() {
+    use meshloop_adapters::workspace::GitRepositoryIdentity;
+    use meshloop_engine::workspace::RepositoryIdentity;
+    use std::time::{Duration, Instant};
+    let dir = disposable_repo("owned-fence");
+    let config = write_config(&dir, r#"["--sleep-ms", "1500"]"#);
+    let mut child = meshloop()
+        .current_dir(&dir)
+        .args(["plan", "--objective", "fixture", "--config"])
+        .arg(&config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .guarded_spawn()
+        .unwrap();
+    let db_path = dir.join(".meshloop/state.sqlite");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(db) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) && db
+            .query_row::<u32, _, _>(
+                "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+            == 2
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            panic!("planner did not reach collection");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        GitRepositoryIdentity::new("git")
+            .acquire(&dir, &db_path)
+            .is_err()
+    );
+    assert!(
+        !invoke_owned_plan(&dir, &config).status.success(),
+        "concurrent CLI writer must be refused"
+    );
+    assert!(
+        !child.wait().unwrap().success(),
+        "sleep fixture emits rejected output"
+    );
+    assert_eq!(
+        planning_owners(&dir).len(),
+        4,
+        "only original bounded two attempts"
+    );
+    assert!(
+        GitRepositoryIdentity::new("git")
+            .acquire(&dir, &db_path)
+            .is_ok()
+    );
+}
+
+struct OwnedScriptedPlanner {
+    responses: Vec<String>,
+    prompts: std::sync::Mutex<Vec<String>>,
+    db: PathBuf,
+    fail_invoke: bool,
+    stdout_only: bool,
+}
+impl meshloop_engine::ports::HarnessCapabilities for OwnedScriptedPlanner {
+    fn probe(
+        &self,
+    ) -> Result<
+        meshloop_domain::capability::HarnessProfile,
+        meshloop_domain::capability::HarnessError,
+    > {
+        Ok(meshloop_domain::capability::HarnessProfile {
+            harness: "fixture".into(),
+            version: "1".into(),
+            compatibility: meshloop_domain::capability::Compatibility::Compatible,
+            supports_noninteractive: true,
+            supports_structured_output: true,
+            supports_cancellation: true,
+            reason: None,
+        })
+    }
+    fn invoke(
+        &self,
+        spec: &meshloop_engine::agent::AgentSpec,
+    ) -> Result<meshloop_engine::ports::HarnessHandle, meshloop_domain::capability::HarnessError>
+    {
+        let db = rusqlite::Connection::open(&self.db).unwrap();
+        assert_eq!(
+            db.query_row::<u32, _, _>(
+                "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            2,
+            "Spawn and Plan intents precede invocation"
+        );
+        let mut prompts = self.prompts.lock().unwrap();
+        let index = prompts.len();
+        prompts.push(spec.prompt.clone());
+        if !self.stdout_only {
+            fs::write(
+                spec.worktree_path.join("meshloop-plan.json"),
+                &self.responses[index],
+            )
+            .unwrap();
+        }
+        if self.fail_invoke {
+            return Err(meshloop_domain::capability::HarnessError::ProcessFault {
+                detail: "private-dispatch-detail".into(),
+            });
+        }
+        Ok(meshloop_engine::ports::HarnessHandle {
+            attempt_id: spec.attempt_id,
+            pid: None,
+            pane_id: None,
+        })
+    }
+    fn collect(
+        &self,
+        _: &meshloop_engine::ports::HarnessHandle,
+    ) -> Result<meshloop_engine::ports::HarnessOutcome, meshloop_domain::capability::HarnessError>
+    {
+        Ok(meshloop_engine::ports::HarnessOutcome {
+            exit_code: 0,
+            output_redacted: self.responses[self.prompts.lock().unwrap().len() - 1].clone(),
+            worktree_changed: true,
+        })
+    }
+    fn cancel(
+        &self,
+        _: &meshloop_engine::ports::HarnessHandle,
+    ) -> Result<(), meshloop_domain::capability::HarnessError> {
+        panic!("not cancellation coverage")
+    }
+}
+fn scripted_owned_plan(
+    dir: &Path,
+    responses: Vec<String>,
+    trigger: &str,
+    fail_invoke: bool,
+    stdout_only: bool,
+) -> (
+    Result<meshloop_engine::run_loop::Planned, meshloop_engine::run_loop::OrchestratorError>,
+    Vec<String>,
+) {
+    use meshloop_engine::workspace::{LifecycleAccess, RepositoryIdentity, WorkspaceLedger};
+    let db_path = dir.join(".meshloop/state.sqlite");
+    let mut store = meshloop_adapters::store::SqliteStore::open(&db_path).unwrap();
+    let mut lease = meshloop_adapters::workspace::GitRepositoryIdentity::new("git")
+        .acquire(dir, &db_path)
+        .unwrap();
+    store.bind_repository(&lease).unwrap();
+    let alias = meshloop_domain::workspace::RootAlias::new("planning-worktrees").unwrap();
+    let root = dir
+        .parent()
+        .unwrap()
+        .join(".meshloop-worktrees")
+        .join(dir.file_name().unwrap());
+    if root.exists() {
+        lease.register_root(alias.clone(), &root).unwrap();
+    } else {
+        lease.bootstrap_root(alias.clone(), &root).unwrap();
+    }
+    store.register_root(&lease, &alias).unwrap();
+    if !trigger.is_empty() {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(trigger)
+            .unwrap();
+    }
+    let harness = OwnedScriptedPlanner {
+        responses,
+        prompts: Default::default(),
+        db: db_path,
+        fail_invoke,
+        stdout_only,
+    };
+    let git = meshloop_adapters::git::GitWorktreeAdapter::new(dir.to_path_buf());
+    let processes = meshloop_adapters::process::HostProcessView {};
+    let checks = meshloop_adapters::check::CommandCheckRunner;
+    let mut run = meshloop_engine::run_loop::RunLoop {
+        harnesses: std::collections::HashMap::from([(
+            "fixture".into(),
+            &harness as &dyn meshloop_engine::ports::HarnessCapabilities,
+        )]),
+        candidates: vec![meshloop_engine::router::Candidate {
+            harness: "fixture".into(),
+            model_ref: "fixture".into(),
+            model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+        }],
+        workspace: &git,
+        store: &mut store,
+        processes: &processes,
+        checks: &checks,
+        router: meshloop_engine::router::Router::default(),
+        limits: meshloop_engine::run_loop::RunLimits {
+            max_retries: 2,
+            task_timeout: std::time::Duration::from_secs(1),
+            max_concurrent_workers: 1,
+        },
+        fixture_only: true,
+        verify_command: vec![],
+        worktree_base: root,
+        active_graph: None,
+        planner: meshloop_engine::run_loop::PlannerSelection::default(),
+    };
+    let result = run.plan("private-objective-marker", "scope", &mut lease);
+    (result, harness.prompts.into_inner().unwrap())
+}
+const OWNED_VALID_GRAPH: &str = r#"{"graph_id":"owned","nodes":[{"id":1,"description":"private-source-marker","depends_on":[],"tier":null}]}"#;
+#[test]
+fn provisional_planning_malformed_then_valid_preserves_original_and_retry_diagnostic() {
+    let dir = disposable_repo("owned-repair");
+    let bad = r#"{"graph_id":"bad","nodes":[{"id":1,"description":"private-source-marker","depends_on":[],"tier":"private-tier-marker"}]}"#;
+    let (result, prompts) = scripted_owned_plan(
+        &dir,
+        vec![bad.into(), OWNED_VALID_GRAPH.into()],
+        "",
+        false,
+        false,
+    );
+    assert!(result.is_ok());
+    assert_eq!(prompts.len(), 2);
+    assert!(!prompts[0].contains("your previous graph failed"));
+    assert!(prompts[1].contains("your previous graph failed: planner-malformed-output"));
+    assert!(!prompts[1].contains("private-tier-marker"));
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        bad
+    );
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[3])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+}
+#[test]
+fn provisional_planning_valid_stdout_is_preserved_before_completed_plan() {
+    let dir = disposable_repo("owned-stdout");
+    assert!(
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], "", false, true)
+            .0
+            .is_ok()
+    );
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+}
+#[test]
+fn provisional_planning_unknown_invoke_failure_never_salvages_or_exposes_detail() {
+    let dir = disposable_repo("owned-invoke-fail");
+    let (result, prompts) =
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], "", true, false);
+    let error = match result.unwrap_err() {
+        meshloop_engine::run_loop::OrchestratorError::Plan(error) => error,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(error.to_string(), "planner-dispatch-unresolved");
+    assert_eq!(prompts.len(), 1);
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+#[test]
+fn provisional_planning_intent_failures_precede_worktree_or_spawn_effects() {
+    for kind in ["Worktree", "Spawn"] {
+        let dir = disposable_repo(&format!("owned-intent-{kind}"));
+        let trigger = format!(
+            "CREATE TRIGGER injected_fault BEFORE INSERT ON workspace_operations WHEN json_extract(NEW.payload_json,'$.kind')='{kind}' BEGIN SELECT RAISE(ABORT,'private-store-detail'); END;"
+        );
+        let (result, prompts) =
+            scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], &trigger, false, false);
+        assert!(result.is_err());
+        assert!(prompts.is_empty());
+        let owners = planning_owners(&dir);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owned_plan_path(&dir, &owners[0]).exists(), kind == "Spawn");
+        assert!(
+            !owned_plan_path(&dir, &owners[0])
+                .join("meshloop-plan.json")
+                .exists()
+        );
+    }
+}
+#[test]
+fn provisional_planning_completion_failure_remains_unresolved_and_stops_retry() {
+    let dir = disposable_repo("owned-completion-fault");
+    let trigger = "CREATE TRIGGER injected_fault BEFORE INSERT ON workspace_operation_steps WHEN EXISTS(SELECT 1 FROM workspace_operations WHERE id=NEW.operation_id AND json_extract(payload_json,'$.kind')='Spawn') BEGIN SELECT RAISE(ABORT,'private-store-detail'); END;";
+    let (result, prompts) =
+        scripted_owned_plan(&dir, vec![OWNED_VALID_GRAPH.into()], trigger, false, true);
+    assert!(result.is_err());
+    assert_eq!(prompts.len(), 1);
+    let owners = planning_owners(&dir);
+    assert_eq!(
+        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        OWNED_VALID_GRAPH
+    );
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<u32, _, _>(
+            "SELECT COUNT(*) FROM workspace_operations WHERE pending=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row::<u32, _, _>("SELECT COUNT(*) FROM workspace_operation_steps", [], |r| r
+            .get(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn provisional_planning_failed_probe_private_detail_is_absent_from_stderr() {
+    let dir = disposable_repo("owned-probe-privacy");
+    // The Rust test runner rejects unknown options with a failing exit and echoes
+    // the option to stderr. Prove that private process text actually exists before
+    // asserting that the public planning command with this same probe suppresses it.
+    let probe_executable = std::env::current_exe().unwrap();
+    let direct_probe = Command::new(&probe_executable)
+        .arg("--private-probe-marker")
+        .guarded_output()
+        .unwrap();
+    assert!(!direct_probe.status.success());
+    assert!(String::from_utf8_lossy(&direct_probe.stderr).contains("private-probe-marker"));
+    let config = write_config(&dir, r#"["--emit-graph"]"#);
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace(
+            &fixture_path().replace('\\', "\\\\"),
+            &probe_executable.to_string_lossy().replace('\\', "\\\\"),
+        )
+        .replace(
+            r#"version_args = ["--version"]"#,
+            r#"version_args = ["--private-probe-marker"]"#,
+        );
+    fs::write(&config, text).unwrap();
+    let output = invoke_owned_plan(&dir, &config);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("planner-no-candidate"), "{stderr}");
+    assert!(stderr.contains("meshloop doctor"), "{stderr}");
+    assert!(!stderr.contains("private-probe-marker"), "{stderr}");
+    assert!(!dir.join("result.json").exists());
+    assert!(planning_owners(&dir).is_empty());
+}
+
+#[test]
+fn provisional_planning_large_simultaneous_output_completes_and_retains_owned_plan() {
+    let dir = disposable_repo("owned-large-pipes");
+    let config = write_config(&dir, r#"["--emit-large-graph"]"#);
+    let result = invoke_owned_plan(&dir, &config);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("result.json")).unwrap()).unwrap();
+    assert_eq!(graph["graph_id"], "large-planner");
+    let owners = planning_owners(&dir);
+    assert_eq!(owners.len(), 2);
+    let raw = fs::read(owned_plan_path(&dir, &owners[1])).unwrap();
+    assert!(raw.len() > 128 * 1024);
+    let retained: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(retained["graph_id"], "large-planner");
+    let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
+    let generations: i64 = db
+        .query_row("SELECT COUNT(*) FROM workspace_generations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(generations, 0);
+    fs::remove_dir_all(dir).ok();
 }

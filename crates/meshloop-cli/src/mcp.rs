@@ -229,7 +229,12 @@ fn dispatch_tool(name: &str, arguments: &Value) -> Result<String, String> {
         cmd.arg(a);
     }
     meshloop_adapters::process::hide_console(&mut cmd);
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = meshloop_adapters::process::spawn_command(&mut cmd)
+        .and_then(|child| child.wait_with_output())
+        .map_err(|e| e.to_string())?;
     Ok(format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

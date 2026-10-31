@@ -1,8 +1,8 @@
 //! Optional configured check command, structured argv, run in the worktree.
 
+use crate::process::{OwnedSpawnSpec, OwnedStdio};
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use meshloop_domain::evidence::{AttemptId, CandidateRef, DeterministicEvidence};
@@ -21,12 +21,12 @@ impl CheckRunner for CommandCheckRunner {
         if argv.is_empty() {
             return Err(CheckError::Io("empty verify_command".into()));
         }
-        let mut cmd = Command::new(&argv[0]);
+        let mut cmd = OwnedSpawnSpec::new(&argv[0]);
         cmd.args(&argv[1..])
             .current_dir(worktree)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(OwnedStdio::Null)
+            .stdout(OwnedStdio::Piped)
+            .stderr(OwnedStdio::Piped);
         let mut child =
             crate::process::spawn_owned(cmd).map_err(|e| CheckError::Io(e.to_string()))?;
         // Drain both pipes concurrently. Waiting for exit before reading deadlocks
