@@ -7,6 +7,26 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--inspect-spawn") => {
+            let environment: std::collections::BTreeMap<_, _> = env::vars().collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "arguments": &args[1..],
+                    "directory": env::current_dir().expect("fixture cwd"),
+                    "executable": env::current_exe().expect("fixture executable"),
+                    "environment": environment,
+                })
+            );
+        }
+        Some("--echo-stdin") => {
+            use std::io::{Read, Write};
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .expect("fixture stdin");
+            std::io::stdout().write_all(&bytes).expect("fixture stdout");
+        }
         Some("--large-output") => {
             use std::io::Write;
             let n: usize = args
@@ -37,10 +57,11 @@ fn main() {
                 clippy::zombie_processes,
                 reason = "fixture descendant tests inherited pipe lifetime"
             )]
-            let _child = std::process::Command::new(env::current_exe().expect("fixture path"))
-                .args(["--sleep-ms", "2000"])
-                .spawn()
-                .expect("spawn inherited writer");
+            let _child = meshloop_adapters::process::spawn_command(
+                std::process::Command::new(env::current_exe().expect("fixture path"))
+                    .args(["--sleep-ms", "2000"]),
+            )
+            .expect("spawn inherited writer");
         }
         Some("--version") => println!("fixture-harness 1.0.0"),
         Some("--hang") => loop {
@@ -122,11 +143,12 @@ fn main() {
             let pid_file = args.get(1).expect("pid file path required");
             let hb_file = args.get(2).expect("heartbeat file path required");
             let exe = env::current_exe().expect("current exe");
-            let mut child = std::process::Command::new(exe)
-                .arg("--grandchild-heartbeat")
-                .arg(hb_file)
-                .spawn()
-                .expect("spawn grandchild");
+            let mut child = meshloop_adapters::process::spawn_command(
+                std::process::Command::new(exe)
+                    .arg("--grandchild-heartbeat")
+                    .arg(hb_file),
+            )
+            .expect("spawn grandchild");
             let _ = fs::write(pid_file, child.id().to_string());
             let _ = child.wait();
         }
@@ -134,7 +156,7 @@ fn main() {
             let pid_file = args.get(1).expect("pid file path required");
             let hb_file = args.get(2).expect("heartbeat file path required");
             let exe = env::current_exe().expect("current exe");
-            let mut cmd = std::process::Command::new(exe);
+            let mut cmd = meshloop_adapters::process::OwnedSpawnSpec::new(exe);
             cmd.arg("--spawn-grandchild").arg(pid_file).arg(hb_file);
             let _owned = meshloop_adapters::process::spawn_owned(cmd).expect("spawn owned");
             let start = std::time::Instant::now();

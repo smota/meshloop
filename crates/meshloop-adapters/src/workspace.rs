@@ -1,4 +1,5 @@
 //! Explicit local identity/fence adapter. Absolute locations stay in its protected registry.
+use crate::process::{OwnedSpawnSpec, OwnedStdio};
 use meshloop_domain::workspace::*;
 use meshloop_engine::ports::StoreError;
 use meshloop_engine::workspace::{RepositoryFence, RepositoryIdentity};
@@ -8,7 +9,8 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod ledger;
@@ -91,7 +93,7 @@ impl GitRepositoryIdentity {
         after_open: &dyn Fn(&Path) -> Result<(), StoreError>,
         acquire_lock: &dyn Fn(&File) -> Result<(), StoreError>,
     ) -> Result<RepositoryLease, StoreError> {
-        let mut command = Command::new(&self.git);
+        let mut command = OwnedSpawnSpec::new(&self.git);
         command.arg("-C").arg(checkout).args([
             "rev-parse",
             "--path-format=absolute",
@@ -315,11 +317,11 @@ pub(crate) fn verify_handle(handle: &same_file::Handle, path: &Path) -> Result<(
     Ok(())
 }
 
-fn bounded_stdout(mut command: Command, timeout: Duration) -> Result<Vec<u8>, StoreError> {
+fn bounded_stdout(mut command: OwnedSpawnSpec, timeout: Duration) -> Result<Vec<u8>, StoreError> {
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stdin(OwnedStdio::Null)
+        .stdout(OwnedStdio::Piped)
+        .stderr(OwnedStdio::Null);
     let mut child = crate::process::spawn_owned(command).map_err(io_refused)?;
     let pipe = child.stdout.take().ok_or_else(refused)?;
     let (send, receive) = std::sync::mpsc::sync_channel(1);

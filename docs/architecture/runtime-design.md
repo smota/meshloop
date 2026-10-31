@@ -477,3 +477,29 @@ Pending pipe EOF at the deadline reports an explicit EOF timeout; a still-runnin
 reports the existing attempt Timeout. Existing cancellation remains best effort and does
 not prove process tree quiescence. Public provisional driver cancellation and full S3
 producer/recovery integration remain outstanding.
+
+### Atomic owned Windows startup (ADR 0035)
+
+Owned harnesses, checks and bounded Git probes use an explicit adapter spawn
+specification. Windows creates the child directly inside a private kill-on-close
+job with `CreateProcessW` job-list attributes; its explicit standard-handle allowlist
+excludes the job and unrelated handles. Private inheritable duplicates are closed
+before the shared launch guard releases. Meshloop-controlled ordinary and detached
+launches share this guard; embedders must use `process::spawn_command` for other
+launches in the same host process. The guard covers launch rather than process wait.
+Detached handoff policy and POSIX process-group/recovery policy remain unchanged.
+
+The native wrapper supports structured arguments, UTF-16 environment changes,
+working directories and null/piped/inherited standard streams. Batch launch forms
+are explicitly rejected. Executable search is checked against stable Rust's
+Windows behavior, including changed child PATH precedence and parent-relative
+explicit executable paths. Native failures expose operation names and error codes,
+without arguments, environment values or private absolute paths.
+
+`OwnedChild::terminate_and_observe` retains the job while it observes direct-child
+exit, caches that status, releases its own process reference and queries for zero
+active job processes within a deadline. Failure and unresolved membership return
+errors. This adapter observation is not a driver acknowledgement. Legacy cleanup
+still provides no quiescence proof. Focused native fixtures and their negative
+controls are recorded in ADR 0035; independent review, concrete unsafe-code human
+acceptance and the remaining driver-control evidence are still pending.

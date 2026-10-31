@@ -47,7 +47,12 @@ impl GitWorktreeAdapter {
         cmd.env("GIT_COMMITTER_NAME", "meshloop");
         cmd.env("GIT_COMMITTER_EMAIL", "meshloop@localhost");
         crate::process::hide_console(&mut cmd);
-        let output = cmd.output().map_err(|e| GitError::Io(e.to_string()))?;
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::process::spawn_command(&mut cmd)
+            .and_then(|child| child.wait_with_output())
+            .map_err(|e| GitError::Io(e.to_string()))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
@@ -312,6 +317,7 @@ impl WorkspacePort for GitWorktreeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::TestCommandExt;
     use std::fs;
     use std::process::Command as StdCommand;
 
@@ -321,28 +327,28 @@ mod tests {
         StdCommand::new("git")
             .current_dir(&dir)
             .args(["init", "-q"])
-            .status()
+            .guarded_status()
             .unwrap();
         StdCommand::new("git")
             .current_dir(&dir)
             .args(["config", "user.email", "test@test"])
-            .status()
+            .guarded_status()
             .unwrap();
         StdCommand::new("git")
             .current_dir(&dir)
             .args(["config", "user.name", "test"])
-            .status()
+            .guarded_status()
             .unwrap();
         fs::write(dir.join("README.md"), "seed").unwrap();
         StdCommand::new("git")
             .current_dir(&dir)
             .args(["add", "."])
-            .status()
+            .guarded_status()
             .unwrap();
         StdCommand::new("git")
             .current_dir(&dir)
             .args(["commit", "-q", "-m", "seed"])
-            .status()
+            .guarded_status()
             .unwrap();
         dir
     }

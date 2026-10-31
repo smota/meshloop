@@ -215,7 +215,7 @@ fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
     let dir = std::env::temp_dir().join(format!("meshloop-test-{}-orphan", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let pid_file = dir.join("grandchild.pid");
-    let mut cmd = std::process::Command::new(fixture_path());
+    let mut cmd = meshloop_adapters::process::OwnedSpawnSpec::new(fixture_path());
     cmd.arg("--spawn-grandchild")
         .arg(&pid_file)
         .arg(dir.join("heartbeat.txt"));
@@ -269,15 +269,17 @@ fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
 fn cancel_leaves_an_unrelated_process_with_a_recorded_pid_alone() {
     // A recycled pid must not be killed: the recorded pid now belongs to another executable.
     #[cfg(windows)]
-    let mut other = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
-        .spawn()
+    let mut other =
+        meshloop_adapters::process::spawn_command(std::process::Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
+            "Start-Sleep -Seconds 30",
+        ]))
         .expect("spawn unrelated process");
     #[cfg(not(windows))]
-    let mut other = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn unrelated process");
+    let mut other =
+        meshloop_adapters::process::spawn_command(std::process::Command::new("sleep").arg("30"))
+            .expect("spawn unrelated process");
     let harness = CliHarness::new(CliHarnessConfig {
         name: "fixture".into(),
         executable: fixture_path(),

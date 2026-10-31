@@ -98,11 +98,10 @@ impl Drop for Fixture {
 // These fixtures emit small JSON responses. A blocked reader (for example one
 // accidentally trying to acquire the writer fence) must fail within a deadline.
 fn bounded_output(command: &mut Command) -> Output {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = meshloop_adapters::process::spawn_command(
+        command.stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if child.try_wait().unwrap().is_some() {
@@ -612,8 +611,8 @@ fn watch_pins_scope_and_refuses_restart_or_revision_change() {
             TaskState::Ready,
             Event::AttemptStarted,
         );
-        let mut child = f
-            .command(&[
+        let mut child = meshloop_adapters::process::spawn_command(
+            f.command(&[
                 "watch",
                 "--graph",
                 "bound-run",
@@ -623,9 +622,9 @@ fn watch_pins_scope_and_refuses_restart_or_revision_change() {
                 "8",
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {

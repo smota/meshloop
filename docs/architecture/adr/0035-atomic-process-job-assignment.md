@@ -1,10 +1,10 @@
 # 0035 Atomic Windows process assignment to owned jobs
 
 - Status: Accepted
-- Implementation: not-started
+- Implementation: native adapter implemented and focused Windows validation passed; concrete unsafe-code human acceptance pending
 - Date: 2026-10-31
-- Author/executor: Codex bounded driver-control intake worker (draft); parent owns integration
-- Reviewer: independent GPT-6-sol safety reviewer; clear as a proposal, not acceptance or runtime verification
+- Author/executor: proposal by Codex bounded driver-control intake worker; native implementation by Codex `/root/atomic_builder`; parent Codex `/root` owns governance, integration and combined validation
+- Reviewer: proposal reviewed by independent GPT-6-sol safety reviewer; concrete native diff reviewed by independent Codex `/root/driver_safety_review`, with no code blockers reported before integration-test launch rework; human unsafe-code acceptance pending
 - Decision owner: Samuel
 - Accepted date: 2026-10-31
 - Approval evidence: Samuel explicitly replied "Accepted" to concrete ADR0035 proposal at checkpoint 2019951; this accepts the architecture decision, not runtime implementation or full S3
@@ -100,10 +100,10 @@ proposal does not authorize an unreviewed native implementation or claim support
 for unsupported Windows hosts, arbitrary external process attachment or escaped
 processes. POSIX cannot report Applied from this Windows proof.
 
-## Verification and implementation evidence
+## Required verification
 
-No implementation or runtime validation is claimed. Before dependent S3 acceptance,
-require real Windows fixtures for first-instruction descendant creation, cancellation
+Before dependent S3 acceptance, require real Windows fixtures for first-instruction
+descendant creation, cancellation
 of child and grandchild with an unrelated process still alive, and owner termination
 at instrumented wrapper checkpoints after `CreateProcessW` returns but before the
 owned-spawn wrapper returns. These fixtures do not claim deterministic interruption
@@ -115,5 +115,54 @@ assignment crash gaps; demonstrate the fixtures detect escaped or abandoned chil
 Inject denied/unsupported attributes, termination/query failures and acknowledgement
 write failure: none may report Applied. Run focused process/harness/CLI proofs and
 combined workspace check/smoke on the exact candidate; record actual counts and OS.
-Human acceptance of this proposal precedes implementation. Concrete unsafe-code
-review and the remaining #74 evidence/human gates precede full S3 acceptance.
+Samuel accepted this architecture proposal on 2026-10-31 before implementation.
+Review of the concrete unsafe implementation and the remaining #74 evidence/human
+gates precede full S3 acceptance.
+
+## Implementation evidence, 2026-10-31
+
+The adapter now consumes `OwnedSpawnSpec`, creates a non-inheritable kill-on-close
+job, and uses `CreateProcessW` with both `JOB_LIST` and `HANDLE_LIST` creation
+attributes. Only private duplicated standard handles are inheritable. The native
+child/process/pipe wrapper owns its handles; there is no `Child` layout conversion,
+post-launch assignment, suspended fallback, or owned-path PID kill fallback.
+`terminate_and_observe` requires observed direct-child exit and a successful empty
+job query within its deadline. It caches exit status and releases its process
+reference before observing emptiness. Legacy `kill_tree` still discards cleanup
+errors and is explicitly not an acknowledgement.
+
+The shared launch guard encloses the entire private inheritable-duplicate lifetime;
+controlled ordinary and detached launches use the same guard, release it after
+creation, and wait outside it. This coordinates Meshloop's own host process. An
+embedding caller launching through raw `Command::spawn` instead of `spawn_command`
+does not participate in that guard. Detached launch policy is unchanged.
+
+Focused native Windows validation passed: 11 unit tests in
+`process::job::windows::tests`, 6 `owned_spawn` integration tests, 3 `process_tree`,
+19 `harness_contract`, and 2 `check_runner` tests. The native unit tests include
+owner termination after creation and before wrapper return; both rejected-startup
+negative controls; actual event-object inheritance isolation with an unfiltered
+ordinary-spawn control; forced concurrent owned/ordinary/detached launch ordering;
+denied assignment rights, unsupported attributes, native termination/query errors,
+bounded observation and repeated failed-creation handle cleanup. Compatibility
+tests exercise Unicode/quoting, case-insensitive environment changes, cwd,
+stdin/stdout/stderr and simultaneous large output. Resolver regressions compare
+actual executable selection with stable Rust `Command`.
+
+On this tested host, an extra duplicated reference to an exited process did not
+prevent an empty active-process query. The implementation conservatively releases
+its own reference and does not assume that result for other hosts. The bounded
+observation test uses an intentionally live job instead of depending on reference
+count behavior. Checkpoint fixtures do not interrupt inside the Windows API call.
+
+`cargo check -p meshloop-cli --tests` and focused all-targets adapter/CLI Clippy
+passed. Parent-governed workspace check subsequently passed before the final
+four-file integration-test launch hardening (observation
+`ac2fd05c71a196002218ce270a0dd58282df067d3d0e4213ebf4212f1d00903f`). Independent
+native review reported no code blockers. The integration binaries also embed native
+adapters, so their ordinary test-host launches now participate in the shared guard;
+assertions, deadlines, stream policies and parallelism are preserved. Fresh combined
+validation of this final candidate, smoke, review of the test-only rework and human
+review of the concrete unsafe implementation remain acceptance gates. No driver
+acknowledgement, persistence-failure proof, full S3 acceptance, POSIX runtime proof,
+commit, merge, release, or deployment is established by this focused evidence.

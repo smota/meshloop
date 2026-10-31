@@ -14,6 +14,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use meshloop_adapters::process::{HostProcessView, spawn_owned};
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
+// This test binary also launches owned children inline. Coordinate all launches
+// with their private inheritable-handle window, then wait outside the guard.
+fn guarded_output(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    meshloop_adapters::process::spawn_command(command)?.wait_with_output()
+}
+
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fixture_harness"))
 }
@@ -37,10 +47,12 @@ fn process_snapshot(pids: &[u32]) -> String {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        match std::process::Command::new("ps")
-            .args(["-o", "pid,ppid,pgid,stat,args", "-p", &list])
-            .output()
-        {
+        match guarded_output(std::process::Command::new("ps").args([
+            "-o",
+            "pid,ppid,pgid,stat,args",
+            "-p",
+            &list,
+        ])) {
             Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
             Err(e) => format!("ps failed: {e}"),
         }
@@ -55,19 +67,22 @@ fn process_snapshot(pids: &[u32]) -> String {
 fn retry_group_kill(pgid: u32) -> String {
     #[cfg(not(windows))]
     {
-        match std::process::Command::new("kill")
-            .args(["-s", "KILL", "--", &format!("-{pgid}")])
-            .output()
-        {
+        match guarded_output(std::process::Command::new("kill").args([
+            "-s",
+            "KILL",
+            "--",
+            &format!("-{pgid}"),
+        ])) {
             Ok(out) => format!(
                 "status {:?}, stderr {:?}, kill at {:?}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr),
-                std::process::Command::new("sh")
-                    .args(["-c", "command -v kill; kill --version 2>&1 | head -1"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                    .unwrap_or_default()
+                guarded_output(
+                    std::process::Command::new("sh")
+                        .args(["-c", "command -v kill; kill --version 2>&1 | head -1"])
+                )
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
             ),
             Err(e) => format!("kill failed to start: {e}"),
         }
@@ -84,7 +99,7 @@ fn grandchild_dies_on_timeout() {
     let pid_file = tmp.join("grandchild.pid");
     let hb_file = tmp.join("heartbeat.txt");
 
-    let mut cmd = std::process::Command::new(fixture_path());
+    let mut cmd = meshloop_adapters::process::OwnedSpawnSpec::new(fixture_path());
     cmd.arg("--spawn-grandchild").arg(&pid_file).arg(&hb_file);
 
     let mut owned = spawn_owned(cmd).expect("spawn owned child");
@@ -169,7 +184,8 @@ fn grandchild_dies_on_parent_abort() {
         .arg(&pid_file)
         .arg(&hb_file);
 
-    let mut parent = cmd.spawn().expect("spawn sub-orchestrator");
+    let mut parent =
+        meshloop_adapters::process::spawn_command(&mut cmd).expect("spawn sub-orchestrator");
 
     // Wait for sub-orchestrator to abort (must exit with non-zero / abnormal exit code)
     let parent_exit = parent.wait().expect("wait for sub-orchestrator abort");
@@ -221,10 +237,10 @@ fn detached_spawn_does_not_hold_the_callers_output_pipe() {
     // Regression for #5: on Windows the detached worker inherited the caller's stdout pipe,
     // so a caller capturing output waited for the whole background session.
     let start = Instant::now();
-    let out = std::process::Command::new(fixture_path())
-        .args(["--spawn-detached-sleeper", "3000"])
-        .output()
-        .expect("run spawner");
+    let out = guarded_output(
+        std::process::Command::new(fixture_path()).args(["--spawn-detached-sleeper", "3000"]),
+    )
+    .expect("run spawner");
     let elapsed = start.elapsed();
     let sleeper: u32 = String::from_utf8_lossy(&out.stdout)
         .trim()

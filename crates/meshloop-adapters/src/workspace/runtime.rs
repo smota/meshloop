@@ -1295,7 +1295,7 @@ impl CancellationClient {
         checkout: &std::path::Path,
         ledger: &std::path::Path,
     ) -> Result<Self, StoreError> {
-        let mut command = std::process::Command::new(git);
+        let mut command = crate::process::OwnedSpawnSpec::new(git);
         command.arg("-C").arg(checkout).args([
             "rev-parse",
             "--path-format=absolute",

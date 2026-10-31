@@ -3,10 +3,50 @@
 
 use std::process::Command;
 
+#[cfg(windows)]
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(windows)]
+pub(super) fn spawn_guard() -> std::io::Result<std::sync::MutexGuard<'static, ()>> {
+    SPAWN_LOCK
+        .lock()
+        .map_err(|_| std::io::Error::other("process-launch-lock-poisoned"))
+}
+
+/// Serializes Meshloop-controlled launches with the native owned-spawn handle window.
+/// Embedders must use this entry point for other launches in the same host process.
+/// The guard covers creation only; waiting and pipe draining occur after it releases.
+pub fn spawn_command(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    let _guard = spawn_guard()?;
+    command.spawn()
+}
+
+// Unit tests share this library process and must obey the same launch window.
+#[cfg(test)]
+pub(crate) trait TestCommandExt {
+    fn guarded_output(&mut self) -> std::io::Result<std::process::Output>;
+    fn guarded_status(&mut self) -> std::io::Result<std::process::ExitStatus>;
+}
+#[cfg(test)]
+impl TestCommandExt for Command {
+    fn guarded_output(&mut self) -> std::io::Result<std::process::Output> {
+        self.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        spawn_command(self)?.wait_with_output()
+    }
+    fn guarded_status(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        spawn_command(self)?.wait()
+    }
+}
+
 pub mod detach;
 pub mod job;
+mod owned_spawn;
 pub use detach::spawn_detached;
-pub use job::{OwnedChild, spawn_owned};
+pub use job::{OwnedChild, OwnedTermination, spawn_owned};
+pub use owned_spawn::{OwnedSpawnSpec, OwnedStdio};
 
 use meshloop_engine::ports::{LiveCheck, ProcessHint, ProcessView};
 
@@ -33,7 +73,10 @@ impl ProcessView for WindowsProcessView {
         let mut cmd = Command::new("tasklist");
         cmd.args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {}", hint.pid)]);
         hide_console(&mut cmd);
-        let output = cmd.output();
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = spawn_command(&mut cmd).and_then(|child| child.wait_with_output());
         let Ok(out) = output else {
             return LiveCheck::Ambiguous;
         };
@@ -69,9 +112,14 @@ impl ProcessView for PosixProcessView {
         if hint.pid == 0 {
             return LiveCheck::Dead;
         }
-        let output = Command::new("ps")
-            .args(["-o", "stat=", "-p", &hint.pid.to_string()])
-            .output();
+        let output = spawn_command(
+            Command::new("ps")
+                .args(["-o", "stat=", "-p", &hint.pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .and_then(|child| child.wait_with_output());
         let Ok(out) = output else {
             return LiveCheck::Ambiguous;
         };
@@ -186,7 +234,7 @@ pub fn kill_process_tree(pid: u32) {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_console(&mut cmd);
-        let _ = cmd.status();
+        let _ = spawn_command(&mut cmd).and_then(|mut child| child.wait());
     }
     #[cfg(not(windows))]
     {
@@ -264,7 +312,7 @@ mod tests {
         let (exe, args) = ("sleep", ["30", "", ""]);
         let mut cmd = Command::new(exe);
         cmd.args(args.iter().filter(|a| !a.is_empty()));
-        let mut child = cmd.spawn().expect("spawn sleeper");
+        let mut child = spawn_command(&mut cmd).expect("spawn sleeper");
         let hint = ProcessHint {
             pid: child.id(),
             image_name: process_image_name(std::path::Path::new(exe)),
@@ -286,10 +334,12 @@ mod tests {
     #[test]
     fn kills_live_child_process_tree() {
         #[cfg(windows)]
-        let mut child = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
-            .spawn()
-            .expect("spawn sleep process");
+        let mut child = spawn_command(Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
+            "Start-Sleep -Seconds 30",
+        ]))
+        .expect("spawn sleep process");
 
         #[cfg(not(windows))]
         let mut child = Command::new("sleep")

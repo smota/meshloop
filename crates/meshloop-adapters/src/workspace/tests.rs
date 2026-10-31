@@ -1,5 +1,6 @@
 use super::schema::{BASE_SCHEMA, migrate_with_fault};
 use super::*;
+use crate::process::TestCommandExt;
 use crate::store::SqliteStore;
 use meshloop_domain::evidence::AttemptId;
 use meshloop_domain::state::PlanState;
@@ -61,7 +62,7 @@ fn git(repo: &Path, args: &[&str]) {
         .arg("-C")
         .arg(repo)
         .args(args)
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         output.status.success(),
@@ -482,7 +483,7 @@ fn contender(f: &Fixture, expected: &str) {
         .env("MESHLOOP_S2_FENCE_REPO", &f.repo)
         .env("MESHLOOP_S2_FENCE_LEDGER", &f.ledger)
         .env("MESHLOOP_S2_FENCE_EXPECT", expected)
-        .output()
+        .guarded_output()
         .unwrap();
     assert!(
         output.status.success(),
@@ -814,7 +815,7 @@ fn workspace_git_process_child() {
 #[test]
 fn workspace_git_process_is_bounded() {
     let command = |mode: &str| {
-        let mut c = Command::new(std::env::current_exe().unwrap());
+        let mut c = OwnedSpawnSpec::new(std::env::current_exe().unwrap());
         c.args([
             "--exact",
             "workspace::tests::workspace_git_process_child",
@@ -1315,7 +1316,7 @@ fn lifecycle_observation_independent_process_reads_live_wal_while_fenced() {
     let registry_bytes = locked_registry_bytes(&lease);
     let root = lease.root(&alias()).unwrap();
     let entries = observation_entries(&f.base, &f.ledger);
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = OwnedSpawnSpec::new(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
@@ -1384,7 +1385,7 @@ fn retained_schema5_binary_refuses_schema6_without_mutation() {
         .arg("--db")
         .arg(&path)
         .args(["--graph", "graph-alpha", "--json"])
-        .output()
+        .guarded_output()
         .unwrap();
     let diagnostic = format!(
         "{}{}",
@@ -1930,7 +1931,7 @@ fn provisional_root_rejects_reparse_ancestor_before_creating_children() {
             .args(["/C", "mklink", "/J"])
             .arg(&link)
             .arg(&real)
-            .output()
+            .guarded_output()
             .unwrap()
             .status
             .success()

@@ -95,11 +95,10 @@ impl Drop for Fixture {
 // These fixtures emit small JSON responses. A blocked reader (for example one
 // accidentally trying to acquire the writer fence) must fail within a deadline.
 fn bounded_output(command: &mut Command) -> Output {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = meshloop_adapters::process::spawn_command(
+        command.stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if child.try_wait().unwrap().is_some() {

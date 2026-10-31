@@ -5,11 +5,11 @@
 //! `invoke`'s argument shape is entirely config-supplied (`invoke_args_template`); Meshloop
 //! ships no hardcoded per-harness CLI flag, per ADR 0003.
 
+use crate::process::{OwnedSpawnSpec, OwnedStdio};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -203,11 +203,11 @@ impl HarnessCapabilities for CliHarness {
     /// version. Never invoked with a task prompt — see module docs.
     fn probe(&self) -> Result<HarnessProfile, HarnessError> {
         let permit = CapturePermit::reserve()?;
-        let mut cmd = Command::new(&self.config.executable);
+        let mut cmd = OwnedSpawnSpec::new(&self.config.executable);
         cmd.args(&self.config.version_args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(OwnedStdio::Null)
+            .stdout(OwnedStdio::Piped)
+            .stderr(OwnedStdio::Piped);
         let mut child = crate::process::spawn_owned(cmd).map_err(|_| capture_fault())?;
         let capture = Capture::start(&mut child, permit)?;
         let start = Instant::now();
@@ -315,12 +315,12 @@ impl HarnessCapabilities for CliHarness {
                 })
                 .collect();
 
-            let mut cmd = Command::new(&self.config.executable);
+            let mut cmd = OwnedSpawnSpec::new(&self.config.executable);
             cmd.args(&args)
                 .current_dir(&spec.worktree_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+                .stdin(OwnedStdio::Null)
+                .stdout(OwnedStdio::Piped)
+                .stderr(OwnedStdio::Piped);
             let mut child =
                 crate::process::spawn_owned(cmd).map_err(|e| HarnessError::ProcessFault {
                     detail: e.to_string(),
@@ -519,13 +519,14 @@ impl HarnessCapabilities for CliHarness {
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+    use crate::process::TestCommandExt;
     #[test]
     fn bounded_capture_global_permits_survive_drop_and_recreation() {
         const CHILD: &str = "MESHLOOP_CAPTURE_POOL_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let result = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "harness::capture_tests::bounded_capture_global_permits_survive_drop_and_recreation", "--nocapture"])
-                .env(CHILD, "1").output().unwrap();
+                .env(CHILD, "1").guarded_output().unwrap();
             assert!(
                 result.status.success(),
                 "{}{}",
