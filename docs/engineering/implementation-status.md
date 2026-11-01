@@ -36,8 +36,8 @@ Native Windows (`rustc 1.98.0`).
   impact slicing (ADR 0029), **attempt-scoped inner-loop self-repair with session resumption
   and rollback** (ADR 0026), and **multiplexed bounded concurrency ($N \in 1..=16$) without Tokio** (ADR 0024).
 - **meshloop-adapters:** `CliHarness` (direct CLI subprocess execution with non-blocking `try_collect`
-  and CI double), Git worktree adapter with `GitAdminMutex` index-lock backoff, SQLite **schema version 6**
-  (`pane_id` / attempt tracking, `review_note` on runs, `GraphMutated` event parsing, WAL, `BEGIN IMMEDIATE`),
+  and CI double), Git worktree adapter with `GitAdminMutex` index-lock backoff, SQLite **schema version 7**
+  (`pane_id` / attempt tracking, `review_note` on runs, detached `run_driver_liveness`, `GraphMutated` event parsing, WAL, `BEGIN IMMEDIATE`),
   and host process-tree ownership via Win32 Job Objects / POSIX PGID (ADR 0025). Herdr dependency completely purged.
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
   `cancel`, `inspect`, `accept`, `integrate`, `roles`, `doctor` (reports `daemonless: true`),

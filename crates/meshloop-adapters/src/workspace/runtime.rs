@@ -365,7 +365,7 @@ impl SqliteStore {
             None => Ok(Vec::new()),
         }
     }
-    /// Observes an existing v6 ledger without application writes or migration.
+    /// Observes an existing v7 ledger without application writes or migration.
     /// SQLite may create, update, or remove its WAL/SHM coordination sidecars
     /// (ADR 0034); an absent ledger creates no files or directories.
     pub fn open_read_only(path: &std::path::Path) -> Result<Option<Self>, StoreError> {
@@ -387,11 +387,11 @@ impl SqliteStore {
             .map_err(error)?;
 
         match super::schema::schema_version(&conn)? {
-            Some(6) => {}
-            Some(1 | 2 | 4 | 5) => return Err(StoreError::SchemaUpgradeRequired),
+            Some(7) => {}
+            Some(1 | 2 | 4 | 5 | 6) => return Err(StoreError::SchemaUpgradeRequired),
             _ => return Err(refused()),
         }
-        super::schema::validate6(&conn)?;
+        super::schema::validate7(&conn)?;
         verify_handle(&handle, path)?;
         Ok(Some(Self {
             conn,

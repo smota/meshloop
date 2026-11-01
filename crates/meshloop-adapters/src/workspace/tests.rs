@@ -211,7 +211,7 @@ fn migration_v4_preserves_legacy_unbound() {
     assert_eq!(original_id, native_identity(&path).unwrap());
     assert_eq!(
         rows(&store.conn, "schema_meta")[0][0],
-        rusqlite::types::Value::Integer(6)
+        rusqlite::types::Value::Integer(7)
     );
     assert_eq!(rows(&store.conn, "workspace_legacy_unbound").len(), 4);
     assert!(rows(&store.conn, "workspace_repositories").is_empty());
@@ -287,7 +287,7 @@ fn migration_v1_v3_explicit_compatibility() {
             schema::migrate(&conn).unwrap();
             assert_eq!(
                 rows(&conn, "schema_meta")[0][0],
-                rusqlite::types::Value::Integer(6)
+                rusqlite::types::Value::Integer(7)
             );
         }
         for (table, columns, before_rows) in before {
@@ -1122,9 +1122,9 @@ fn lifecycle_fence_v6_rollback_and_future_schema_refusal() {
     assert_eq!(before_schema, schema_snapshot(&c));
     assert_eq!(lifecycle, lifecycle_snapshot(&c));
     assert_eq!(schema::schema_version(&c).unwrap(), Some(5));
-    let future = f.base.join("future7.sqlite");
+    let future = f.base.join("future8.sqlite");
     let c = Connection::open(&future).unwrap();
-    c.execute_batch("CREATE TABLE schema_meta(version INTEGER);INSERT INTO schema_meta VALUES(7);CREATE TABLE sentinel(value TEXT);INSERT INTO sentinel VALUES('unchanged');").unwrap();
+    c.execute_batch("CREATE TABLE schema_meta(version INTEGER);INSERT INTO schema_meta VALUES(8);CREATE TABLE sentinel(value TEXT);INSERT INTO sentinel VALUES('unchanged');").unwrap();
     let before_schema = schema_snapshot(&c);
     let before_rows = rows(&c, "sentinel");
     let mode: String = c
@@ -1142,6 +1142,32 @@ fn lifecycle_fence_v6_rollback_and_future_schema_refusal() {
         c.query_row::<String, _, _>("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap()
     );
+}
+#[test]
+fn driver_liveness_migrates_from_schema6_without_dropping_history() {
+    let f = Fixture::new();
+    let path = f.base.join("driver-v6.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO runs (graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at)
+             VALUES ('g','PlanAccepted','base','meshloop/g/integrate','{}','abc','1')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(7));
+    drop(store);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE run_driver_liveness; UPDATE schema_meta SET version=6;")
+        .unwrap();
+    let before = history(&conn);
+    assert_eq!(schema::schema_version(&conn).unwrap(), Some(6));
+    drop(conn);
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(7));
+    assert_eq!(before, history(&store.conn));
+    assert!(rows(&store.conn, "run_driver_liveness").is_empty());
 }
 #[test]
 fn lifecycle_fence_readonly_absent_db_and_pre_v6_upgrade_required() {

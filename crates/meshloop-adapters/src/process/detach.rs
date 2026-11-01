@@ -2,20 +2,31 @@
 //!
 //! A detached worker must not hold any of the caller's standard handles. On Windows,
 //! `CreateProcess` with handle inheritance passes every inheritable handle in the caller to
-//! the child, including the pipes a parent gave the caller as stdout/stderr, even though the
-//! child's own stdio is null. A caller that captures output (`Command::output()`) would then
-//! block until the detached worker exits.
+//! the child, including the pipes a parent gave the caller as stdout/stderr. The child's
+//! stdout and stderr are a log file this module opens; they are not those pipes. Stdin stays
+//! null. A caller that captures output (`Command::output()`) would otherwise block until the
+//! detached worker exits.
 
 #![allow(unsafe_code)]
 
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-/// Spawns `cmd` as a background process in its own process group, with null stdio and
-/// without inheriting the caller's standard handles.
-pub fn spawn_detached(mut cmd: Command) -> std::io::Result<Child> {
+/// Spawns `cmd` in its own process group. Stdin is null. Stdout and stderr are `log`,
+/// opened here, and are not the caller's pipes. On Windows the caller's standard-handle
+/// inherit flags are still cleared for the duration of the spawn.
+pub fn spawn_detached(mut cmd: Command, log: &Path) -> std::io::Result<Child> {
+    if let Some(parent) = log.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new().create(true).append(true).open(log)?;
+    let stderr = stdout.try_clone()?;
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
     #[cfg(windows)]
     {
         spawn_windows(cmd)
