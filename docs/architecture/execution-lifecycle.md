@@ -24,6 +24,7 @@ flowchart LR
 | ready | running | attempt-started event | concurrency budget available (ADR 0009); harness capability confirmed (ADR 0003) |
 | running | verifying | harness-exited event | exit code recorded; harness exit success alone never satisfies the later `accepted` precondition |
 | running | failed | harness-crashed or timeout event | owned process tree confirmed terminated (Herdr: pane/agent gone — not `agent_prompt_stalled`) |
+| failed | failed | harness-exited event | late exit after the attempt was already failed; the task stays failed and the event is stored |
 | failed | verifying | live-worker-settled event | Failed was premature; the same attempt's Herdr pane settled; harvest that worktree |
 | blocked | pending | dependency-cleared event | no upstream remains Failed/Cancelled/Blocked |
 | running | cancelled | user/operator cancel event | owned process tree confirmed terminated |

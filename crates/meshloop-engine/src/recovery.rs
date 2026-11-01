@@ -209,6 +209,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_of_crash_then_harness_exited_stays_failed() {
+        let records = vec![
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Failed,
+                E::HarnessCrashedOrTimeout,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Failed,
+                TaskState::Failed,
+                E::HarnessExited,
+            ),
+        ];
+        let tasks = replay_tasks(&records).expect("late exit after failure stays readable");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Failed);
+    }
+
+    #[test]
     fn per_task_fold_rejects_illegal_triples() {
         let records = vec![record(
             1,
