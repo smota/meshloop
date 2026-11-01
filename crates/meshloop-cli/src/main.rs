@@ -1044,7 +1044,7 @@ fn cmd_run(
                 }
                 println!("{}", json_out::ok("meshloop:run", origin, data,));
             } else {
-                println!("{}", report::format_idle(reason));
+                println!("{}", report::format_idle(reason, status.as_ref()));
                 if let Some(s) = &status {
                     print!("{}", report::format_status(s));
                 }
@@ -1457,10 +1457,11 @@ fn cmd_resume(
         }
         match saga.resume(&id, retry, restart) {
             Ok(reason) => {
-                println!("{}", report::format_idle(reason));
-                if let Ok(s) = saga.status(&id) {
-                    print!("{}", report::format_status(&s));
-                    ExitCode::from(idle_exit_code(reason, &s) as u8)
+                let status = saga.status(&id).ok();
+                println!("{}", report::format_idle(reason, status.as_ref()));
+                if let Some(s) = &status {
+                    print!("{}", report::format_status(s));
+                    ExitCode::from(idle_exit_code(reason, s) as u8)
                 } else {
                     ExitCode::SUCCESS
                 }

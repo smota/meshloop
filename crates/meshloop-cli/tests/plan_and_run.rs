@@ -731,6 +731,337 @@ fn resume_restart_reruns_accepted_plan_without_new_graph_id() {
     fs::remove_dir_all(&dir).ok();
 }
 
+fn sqlite(db: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(db).expect("open state db")
+}
+
+fn event_count(db: &Path, graph_id: &str) -> i64 {
+    sqlite(db)
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE graph_id = ?1",
+            [graph_id],
+            |row| row.get(0),
+        )
+        .expect("count events")
+}
+
+fn attempt_count(db: &Path, graph_id: &str) -> i64 {
+    sqlite(db)
+        .query_row(
+            "SELECT COUNT(*) FROM attempts WHERE graph_id = ?1",
+            [graph_id],
+            |row| row.get(0),
+        )
+        .expect("count attempts")
+}
+
+fn branch_list(dir: &Path) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["branch", "--list", "meshloop/*"])
+        .guarded_output()
+        .expect("git branch");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn find_named(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().and_then(|file| file.to_str()) == Some(name) {
+                return Some(path);
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    None
+}
+
+fn status_text(dir: &Path, config: &Path, db: &Path) -> String {
+    let out = meshloop()
+        .current_dir(dir)
+        .args(["status", "--config"])
+        .arg(config)
+        .args(["--db"])
+        .arg(db)
+        .guarded_output()
+        .expect("status");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    text
+}
+
+fn rewind_to_verifying(db: &Path, graph_id: &str) {
+    let deleted = sqlite(db)
+        .execute(
+            "DELETE FROM events WHERE graph_id = ?1 AND event_type = 'DeterministicChecksPassed'",
+            [graph_id],
+        )
+        .expect("delete check event");
+    assert_eq!(deleted, 1, "expected one passed-check event to rewind");
+}
+
+#[test]
+fn resume_recovers_verifying_worktree_without_restart() {
+    let dir = disposable_repo("verify-resume");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g-verify","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run");
+    let run_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run.status.success(),
+        "fixture run should reach review, got: {run_out}"
+    );
+    let marker = find_named(&worktree_base, "fixture-touched.txt").expect("worktree marker");
+    let marker_text = fs::read_to_string(&marker).unwrap();
+    rewind_to_verifying(&db_path, "g-verify");
+    let before = status_text(&dir, &config_path, &db_path);
+    assert!(
+        before.contains("[1] Verifying"),
+        "rewind should leave the task verifying, got: {before}"
+    );
+    let events_before = event_count(&db_path, "g-verify");
+    let attempts_before = attempt_count(&db_path, "g-verify");
+    let branches_before = branch_list(&dir);
+
+    let resume = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .guarded_output()
+        .expect("resume");
+    let resume_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&resume.stdout),
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    assert!(
+        resume_out.contains("[1] AwaitingReview") || resume_out.contains("[1] Failed"),
+        "resume should leave Verifying, got: {resume_out}"
+    );
+    assert!(
+        !resume_out.contains("[1] Verifying"),
+        "task must not stay Verifying, got: {resume_out}"
+    );
+    assert_eq!(fs::read_to_string(&marker).unwrap(), marker_text);
+    assert_eq!(attempt_count(&db_path, "g-verify"), attempts_before);
+    assert_eq!(event_count(&db_path, "g-verify"), events_before + 1);
+    assert_eq!(branch_list(&dir), branches_before);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resume_fails_verifying_when_worktree_is_missing() {
+    let dir = disposable_repo("verify-missing");
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g-missing","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run");
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    rewind_to_verifying(&db_path, "g-missing");
+    let marker = find_named(&worktree_base, "fixture-touched.txt").expect("marker");
+    let worktree = marker.parent().unwrap().to_path_buf();
+    fs::remove_dir_all(&worktree).unwrap();
+    let attempts_before = attempt_count(&db_path, "g-missing");
+    let branches_before = branch_list(&dir);
+
+    let resume = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--graph", "g-missing", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .guarded_output()
+        .expect("resume");
+    let resume_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&resume.stdout),
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    assert!(
+        resume_out.contains("[1] Failed"),
+        "missing worktree should fail checks, got: {resume_out}"
+    );
+    let reason: Option<String> = sqlite(&db_path)
+        .query_row(
+            "SELECT reason FROM events WHERE graph_id = 'g-missing' AND event_type = 'DeterministicChecksFailed' ORDER BY event_id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("failed-check reason");
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|text| text.contains("driver died during verification")),
+        "reason={reason:?} out={resume_out}"
+    );
+    assert_eq!(attempt_count(&db_path, "g-missing"), attempts_before);
+    assert_eq!(branch_list(&dir), branches_before);
+    assert!(!worktree.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resume_failed_terminal_names_undriven_task() {
+    let dir = disposable_repo("stuck-ready");
+    let config_path = write_config(&dir, r#"["--noop"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g-stuck","nodes":[{"id":1,"description":"first","depends_on":[],"tier":null},{"id":2,"description":"second","depends_on":[1],"tier":null}]}"#,
+    )
+    .unwrap();
+
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run");
+    let run_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run_out.contains("[1] Failed"),
+        "noop predecessor should fail, got: {run_out}"
+    );
+    let conn = sqlite(&db_path);
+    let deleted = conn
+        .execute(
+            "DELETE FROM events WHERE graph_id = 'g-stuck' AND task_id = 2 AND event_type = 'DependencyFailedOrScopeRevoked'",
+            [],
+        )
+        .expect("delete block event");
+    assert_eq!(
+        deleted, 1,
+        "node 2 should have been blocked, got: {run_out}"
+    );
+    conn.execute(
+        "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
+         VALUES ('g-stuck', 2, NULL, 'Pending', 'Ready', 'DependencySatisfied', 'stuck ready', 'test', '1')",
+        [],
+    )
+    .expect("insert ready event");
+    drop(conn);
+    let prepared = status_text(&dir, &config_path, &db_path);
+    assert!(
+        prepared.contains("[2] Ready"),
+        "node 2 should be Ready and not runnable, got: {prepared}"
+    );
+
+    let resume = meshloop()
+        .current_dir(&dir)
+        .args(["resume", "--graph", "g-stuck", "--config"])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .guarded_output()
+        .expect("resume");
+    let resume_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&resume.stdout),
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    let idle = resume_out.lines().next().unwrap_or("");
+    assert!(
+        idle.contains("non-terminal task(s) 2"),
+        "FailedTerminal should name the stuck task, got: {resume_out}"
+    );
+    assert!(
+        idle.contains("`resume --retry` if attempts remain"),
+        "{resume_out}"
+    );
+    assert!(
+        idle.contains("`resume --restart` re-runs this accepted plan without replanning"),
+        "{resume_out}"
+    );
+    assert!(
+        !idle.contains("nothing runnable"),
+        "do not claim nothing runnable while task 2 has no driver: {resume_out}"
+    );
+    assert!(
+        resume_out.contains("[2] Ready"),
+        "resume must not restart or dispatch the stuck task, got: {resume_out}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn roles_json_is_prefixed_and_namespaced_alias_works() {
     let output = meshloop()
