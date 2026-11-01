@@ -56,7 +56,7 @@ pub fn format_idle(reason: IdleReason) -> String {
                 .into()
         }
         IdleReason::WaitingOnLiveWorker => {
-            "A Herdr worker pane is still live. Meshloop is waiting on that pane, not the 5s stall gate.\n\
+            "A direct-CLI worker is still live. Meshloop is waiting on that worker, not the 5s stall gate.\n\
              `meshloop status` shows pane_id/live. Do not retry while it is working.\n"
                 .into()
         }
@@ -186,9 +186,9 @@ pub fn format_attempt(a: &AttemptView) -> String {
 
 pub fn banner() -> String {
     "Meshloop: agent-session control plane (native Windows). Binary is the engine; skills/MCP are the UX.\n\
-     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor.\n\
+     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, mcp, bundle.\n\
      Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
-     Live workers use Herdr. --fixture-only is the CI subprocess double.\n"
+     Live workers are direct CLI subprocesses in Git worktrees. --fixture-only is the CI subprocess double.\n"
         .into()
 }
 

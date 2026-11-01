@@ -2,7 +2,7 @@ name: CI Gate
 
 on:
   push:
-    branches: [ main, "work/**", "codex/**" ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 

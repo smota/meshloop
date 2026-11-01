@@ -1,4 +1,4 @@
-# Implementation status — 2026-09-15
+# Implementation status — 2026-11-01
 
 > Maintainers and agents. Operators: [Getting started](../start.md).
 > Hub: [docs/README.md](../README.md).
@@ -36,7 +36,7 @@ Native Windows (`rustc 1.98.0`).
   impact slicing (ADR 0029), **attempt-scoped inner-loop self-repair with session resumption
   and rollback** (ADR 0026), and **multiplexed bounded concurrency ($N \in 1..=16$) without Tokio** (ADR 0024).
 - **meshloop-adapters:** `CliHarness` (direct CLI subprocess execution with non-blocking `try_collect`
-  and CI double), Git worktree adapter with `GitAdminMutex` index-lock backoff, SQLite **schema v4**
+  and CI double), Git worktree adapter with `GitAdminMutex` index-lock backoff, SQLite **schema version 6**
   (`pane_id` / attempt tracking, `review_note` on runs, `GraphMutated` event parsing, WAL, `BEGIN IMMEDIATE`),
   and host process-tree ownership via Win32 Job Objects / POSIX PGID (ADR 0025). Herdr dependency completely purged.
 - **meshloop-cli:** `plan`, **`review-plan`**, `run`, `status`, `resume`,
@@ -56,7 +56,7 @@ Live tests execute direct CLI processes in isolated worktrees with zero backgrou
 
 - Prefixed ids; unprefixed `reviewer` / `planner` rejected.
 - Skills under `skills/meshloop-*` (including `meshloop-review-plan`).
-- Doctor: `herdr status` + `pane current`; JSON `origin_session`.
+- Doctor: `daemonless: true` and live transport `direct-cli` (fixture is the CI subprocess); JSON `origin_session` and `live_transport`.
 - Orchestrate: pin pack, two reviewer panes from a non-origin pane, synthesis.
 - Origin flags from argv or `MESHLOOP_ORIGIN_*`.
 
