@@ -1,0 +1,482 @@
+//! Read-only workspace inventory. Proves reason codes and that the command does not write.
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use meshloop_adapters::store::SqliteStore;
+use meshloop_adapters::workspace::GitRepositoryIdentity;
+use meshloop_domain::digest::fnv1a64;
+use meshloop_domain::state::PlanState;
+use meshloop_domain::workspace::{
+    GenerationRecord, GraphId, LifecycleId, PlanHash, RelativePath, RootAlias,
+};
+use meshloop_engine::ports::{RunRow, RunStore};
+use meshloop_engine::workspace::{RepositoryFence, RepositoryIdentity, WorkspaceLedger};
+
+struct Fixture {
+    base: PathBuf,
+    repo: PathBuf,
+    db: PathBuf,
+    config: PathBuf,
+}
+impl Fixture {
+    fn new(tag: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "meshloop-cli-inventory-{tag}-{}-{nonce}",
+            std::process::id()
+        ));
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        fs::write(repo.join("tracked.txt"), "committed seed\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "seed",
+            ],
+        );
+        let config = repo.join("meshloop.toml");
+        fs::write(
+            &config,
+            r#"
+selected_harnesses = []
+[limits]
+max_concurrent_workers = 1
+max_retries = 1
+task_timeout_seconds = 10
+"#,
+        )
+        .unwrap();
+        let db = repo.join(".meshloop").join("state.sqlite");
+        Self {
+            base,
+            repo,
+            db,
+            config,
+        }
+    }
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_meshloop"));
+        command
+            .current_dir(&self.repo)
+            .args(args)
+            .arg("--json")
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--db")
+            .arg(&self.db);
+        command
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        assert!(self.base.starts_with(std::env::temp_dir()));
+        assert!(
+            self.base
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("meshloop-cli-inventory-")
+        );
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+fn bounded_output(command: &mut Command) -> Output {
+    let mut child = meshloop_adapters::process::spawn_command(
+        command.stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("subprocess exceeded 20-second deadline: {command:?}: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
+    let out = bounded_output(Command::new("git").current_dir(repo).args(args));
+    assert!(out.status.success(), "{out:?}");
+    out.stdout
+}
+
+fn run(fixture: &Fixture, args: &[&str]) -> (i32, serde_json::Value, String) {
+    let out = bounded_output(&mut fixture.command(args));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let code = out.status.code().unwrap_or(127);
+    assert!(
+        !stdout.contains(&fixture.base.display().to_string()),
+        "inventory leaked an absolute path: {stdout}"
+    );
+    if code == 0 {
+        let value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            panic!(
+                "{error}: {stdout} stderr {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        (code, value, stdout)
+    } else {
+        (code, serde_json::Value::Null, stdout)
+    }
+}
+
+/// SQLite WAL/SHM sidecars are ADR 0034 coordination, not inventory writes.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "state.sqlite-wal" || name == "state.sqlite-shm" {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if entry.file_type().unwrap().is_dir() {
+                out.insert(relative, None);
+                visit(root, &path, out);
+            } else {
+                out.insert(relative, Some(fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    visit(root, root, &mut out);
+    out
+}
+
+fn fingerprint(map: &BTreeMap<PathBuf, Option<Vec<u8>>>) -> String {
+    let mut bytes = Vec::new();
+    for (path, body) in map {
+        bytes.extend(path.to_string_lossy().as_bytes());
+        bytes.push(0);
+        match body {
+            None => bytes.push(1),
+            Some(body) => {
+                bytes.push(2);
+                bytes.extend_from_slice(body);
+            }
+        }
+    }
+    format!("{:016x}", fnv1a64(&bytes))
+}
+
+fn assert_unchanged(root: &Path, before: &BTreeMap<PathBuf, Option<Vec<u8>>>) {
+    let after = snapshot(root);
+    let before_hash = fingerprint(before);
+    let after_hash = fingerprint(&after);
+    assert_eq!(
+        before_hash, after_hash,
+        "filesystem hash changed: before {before_hash} after {after_hash}"
+    );
+    assert_eq!(before, &after, "inventory changed fixture bytes");
+}
+
+fn hash_text() -> String {
+    "a".repeat(64)
+}
+
+#[test]
+fn inventory_and_preview_report_reason_codes_without_writes() {
+    let absent = Fixture::new("absent");
+    let before = snapshot(&absent.base);
+    let (code, report, _) = run(&absent, &["workspace", "inventory"]);
+    assert_eq!(code, 0, "{report}");
+    let summary = serde_json::json!({
+        "mode": "inventory",
+        "apply": false,
+        "blockers": ["fence-missing", "ledger-missing"],
+        "entries": []
+    });
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["command"], "meshloop:workspace-inventory");
+    assert_eq!(report["data"], summary, "fixture JSON summary mismatch");
+    let (code, preview, _) = run(&absent, &["workspace", "preview"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        preview["data"],
+        serde_json::json!({
+            "mode": "preview",
+            "apply": false,
+            "blockers": ["adoption-preview-only", "fence-missing", "ledger-missing"],
+            "entries": []
+        })
+    );
+    let (code, _, _) = run(&absent, &["workspace", "apply"]);
+    assert_eq!(code, 2);
+    assert_unchanged(&absent.base, &before);
+    assert!(!absent.db.exists());
+    assert!(
+        !absent
+            .repo
+            .join(".git")
+            .join("meshloop-workspace-registry.json")
+            .exists()
+    );
+    assert!(!absent.base.join(".meshloop-worktrees").exists());
+
+    let legacy = Fixture::new("legacy");
+    {
+        let mut store = SqliteStore::open(&legacy.db).unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "legacy-run".into(),
+                plan_state: PlanState::AwaitingPlanReview,
+                run_base: "base".into(),
+                integrate_ref: "integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: hash_text(),
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+    }
+    let before = snapshot(&legacy.base);
+    let db_bytes = fs::read(&legacy.db).unwrap();
+    let (code, report, _) = run(&legacy, &["workspace", "inventory"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["data"]["apply"], false);
+    assert_eq!(
+        report["data"]["blockers"],
+        serde_json::json!(["fence-missing"])
+    );
+    assert_eq!(
+        report["data"]["entries"],
+        serde_json::json!([{
+            "class": "legacy",
+            "ownership": "legacy-unbound",
+            "blockers": ["legacy-ownership-unresolved"],
+            "source": "legacy-run",
+            "graph_id": "legacy-run",
+            "lifecycle_id": null,
+            "location": null,
+            "withheld": false
+        }])
+    );
+    let (code, preview, _) = run(&legacy, &["workspace", "preview"]);
+    assert_eq!(code, 0);
+    assert_eq!(preview["data"]["apply"], false);
+    assert_eq!(
+        preview["data"]["entries"][0]["blockers"],
+        serde_json::json!(["adoption-preview-only", "legacy-ownership-unresolved"])
+    );
+    assert_eq!(fs::read(&legacy.db).unwrap(), db_bytes);
+    assert_unchanged(&legacy.base, &before);
+
+    let linked = Fixture::new("linked");
+    git(
+        &linked.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "linked",
+            "linked-wt",
+            "HEAD",
+        ],
+    );
+    let before = snapshot(&linked.base);
+    let (code, report, _) = run(&linked, &["workspace", "inventory"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(
+        report["data"]["entries"],
+        serde_json::json!([{
+            "class": "unknown",
+            "ownership": "git-registered",
+            "blockers": ["unknown-ownership"],
+            "source": "git-worktree",
+            "graph_id": null,
+            "lifecycle_id": null,
+            "location": {
+                "scope": "repository",
+                "root_alias": null,
+                "relative_path": "linked-wt"
+            },
+            "withheld": false
+        }])
+    );
+    assert!(
+        !linked
+            .repo
+            .join(".git")
+            .join("meshloop-workspace-registry.json")
+            .exists()
+    );
+    assert_unchanged(&linked.base, &before);
+
+    let upgraded = Fixture::new("schema");
+    {
+        let _store = SqliteStore::open(&upgraded.db).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&upgraded.db).unwrap();
+    conn.execute("UPDATE schema_meta SET version=5", [])
+        .unwrap();
+    drop(conn);
+    let before = snapshot(&upgraded.base);
+    let db_bytes = fs::read(&upgraded.db).unwrap();
+    let (code, report, _) = run(&upgraded, &["workspace", "inventory"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(
+        report["data"]["blockers"],
+        serde_json::json!(["fence-missing", "schema-upgrade-required"])
+    );
+    assert_eq!(report["data"]["entries"], serde_json::json!([]));
+    assert_eq!(fs::read(&upgraded.db).unwrap(), db_bytes);
+    let version: i64 = rusqlite::Connection::open_with_flags(
+        &upgraded.db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+    .unwrap();
+    assert_eq!(version, 5);
+    assert_unchanged(&upgraded.base, &before);
+
+    let missing = Fixture::new("missing");
+    {
+        let mut store = SqliteStore::open(&missing.db).unwrap();
+        let mut lease = GitRepositoryIdentity::new("git")
+            .acquire(&missing.repo, &missing.db)
+            .unwrap();
+        store.bind_repository(&lease).unwrap();
+        let alias = RootAlias::new("worktrees").unwrap();
+        let root = missing.repo.join("workspace-root");
+        fs::create_dir(&root).unwrap();
+        lease.register_root(alias.clone(), &root).unwrap();
+        store.register_root(&lease, &alias).unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "graph-alpha".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: hash_text(),
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+        store
+            .insert_generation(
+                &lease,
+                &GenerationRecord {
+                    id: LifecycleId::new("generation-1").unwrap(),
+                    repository_id: lease.repository().id.clone(),
+                    graph_id: GraphId::new("graph-alpha").unwrap(),
+                    ordinal: 1,
+                    accepted_plan_hash: PlanHash::new(hash_text()).unwrap(),
+                    root_alias: alias,
+                    relative_path: RelativePath::new("absent-gen").unwrap(),
+                    layout_version: 1,
+                },
+            )
+            .unwrap();
+    }
+    let before = snapshot(&missing.base);
+    let registry = missing
+        .repo
+        .join(".git")
+        .join("meshloop-workspace-registry.json");
+    let registry_bytes = fs::read(&registry).unwrap();
+    let db_bytes = fs::read(&missing.db).unwrap();
+    let (code, report, _) = run(
+        &missing,
+        &[
+            "workspace",
+            "inventory",
+            "--worktree-base",
+            missing.base.join("configured-root").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["data"]["apply"], false);
+    assert_eq!(report["data"]["blockers"], serde_json::json!([]));
+    assert_eq!(
+        report["data"]["entries"],
+        serde_json::json!([{
+            "class": "missing",
+            "ownership": "ledger-owned",
+            "blockers": ["path-missing"],
+            "source": "generation",
+            "graph_id": "graph-alpha",
+            "lifecycle_id": "generation-1",
+            "location": {
+                "scope": "ledger-root",
+                "root_alias": "worktrees",
+                "relative_path": "absent-gen"
+            },
+            "withheld": false
+        }])
+    );
+    let (code, preview, _) = run(&missing, &["workspace", "preview"]);
+    assert_eq!(code, 0);
+    assert_eq!(preview["data"]["apply"], false);
+    assert_eq!(preview["data"]["entries"], serde_json::json!([]));
+    assert_eq!(
+        preview["data"]["blockers"],
+        serde_json::json!(["adoption-preview-only"])
+    );
+    assert!(!missing.repo.join("absent-gen").exists());
+    assert!(
+        !missing
+            .repo
+            .join("workspace-root")
+            .join("absent-gen")
+            .exists()
+    );
+    assert_eq!(fs::read(&missing.db).unwrap(), db_bytes);
+    assert_eq!(fs::read(&registry).unwrap(), registry_bytes);
+    assert_unchanged(&missing.base, &before);
+
+    #[cfg(unix)]
+    {
+        let blocked = Fixture::new("reparse");
+        let root = blocked.base.join("configured");
+        fs::create_dir(&root).unwrap();
+        let sentinel = blocked.base.join("sentinel.txt");
+        fs::write(&sentinel, "SENTINEL-DO-NOT-LEAK").unwrap();
+        std::os::unix::fs::symlink(&sentinel, root.join("leak")).unwrap();
+        let before = snapshot(&blocked.base);
+        let (code, report, stdout) = run(
+            &blocked,
+            &[
+                "workspace",
+                "inventory",
+                "--worktree-base",
+                root.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 0, "{report}");
+        assert!(!stdout.contains("SENTINEL-DO-NOT-LEAK"));
+        assert_eq!(report["data"]["entries"][0]["class"], "inaccessible");
+        assert_eq!(
+            report["data"]["entries"][0]["blockers"],
+            serde_json::json!(["reparse-blocked", "unknown-ownership"])
+        );
+        assert_eq!(report["data"]["entries"][0]["ownership"], "configured-root");
+        assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL-DO-NOT-LEAK");
+        assert_unchanged(&blocked.base, &before);
+    }
+}

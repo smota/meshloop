@@ -12,6 +12,7 @@ mod json_out;
 mod mcp;
 mod report;
 mod session_bundle;
+mod workspace_cmd;
 
 use std::collections::HashMap;
 use std::env;
@@ -84,6 +85,12 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
         Command::Roles => cmd_roles(inv.json, inv.origin),
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
+        Command::Workspace {
+            report,
+            config,
+            db,
+            worktree_base,
+        } => workspace_cmd::cmd_workspace(report, config, db, worktree_base, inv.origin),
         Command::Status {
             graph,
             config,

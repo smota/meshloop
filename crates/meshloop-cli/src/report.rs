@@ -223,7 +223,7 @@ pub fn format_attempt(a: &AttemptView) -> String {
 
 pub fn banner() -> String {
     "Meshloop: agent-session control plane (native Windows). Binary is the engine; skills/MCP are the UX.\n\
-     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, mcp, bundle.\n\
+     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, workspace, mcp, bundle.\n\
      Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
      Live workers are direct CLI subprocesses in Git worktrees. --fixture-only is the CI subprocess double.\n"
         .into()

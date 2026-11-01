@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod inventory;
+pub use inventory::{InventoryScope, discover_inventory};
 mod ledger;
 #[cfg(test)]
 mod tests;
@@ -190,6 +192,48 @@ impl RepositoryIdentity for GitRepositoryIdentity {
     fn acquire(&self, checkout: &Path, ledger: &Path) -> Result<Self::Fence, StoreError> {
         self.acquire_with(checkout, ledger, &native_identity)
     }
+}
+pub(crate) struct RegistryRoot {
+    pub path: PathBuf,
+    pub identity: NativeIdentity,
+}
+pub(crate) struct RegistryView {
+    pub repository: RepositoryRecord,
+    pub common_identity: NativeIdentity,
+    pub ledger_identity: NativeIdentity,
+    pub roots: BTreeMap<RootAlias, RegistryRoot>,
+}
+/// Reads an existing fence manifest. Does not create, lock, or rewrite it.
+pub(crate) fn read_registry(path: &Path) -> Result<Option<RegistryView>, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_refused(error)),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => return Err(refused()),
+        Ok(_) => {}
+    }
+    let mut file = File::open(path).map_err(io_refused)?;
+    let manifest = read_manifest(&mut file)?;
+    if manifest.version != 1 {
+        return Err(refused());
+    }
+    Ok(Some(RegistryView {
+        repository: manifest.repository,
+        common_identity: manifest.common.native_identity,
+        ledger_identity: manifest.ledger.native_identity,
+        roots: manifest
+            .roots
+            .into_iter()
+            .map(|(alias, root)| {
+                (
+                    alias,
+                    RegistryRoot {
+                        path: root.canonical_path,
+                        identity: root.native_identity,
+                    },
+                )
+            })
+            .collect(),
+    }))
 }
 fn read_manifest(file: &mut File) -> Result<Manifest, StoreError> {
     file.seek(SeekFrom::Start(0)).map_err(io_refused)?;

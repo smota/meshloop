@@ -143,6 +143,18 @@ pub enum Command {
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
     },
+    Workspace {
+        report: WorkspaceReport,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+        worktree_base: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceReport {
+    Inventory,
+    Preview,
 }
 
 pub fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -316,8 +328,33 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--db"),
             (true, "--worktree-base"),
         ],
+        "workspace" => &[
+            (true, "--config"),
+            (true, "--db"),
+            (true, "--worktree-base"),
+        ],
         _ => return None,
     })
+}
+
+fn positionals(verb: &str, rest: &[String]) -> Vec<String> {
+    let own = verb_flags(verb).unwrap_or(&[]);
+    let mut tokens = rest.iter();
+    let mut out = Vec::new();
+    while let Some(token) = tokens.next() {
+        if looks_like_flag(token) {
+            if GLOBAL_FLAGS
+                .iter()
+                .chain(own)
+                .any(|(takes, name)| *name == token && *takes)
+            {
+                tokens.next();
+            }
+        } else {
+            out.push(token.clone());
+        }
+    }
+    out
 }
 
 fn looks_like_flag(token: &str) -> bool {
@@ -630,6 +667,33 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
             })
         }
+        Some(v) if v == "workspace" => {
+            let rest = &args[1..];
+            let positionals = positionals("workspace", rest);
+            let names: Vec<&str> = positionals.iter().map(String::as_str).collect();
+            let report = match names.as_slice() {
+                ["inventory"] => WorkspaceReport::Inventory,
+                ["preview"] => WorkspaceReport::Preview,
+                ["apply"] => {
+                    return Err(
+                        "meshloop:workspace apply is not available; inventory and preview are read-only"
+                            .into(),
+                    );
+                }
+                _ => {
+                    return Err(
+                        "meshloop:workspace requires inventory or preview; apply is not available"
+                            .into(),
+                    );
+                }
+            };
+            Ok(Command::Workspace {
+                report,
+                config: flag_value(rest, "--config").map(PathBuf::from),
+                db: flag_value(rest, "--db").map(PathBuf::from),
+                worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
+            })
+        }
         Some(v)
             if matches!(
                 v.as_str(),
@@ -649,7 +713,7 @@ pub fn help_text() -> &'static str {
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
-     \x20 meshloop:watch\n\
+     \x20 meshloop:watch | meshloop:workspace\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -661,6 +725,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
+     \x20 meshloop workspace inventory|preview [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
@@ -736,6 +801,8 @@ mod tests {
         "ast-skeleton --path p",
         "symbol-lookup --query q --k 3 --scope s",
         "mutate-plan --graph g --mutation-file f --mutation {} --require-review --config c --db d --worktree-base w",
+        "workspace inventory --config c --db d --worktree-base w",
+        "workspace preview --config c --db d --worktree-base w",
         "mcp",
         "roles",
     ];
