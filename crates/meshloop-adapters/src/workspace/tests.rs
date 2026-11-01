@@ -1963,7 +1963,12 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
             let mut client =
                 CancellationClient::open(Path::new("git"), &self.repo, &self.ledger).unwrap();
             *self.request.lock().unwrap() = Some(client.enqueue_driver(&driver.id).unwrap());
-            Ok(Some(HarnessOutcome { exit_code: 0, output_redacted: r#"{"graph_id":"completion-race","nodes":[{"id":1,"description":"task","depends_on":[],"tier":null}]}"#.into(), worktree_changed: false }))
+            Ok(Some(HarnessOutcome {
+                exit_code: 0,
+                output_redacted: r#"{"graph_id":"completion-race","nodes":[{"id":1,"description":"task","depends_on":[],"tier":null}]}"#.into(),
+                stderr_redacted: String::new(),
+                worktree_changed: false,
+            }))
         }
     }
     let f = Fixture::new();
