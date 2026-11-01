@@ -772,6 +772,9 @@ impl<'a> RunLoop<'a> {
         if let Some(tick) = self.reattach_running(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
+        if let Some(tick) = self.recover_verifying(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
         if let Some(tick) = self.harvest_live_failures(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
@@ -1942,6 +1945,24 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
+    /// Confirmed dead owner. A PID with no pane fails only on `LiveCheck::Dead`;
+    /// `Ambiguous` is an image mismatch, not a confirmed death, and stays Running (#62).
+    fn attempt_driver_dead(&self, attempt: &AttemptRow) -> bool {
+        if attempt.pane_id.is_some() {
+            return matches!(self.attempt_live(attempt), LiveCheck::Dead);
+        }
+        match attempt.pid {
+            None => true,
+            Some(pid) => matches!(
+                self.processes.is_live(&ProcessHint {
+                    pid,
+                    image_name: attempt.image_name.clone(),
+                }),
+                LiveCheck::Dead
+            ),
+        }
+    }
+
     fn crash_fail(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
         let recs = self.store.records_for_graph(graph_id)?;
         let tasks = replay_tasks(&recs)?;
@@ -1952,21 +1973,7 @@ impl<'a> RunLoop<'a> {
             }
             let attempt = self.store.latest_attempt_for_task(graph_id, node.id)?;
             let dead = match &attempt {
-                Some(a) if a.pane_id.is_some() => {
-                    matches!(self.attempt_live(a), LiveCheck::Dead)
-                }
-                Some(a) => match a.pid {
-                    None => true,
-                    Some(pid) => {
-                        let hint = ProcessHint {
-                            pid,
-                            image_name: a.image_name.clone(),
-                        };
-                        // Ambiguous is an image mismatch, not a confirmed death. Leave
-                        // the attempt Running so a later exit stays replayable (#62).
-                        matches!(self.processes.is_live(&hint), LiveCheck::Dead)
-                    }
-                },
+                Some(row) => self.attempt_driver_dead(row),
                 None => true,
             };
             if dead {
@@ -1981,6 +1988,150 @@ impl<'a> RunLoop<'a> {
             }
         }
         Ok(())
+    }
+
+    /// `HarnessExited` already committed and the driving process died inside checks.
+    /// Re-run those checks in the existing worktree. This is not `restart`.
+    fn recover_verifying(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        let mut chosen = None;
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::Verifying) {
+                continue;
+            }
+            let attempt = self.store.latest_attempt_for_task(graph_id, node.id)?;
+            let gone = match &attempt {
+                // The harness exit is already logged; a reused PID must not block checks.
+                Some(row) => row.ended_at.is_some() || self.attempt_driver_dead(row),
+                None => true,
+            };
+            if gone {
+                chosen = Some((node.clone(), attempt));
+                break;
+            }
+        }
+        let Some((node, attempt)) = chosen else {
+            return Ok(None);
+        };
+        self.finish_orphaned_verification(graph_id, &node, attempt)
+            .map(Some)
+    }
+
+    fn finish_orphaned_verification(
+        &mut self,
+        graph_id: &str,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt: Option<AttemptRow>,
+    ) -> Result<Tick, OrchestratorError> {
+        let Some(attempt) = attempt else {
+            return self.fail_orphaned_verification(graph_id, node.id, None);
+        };
+        let Some(worktree) = attempt
+            .worktree_path
+            .clone()
+            .filter(|path| self.workspace.worktree_exists(path))
+        else {
+            return self.fail_orphaned_verification(graph_id, node.id, Some(attempt.attempt_id));
+        };
+        let base = attempt
+            .outcome
+            .as_deref()
+            .and_then(|outcome| outcome.strip_prefix("base:"))
+            .unwrap_or("")
+            .to_string();
+        let _ = self.workspace.commit_all(
+            &worktree,
+            &format!(
+                "meshloop: resume verification {} for task {}",
+                attempt.attempt_id.0, node.id.0
+            ),
+        );
+        let revision = match self.workspace.head(&worktree) {
+            Ok(revision) => revision,
+            Err(_) => {
+                return self.fail_orphaned_verification(
+                    graph_id,
+                    node.id,
+                    Some(attempt.attempt_id),
+                );
+            }
+        };
+        let rows = match self.run_deterministic_checks(
+            node,
+            attempt.attempt_id,
+            &worktree,
+            &base,
+            &revision,
+        ) {
+            Ok((rows, _, _)) => rows,
+            Err(_) => {
+                return self.fail_orphaned_verification(
+                    graph_id,
+                    node.id,
+                    Some(attempt.attempt_id),
+                );
+            }
+        };
+        let passed = verification_passed(&rows);
+        for row in rows {
+            self.store.record(row)?;
+        }
+        let tier = node.tier.unwrap_or(Tier::Tier2);
+        let _ = self.store.record_outcome(
+            &FeedbackKey {
+                harness: attempt.harness.clone().unwrap_or_default(),
+                model_ref: attempt.model_ref.clone().unwrap_or_default(),
+                tier: crate::ports::TierKey::from(tier),
+            },
+            passed,
+        );
+        let event = if passed {
+            Event::DeterministicChecksPassed
+        } else {
+            Event::DeterministicChecksFailed
+        };
+        let rec = self.append(
+            graph_id,
+            node.id,
+            Some(attempt.attempt_id),
+            TaskState::Verifying,
+            event,
+            None,
+        )?;
+        Ok(Tick::Transition {
+            task: node.id,
+            attempt: rec.attempt_id,
+            from: rec.from,
+            to: rec.to,
+            event: rec.event,
+        })
+    }
+
+    fn fail_orphaned_verification(
+        &mut self,
+        graph_id: &str,
+        task: TaskId,
+        attempt: Option<AttemptId>,
+    ) -> Result<Tick, OrchestratorError> {
+        let rec = self.append(
+            graph_id,
+            task,
+            attempt,
+            TaskState::Verifying,
+            Event::DeterministicChecksFailed,
+            Some("driver died during verification".into()),
+        )?;
+        Ok(Tick::Transition {
+            task,
+            attempt: rec.attempt_id,
+            from: rec.from,
+            to: rec.to,
+            event: rec.event,
+        })
     }
 
     fn retry_failed(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {

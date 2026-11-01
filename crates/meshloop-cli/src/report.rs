@@ -37,7 +37,7 @@ pub fn format_plan(graph: &TaskGraph) -> String {
     out
 }
 
-pub fn format_idle(reason: IdleReason) -> String {
+pub fn format_idle(reason: IdleReason, status: Option<&RunStatus>) -> String {
     match reason {
         IdleReason::GraphComplete => "Graph complete: every node is Integrated.\n".into(),
         IdleReason::AwaitingHumanAcceptance => {
@@ -50,16 +50,53 @@ pub fn format_idle(reason: IdleReason) -> String {
              Use `meshloop cancel --task <id>` to unblock dependents.\n"
                 .into()
         }
-        IdleReason::FailedTerminal => {
-            "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. \
-             `resume --retry` if attempts remain; `resume --restart` re-runs this accepted plan without replanning.\n"
-                .into()
-        }
+        IdleReason::FailedTerminal => format_failed_terminal(status),
         IdleReason::WaitingOnLiveWorker => {
             "A direct-CLI worker is still live. Meshloop is waiting on that worker, not the 5s stall gate.\n\
              `meshloop status` shows pane_id/live. Do not retry while it is working.\n"
                 .into()
         }
+    }
+}
+
+const FAILED_TERMINAL_GUIDANCE: &str = "`resume --retry` if attempts remain; `resume --restart` re-runs this accepted plan without replanning.";
+
+/// Failed/Blocked/Cancelled/Integrated match the engine idle scan. Anything else still
+/// needs a driver or an operator; do not call that "nothing runnable".
+fn is_terminal_task(state: TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Integrated | TaskState::Failed | TaskState::Cancelled | TaskState::Blocked
+    )
+}
+
+fn undriven_task_ids(status: &RunStatus) -> Vec<u32> {
+    let mut ids: Vec<u32> = status
+        .nodes
+        .iter()
+        .filter(|node| !is_terminal_task(node.state) && node.live.as_deref() != Some("Live"))
+        .map(|node| node.task_id.0)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn format_failed_terminal(status: Option<&RunStatus>) -> String {
+    let undriven = status.map(undriven_task_ids).unwrap_or_default();
+    if undriven.is_empty() {
+        format!(
+            "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. {FAILED_TERMINAL_GUIDANCE}\n"
+        )
+    } else {
+        let ids = undriven
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Graph stopped: non-terminal task(s) {ids} have no live driver. {FAILED_TERMINAL_GUIDANCE}\n"
+        )
     }
 }
 
@@ -195,7 +232,33 @@ pub fn banner() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meshloop_domain::state::PlanState;
     use meshloop_domain::task_graph::{TaskId, TaskNode, Tier};
+    use meshloop_engine::run_loop::NodeStatus;
+
+    fn node(id: u32, state: TaskState, live: Option<&str>) -> NodeStatus {
+        NodeStatus {
+            task_id: TaskId(id),
+            waiting_for: None,
+            blocked_by: vec![],
+            description: "task".into(),
+            state,
+            note: None,
+            worktree: None,
+            revision: None,
+            pane_id: None,
+            live: live.map(str::to_string),
+            deliverable: None,
+        }
+    }
+
+    fn status(nodes: Vec<NodeStatus>) -> RunStatus {
+        RunStatus {
+            graph_id: "g".into(),
+            plan_state: PlanState::PlanAccepted,
+            nodes,
+        }
+    }
 
     #[test]
     fn format_plan_lists_every_node_and_flags_review_requirement() {
@@ -215,5 +278,37 @@ mod tests {
         assert!(rendered.contains("awaiting-plan-review"));
         assert!(rendered.contains("do the thing"));
         assert!(rendered.contains("--accept-plan"));
+    }
+
+    #[test]
+    fn failed_terminal_keeps_retry_and_restart_guidance() {
+        let expected = "Graph stopped: Failed/Blocked/Cancelled with nothing runnable. \
+             `resume --retry` if attempts remain; `resume --restart` re-runs this accepted plan without replanning.\n";
+        assert_eq!(format_idle(IdleReason::FailedTerminal, None), expected);
+        let failed = status(vec![node(1, TaskState::Failed, Some("Dead"))]);
+        assert_eq!(
+            format_idle(IdleReason::FailedTerminal, Some(&failed)),
+            expected
+        );
+        assert!(expected.contains("`resume --retry` if attempts remain"));
+        assert!(
+            expected.contains("`resume --restart` re-runs this accepted plan without replanning")
+        );
+    }
+
+    #[test]
+    fn failed_terminal_names_undriven_nonterminal_tasks() {
+        let stuck = status(vec![
+            node(2, TaskState::Ready, None),
+            node(1, TaskState::Failed, Some("Dead")),
+            node(3, TaskState::Verifying, Some("Live")),
+        ]);
+        let text = format_idle(IdleReason::FailedTerminal, Some(&stuck));
+        assert!(text.contains("non-terminal task(s) 2"));
+        assert!(!text.contains("nothing runnable"));
+        assert!(text.contains("`resume --retry` if attempts remain"));
+        assert!(text.contains("`resume --restart` re-runs this accepted plan without replanning"));
+        assert!(!text.contains("task(s) 1"));
+        assert!(!text.contains("task(s) 3"));
     }
 }
