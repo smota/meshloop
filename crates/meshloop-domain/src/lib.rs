@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod capability;
+pub mod cleanup;
 pub mod diagnostic;
 pub mod digest;
 pub mod evidence;

@@ -2,6 +2,7 @@
 use crate::ports::StoreError;
 use meshloop_domain::workspace::*;
 use std::path::Path;
+pub mod cleanup;
 pub mod delivery;
 pub mod inventory;
 pub mod read;
