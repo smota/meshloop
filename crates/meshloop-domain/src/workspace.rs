@@ -263,6 +263,91 @@ text_type!(GraphId, crate::task_graph::graph_id_is_legal);
 text_type!(ObjectId, |s: &str| (s.len() == 40 || s.len() == 64)
     && s.bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+fn git_ref_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && !value.contains("..")
+        && !value.contains("@{")
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.starts_with('-')
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        })
+}
+text_type!(GitRef, git_ref_name);
+/// How a receipt claims accepted content reached the destination ref.
+/// Independent of task status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LandingStrategy {
+    FastForward,
+    Merge,
+    Rewrite,
+}
+impl LandingStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FastForward => "fast-forward",
+            Self::Merge => "merge",
+            Self::Rewrite => "rewrite",
+        }
+    }
+}
+/// Stable reasons a delivery receipt failed closed. An empty list is a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeliveryReason {
+    AcceptedNotLanded,
+    MissingRecoveryObject,
+    PlannerDirty,
+    RewrittenDestination,
+    StaleDestination,
+    UnreadableRef,
+}
+impl DeliveryReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AcceptedNotLanded => "accepted-not-landed",
+            Self::MissingRecoveryObject => "missing-recovery-object",
+            Self::PlannerDirty => "planner-dirty",
+            Self::RewrittenDestination => "rewritten-destination",
+            Self::StaleDestination => "stale-destination",
+            Self::UnreadableRef => "unreadable-ref",
+        }
+    }
+}
+/// Local claim that accepted content landed. Holding one is not proof.
+/// A pass does not close tasks, publish, or authorize deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryReceipt {
+    pub strategy: LandingStrategy,
+    pub accepted_commit: ObjectId,
+    pub destination_ref: GitRef,
+    /// Commit the destination ref was expected to name. A different live
+    /// commit is stale. Rewrite proofs require this value.
+    pub recorded_destination: Option<ObjectId>,
+    /// Root tree of the accepted commit, for a rewrite whose commit id changed.
+    pub accepted_tree: Option<ObjectId>,
+    /// Object ids that must still be present. The check never deletes them.
+    pub recovery_objects: Vec<ObjectId>,
+}
+/// Read-only delivery verdict. `apply` is always false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryReceiptReport {
+    pub passed: bool,
+    pub apply: bool,
+    pub reasons: Vec<DeliveryReason>,
+    pub observed_destination: Option<ObjectId>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableLocation {
     pub root_alias: RootAlias,
@@ -738,5 +823,50 @@ mod inventory_reason_codes {
         assert_eq!(json["mode"], "inventory");
         assert!(!json.to_string().contains("C:"));
         assert!(!json.to_string().contains("\":\"/"));
+    }
+}
+
+#[cfg(test)]
+mod delivery_receipt_codes {
+    use super::*;
+
+    #[test]
+    fn delivery_reason_codes_serialize_as_stable_kebab_case() {
+        for (value, code) in [
+            (DeliveryReason::AcceptedNotLanded, "accepted-not-landed"),
+            (
+                DeliveryReason::MissingRecoveryObject,
+                "missing-recovery-object",
+            ),
+            (DeliveryReason::PlannerDirty, "planner-dirty"),
+            (
+                DeliveryReason::RewrittenDestination,
+                "rewritten-destination",
+            ),
+            (DeliveryReason::StaleDestination, "stale-destination"),
+            (DeliveryReason::UnreadableRef, "unreadable-ref"),
+        ] {
+            assert_eq!(value.as_str(), code);
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::json!(code)
+            );
+        }
+        for (value, code) in [
+            (LandingStrategy::FastForward, "fast-forward"),
+            (LandingStrategy::Merge, "merge"),
+            (LandingStrategy::Rewrite, "rewrite"),
+        ] {
+            assert_eq!(value.as_str(), code);
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::json!(code)
+            );
+        }
+        assert!(GitRef::new("refs/heads/main").is_ok());
+        assert!(GitRef::new("HEAD").is_ok());
+        for refused in ["", "-rf", "refs/../main", "refs/heads/main.lock", "a b"] {
+            assert!(GitRef::new(refused).is_err(), "{refused}");
+        }
     }
 }
