@@ -39,7 +39,7 @@ impl GitWorktreeAdapter {
         Self { repo_root }
     }
 
-    fn run_in(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    fn output_in(&self, cwd: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
         let mut cmd = Command::new("git");
         cmd.current_dir(cwd).args(args);
         cmd.env("GIT_AUTHOR_NAME", "meshloop");
@@ -50,23 +50,31 @@ impl GitWorktreeAdapter {
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::process::spawn_command(&mut cmd)
+        crate::process::spawn_command(&mut cmd)
             .and_then(|child| child.wait_with_output())
-            .map_err(|e| GitError::Io(e.to_string()))?;
+            .map_err(|e| GitError::Io(e.to_string()))
+    }
+
+    fn failed(args: &[&str], output: &std::process::Output) -> GitError {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = if stderr.trim().is_empty() {
+            format!(
+                "git {:?} failed (exit code {:?})",
+                args,
+                output.status.code()
+            )
+        } else {
+            stderr
+        };
+        GitError::CommandFailed { stderr }
+    }
+
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+        let output = self.output_in(cwd, args)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let stderr = if stderr.trim().is_empty() {
-                format!(
-                    "git {:?} failed (exit code {:?})",
-                    args,
-                    output.status.code()
-                )
-            } else {
-                stderr
-            };
-            Err(GitError::CommandFailed { stderr })
+            Err(Self::failed(args, &output))
         }
     }
 
@@ -107,6 +115,101 @@ impl GitWorktreeAdapter {
         self.run_admin_with_retry(&["worktree", "remove", "--force", &path.to_string_lossy()])
             .map(|_| ())
     }
+
+    /// Read-only commit resolution. Does not create, move, or delete refs.
+    pub(crate) fn resolve_commit(&self, git_ref: &str) -> Result<String, GitError> {
+        if meshloop_domain::workspace::GitRef::new(git_ref).is_err() {
+            return Err(GitError::CommandFailed {
+                stderr: "unreadable ref".into(),
+            });
+        }
+        let spec = format!("{git_ref}^{{commit}}");
+        self.run(&["rev-parse", "--verify", "--end-of-options", &spec])
+    }
+
+    /// `merge-base --is-ancestor`. Exit 1 is not-ancestor; other failures stay errors.
+    pub(crate) fn commit_is_ancestor(
+        &self,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, GitError> {
+        if !oid_ok(ancestor) || !oid_ok(descendant) {
+            return Err(GitError::CommandFailed {
+                stderr: "unreadable ref".into(),
+            });
+        }
+        let args = ["merge-base", "--is-ancestor", ancestor, descendant];
+        let output = self.output_in(&self.repo_root, &args)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Self::failed(&args, &output)),
+        }
+    }
+
+    pub(crate) fn commit_parents(&self, commit: &str) -> Result<Vec<String>, GitError> {
+        if !oid_ok(commit) {
+            return Err(GitError::CommandFailed {
+                stderr: "unreadable ref".into(),
+            });
+        }
+        let args = ["--no-pager", "log", "-1", "--format=%P", commit];
+        let output = self.output_in(&self.repo_root, &args)?;
+        if !output.status.success() {
+            return Err(Self::failed(&args, &output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut parents = Vec::new();
+        for parent in text.split_whitespace() {
+            if !oid_ok(parent) {
+                return Err(GitError::CommandFailed {
+                    stderr: "unreadable ref".into(),
+                });
+            }
+            parents.push(parent.to_string());
+        }
+        Ok(parents)
+    }
+
+    /// Non-pruning object walk. True when `tree` is reachable from `from`.
+    pub(crate) fn tree_reachable_from(&self, tree: &str, from: &str) -> Result<bool, GitError> {
+        if !oid_ok(tree) || !oid_ok(from) {
+            return Err(GitError::CommandFailed {
+                stderr: "unreadable ref".into(),
+            });
+        }
+        let args = ["rev-list", "--objects", from];
+        let output = self.output_in(&self.repo_root, &args)?;
+        if !output.status.success() {
+            return Err(Self::failed(&args, &output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some(tree)))
+    }
+
+    pub(crate) fn object_exists(&self, object: &str) -> Result<bool, GitError> {
+        if !oid_ok(object) {
+            return Ok(false);
+        }
+        let args = ["cat-file", "-e", object];
+        let output = self.output_in(&self.repo_root, &args)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Self::failed(&args, &output)),
+        }
+    }
+
+    pub(crate) fn planner_is_dirty(&self, worktree: &Path) -> Result<bool, GitError> {
+        self.run_in(worktree, &["status", "--porcelain"])
+            .map(|porcelain| !porcelain.is_empty())
+    }
+}
+
+fn oid_ok(value: &str) -> bool {
+    meshloop_domain::workspace::ObjectId::new(value).is_ok()
 }
 
 impl WorkspacePort for GitWorktreeAdapter {

@@ -2,6 +2,7 @@
 //! decisions — see docs/architecture/boundaries.md.
 
 pub mod check;
+pub mod delivery;
 pub mod git;
 pub mod harness;
 pub mod process;
