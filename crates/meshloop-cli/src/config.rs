@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use meshloop_adapters::harness::PromptVia;
 use meshloop_domain::task_graph::Tier;
 use meshloop_engine::run_loop::PlannerSelection;
 use serde::Deserialize;
@@ -110,6 +111,9 @@ pub struct HarnessConfig {
     pub version_args: Vec<String>,
     #[serde(default)]
     pub invoke_args_template: Vec<String>,
+    /// `file` (default), `arg`, or `stdin`. `load` rejects any other value and names the harness.
+    #[serde(default = "default_prompt_via")]
+    pub prompt_via: String,
     pub model_ref: String,
     #[serde(default = "default_model_tier")]
     pub model_tier: String,
@@ -121,6 +125,10 @@ fn default_model_tier() -> String {
 
 fn default_version_args() -> Vec<String> {
     vec!["--version".into()]
+}
+
+fn default_prompt_via() -> String {
+    "file".into()
 }
 
 #[derive(Debug)]
@@ -157,6 +165,12 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         if hc.version_args.is_empty() {
             return Err(ConfigError::Parse(format!(
                 "harness '{name}': version_args must not be empty (omit it to use [\"--version\"])"
+            )));
+        }
+        if PromptVia::parse(&hc.prompt_via).is_none() {
+            return Err(ConfigError::Parse(format!(
+                "harness '{name}': prompt_via '{}' must be one of file, arg, stdin",
+                hc.prompt_via
             )));
         }
     }
@@ -255,6 +269,28 @@ mod tests {
             assert!(hc.kind.as_deref() == Some(name.as_str()) || hc.kind.is_some());
             assert!(!hc.version_args.is_empty(), "{name}: version_args");
         }
+        assert_eq!(config.harnesses["grok"].prompt_via, "file");
+        assert_eq!(
+            config.harnesses["grok"].invoke_args_template,
+            vec!["--prompt-file", "{prompt_file}"]
+        );
+        assert_eq!(config.harnesses["claude"].prompt_via, "arg");
+        assert_eq!(
+            config.harnesses["claude"].invoke_args_template,
+            vec!["--print", "{prompt}"]
+        );
+        assert_eq!(config.harnesses["codex"].prompt_via, "stdin");
+        assert_eq!(
+            config.harnesses["codex"].invoke_args_template,
+            vec!["exec", "-"]
+        );
+        assert_eq!(config.harnesses["pi"].prompt_via, "arg");
+        assert_eq!(
+            config.harnesses["pi"].invoke_args_template,
+            vec!["-p", "{prompt}"]
+        );
+        assert_eq!(config.harnesses["agy"].prompt_via, "file");
+        assert!(config.harnesses["agy"].invoke_args_template.is_empty());
     }
 
     #[test]
@@ -374,10 +410,36 @@ model = \"x\"",
         let config = load(&path).expect("minimal config loads");
         assert_eq!(config.harnesses["grok"].version_args, vec!["--version"]);
         assert_eq!(config.limits.probe_timeout_seconds, 15);
+        assert_eq!(config.harnesses["grok"].prompt_via, "file");
         let warnings = dispatch_warnings(&config);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].0, "grok");
         assert!(warnings[0].1.contains("invoke_args_template"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn prompt_via_accepts_only_file_arg_or_stdin_and_names_the_harness() {
+        for value in ["file", "arg", "stdin"] {
+            let toml = MINIMAL.replace(
+                "model_tier = \"top\"",
+                &format!("model_tier = \"top\"\nprompt_via = \"{value}\""),
+            );
+            let path = write_temp(&format!("prompt-via-{value}"), &toml);
+            let config = load(&path).expect(value);
+            assert_eq!(config.harnesses["grok"].prompt_via, value);
+            std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        }
+        let toml = MINIMAL.replace(
+            "model_tier = \"top\"",
+            "model_tier = \"top\"\nprompt_via = \"pipe\"",
+        );
+        let path = write_temp("prompt-via-bad", &toml);
+        let result = load(&path);
+        assert!(
+            matches!(&result, Err(ConfigError::Parse(m)) if m.contains("grok") && m.contains("prompt_via") && m.contains("pipe")),
+            "{result:?}"
+        );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

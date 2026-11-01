@@ -27,6 +27,13 @@ fn main() {
                 .expect("fixture stdin");
             std::io::stdout().write_all(&bytes).expect("fixture stdout");
         }
+        Some("--echo-args") => {
+            let argc = args.len();
+            println!("FIXTURE_ARGC:{argc}");
+            for arg in &args {
+                println!("FIXTURE_ARG:{arg}");
+            }
+        }
         Some("--large-output") => {
             use std::io::Write;
             let n: usize = args
@@ -127,14 +134,14 @@ fn main() {
         }
         Some("--prompt-file") => {
             let path = args.get(1).expect("fixture requires a prompt file path");
-            let prompt = fs::read_to_string(path).unwrap_or_default();
-            let _ = fs::write("fixture-touched.txt", "fixture wrote this file\n");
-            let stem = Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "task".to_string());
-            let _ = fs::write(format!("fixture-{stem}.txt"), "fixture wrote this file\n");
-            println!("FIXTURE_HANDLED:{prompt}");
+            deliver_prompt_file(path);
+        }
+        Some(arg) if arg.starts_with("--prompt-file=") => {
+            let path = arg.strip_prefix("--prompt-file=").expect("prefix matched");
+            let argc = args.len();
+            println!("FIXTURE_ARGC:{argc}");
+            println!("FIXTURE_ARG:{arg}");
+            deliver_prompt_file(path);
         }
         Some("--sleep-ms") => {
             let ms: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
@@ -198,10 +205,28 @@ fn main() {
 }
 
 fn prompt_from_args(args: &[String]) -> String {
-    args.windows(2)
+    if let Some(path) = args
+        .windows(2)
         .find(|w| w[0] == "--prompt-file")
-        .and_then(|w| fs::read_to_string(&w[1]).ok())
+        .map(|w| w[1].as_str())
+    {
+        return fs::read_to_string(path).unwrap_or_default();
+    }
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("--prompt-file="))
+        .and_then(|path| fs::read_to_string(path).ok())
         .unwrap_or_default()
+}
+
+fn deliver_prompt_file(path: &str) {
+    let prompt = fs::read_to_string(path).unwrap_or_default();
+    let _ = fs::write("fixture-touched.txt", "fixture wrote this file\n");
+    let stem = Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "task".to_string());
+    let _ = fs::write(format!("fixture-{stem}.txt"), "fixture wrote this file\n");
+    println!("FIXTURE_HANDLED:{prompt}");
 }
 
 const SRC_TWO_ERRORS: &str = "pub fn f() {\n    let x: &str = 1;\n    let _ = (x, y);\n}\n";
