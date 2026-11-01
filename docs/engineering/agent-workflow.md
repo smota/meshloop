@@ -89,9 +89,14 @@ When an issue splits into independent nodes, the developer role drives Meshloop:
    `meshloop review-plan --plan <path> --accept|--decline|--adjust`.
 2. `meshloop run --plan <path> --json`. Add `--detach` for long runs, then use
    `meshloop inspect --session-id <id> --json` and `meshloop cancel --session-id <id>`.
-3. `meshloop status --json` reports nodes awaiting technical acceptance. Accept them with
-   `meshloop accept --task <id> --as <identity>`, naming whoever actually accepted. Tier 3
-   nodes always need human acceptance.
+3. `meshloop status --json` reports nodes awaiting technical acceptance. Every node
+   stops at `AwaitingReview` after deterministic checks pass. Accept them with
+   `meshloop accept --task <id> --as <identity>`, naming whoever actually accepted.
+   The tier selects the harness and model; it does not select which nodes wait for
+   `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not
+   enforced. Dependent nodes do not start until the predecessor is accepted and
+   `meshloop resume` merges it. `meshloop integrate` lands that result on the
+   target branch and is a separate step.
 4. Integrate explicitly with `meshloop integrate --graph <id> --into work/<slug>`, then
    rerun the workspace check on the combined candidate. When one graph delivers several
    issues, tag each node with `"deliverable": "issue-<n>"` in the plan and land each issue on
