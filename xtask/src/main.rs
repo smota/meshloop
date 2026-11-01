@@ -2660,7 +2660,7 @@ fn bench(root: &Path) -> ExitCode {
     // 8. Secret Redaction Scrubber Benchmark (iso.redact.pass_rate_pct)
     let test_secrets = [
         "Authorization: Bearer my-secret-token",
-        "OpenAI key: sk-abcdef1234567890",
+        "OpenAI key: sk-abcdef1234567890abcdefghijklmnopqrstuvwx",
         "GitHub token: ghp_1234567890abcdef",
         "Config api_key=secretvalue",
         "Certificate: -----BEGIN RSA PRIVATE KEY-----",
