@@ -85,7 +85,7 @@ Constraints:
 ## Amendment 2026-11-01: detached stdout and stderr are a log file
 
 - Status: Accepted
-- Approval evidence: GitHub issue #61. The accepted #5 inherit-clear stays in place.
+- Approval evidence: the 2026-11-01 completion order to ship the open backlog, including issue #61. The accepted #5 inherit-clear stays in place.
 - Executor: Grok
 
 **Context.** `spawn_detached` set stdin, stdout, and stderr to null. A `run --detach` driver that panicked or exited left no log, and `status` still reported the graph as running.
