@@ -3060,7 +3060,9 @@ fn doctor_warnings(tag: &str, verify_command: &str) -> Vec<String> {
 fn doctor_warns_when_verify_command_is_empty() {
     let warnings = doctor_warnings("doctor-verify-empty", "verify_command = []");
     assert!(
-        warnings.iter().any(|w| w.contains("verify_command")),
+        warnings
+            .iter()
+            .any(|w| w.contains("verify_command") && w.contains("empty")),
         "{warnings:?}"
     );
 }
@@ -4261,6 +4263,128 @@ fn harness_output_is_saved_for_an_awaiting_review_node() {
         .find(|e| e["tool"] == "git-diff")
         .expect("git-diff");
     assert_eq!(git_diff["exit_code"], 0, "{inspected}");
+}
+
+fn evidence_rows(inspected: &serde_json::Value) -> &[serde_json::Value] {
+    inspected["data"]["attempts"][0]["evidence"]
+        .as_array()
+        .unwrap_or_else(|| panic!("attempts missing: {inspected}"))
+}
+
+/// One node whose harness writes a file, so git-diff can pass on its own.
+fn run_verified_node(
+    tag: &str,
+    graph_id: &str,
+    verify_toml: &str,
+) -> (std::process::Output, serde_json::Value) {
+    let dir = disposable_repo(tag);
+    let config_path = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let text = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("verify_command = []", verify_toml);
+    fs::write(&config_path, text).unwrap();
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"{graph_id}","nodes":[{{"id":1,"description":"verify","depends_on":[],"tier":null}}]}}"#
+        ),
+    )
+    .unwrap();
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run");
+    let inspected = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--graph", graph_id, "--task", "1"],
+    );
+    fs::remove_dir_all(&dir).ok();
+    (run, inspected)
+}
+
+#[test]
+fn empty_verify_command_stores_skipped_row_and_still_awaits_review() {
+    let (run, inspected) = run_verified_node("verify-skipped", "g-skip", "verify_command = []");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "empty verify_command must not refuse the run\nstdout: {}\nstderr: {stderr}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        stderr.contains("verify_command") && stderr.contains("empty"),
+        "run must warn that verify_command is empty: {stderr}"
+    );
+    assert_eq!(inspected["data"]["state"], "AwaitingReview", "{inspected}");
+    let evidence = evidence_rows(&inspected);
+    let skipped = evidence
+        .iter()
+        .find(|row| row["tool"] == "verify")
+        .unwrap_or_else(|| panic!("no verify row: {inspected}"));
+    assert_eq!(skipped["exit_code"], 0, "{skipped}");
+    assert_eq!(
+        skipped["summary_redacted"], "skipped: empty verify_command",
+        "{skipped}"
+    );
+    let git_diff = evidence
+        .iter()
+        .find(|row| row["tool"] == "git-diff")
+        .expect("git-diff");
+    assert_eq!(git_diff["exit_code"], 0, "{inspected}");
+}
+
+#[test]
+fn failing_verify_command_still_fails_the_node() {
+    let fixture = fixture_path().replace('\\', "\\\\");
+    let verify = format!(r#"verify_command = ["{fixture}", "--fail"]"#);
+    let (run, inspected) = run_verified_node("verify-fail", "g-vfail", &verify);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !run.status.success(),
+        "a failing verify_command must fail the node\nstdout: {}\nstderr: {stderr}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        !stderr.contains("verify_command is empty"),
+        "a configured command must not warn as empty: {stderr}"
+    );
+    assert_eq!(inspected["data"]["state"], "Failed", "{inspected}");
+    let evidence = evidence_rows(&inspected);
+    assert!(
+        evidence
+            .iter()
+            .all(|row| row["summary_redacted"] != "skipped: empty verify_command"),
+        "{inspected}"
+    );
+    let git_diff = evidence
+        .iter()
+        .find(|row| row["tool"] == "git-diff")
+        .expect("git-diff");
+    assert_eq!(
+        git_diff["exit_code"], 0,
+        "diff passed; verify must be the failure: {inspected}"
+    );
+    let verify_row = evidence
+        .iter()
+        .find(|row| {
+            row["tool"] != "git-diff" && row["tool"] != "harness-output" && row["exit_code"] != 0
+        })
+        .unwrap_or_else(|| panic!("no failing verify row: {inspected}"));
+    assert_ne!(verify_row["tool"], "verify", "{verify_row}");
 }
 
 #[test]

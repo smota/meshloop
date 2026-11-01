@@ -2851,12 +2851,15 @@ fn harness_output_evidence(candidate: CandidateRef, outcome: &HarnessOutcome) ->
 }
 
 /// Evidence recorded when no `verify_command` is configured, so the skipped check is visible.
+/// Exit code stays 0: an empty command must not fail `all_deterministic_passed`.
+const SKIPPED_VERIFY_SUMMARY: &str = "skipped: empty verify_command";
+
 fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
     Evidence::Deterministic(DeterministicEvidence {
         tool: "verify".into(),
         tool_version: "n/a".into(),
         exit_code: 0,
-        output_redacted: "skipped: verify_command is empty".into(),
+        output_redacted: SKIPPED_VERIFY_SUMMARY.into(),
         candidate: candidate.clone(),
     })
 }
@@ -3212,15 +3215,53 @@ mod tests {
             attempt_id: AttemptId(2),
             revision: "abc123".into(),
         };
-        match skipped_verify_evidence(&candidate) {
+        let skipped = skipped_verify_evidence(&candidate);
+        match &skipped {
             Evidence::Deterministic(ev) => {
                 assert_eq!(ev.tool, "verify");
                 assert_eq!(ev.exit_code, 0);
-                assert!(ev.output_redacted.starts_with("skipped:"));
+                assert_eq!(ev.output_redacted, SKIPPED_VERIFY_SUMMARY);
                 assert_eq!(ev.candidate, candidate);
             }
             other => panic!("expected deterministic evidence, got {other:?}"),
         }
+        let passing = vec![
+            Evidence::Deterministic(DeterministicEvidence {
+                candidate: candidate.clone(),
+                tool: "git-diff".into(),
+                tool_version: "n/a".into(),
+                exit_code: 0,
+                output_redacted: "1 file".into(),
+            }),
+            skipped,
+        ];
+        assert!(crate::verify::verification_passed(&passing));
+    }
+
+    #[test]
+    fn failing_verify_row_still_fails_the_gate() {
+        let candidate = CandidateRef {
+            task_id: TaskId(7),
+            attempt_id: AttemptId(2),
+            revision: "abc123".into(),
+        };
+        let rows = vec![
+            Evidence::Deterministic(DeterministicEvidence {
+                candidate: candidate.clone(),
+                tool: "git-diff".into(),
+                tool_version: "n/a".into(),
+                exit_code: 0,
+                output_redacted: "1 file".into(),
+            }),
+            Evidence::Deterministic(DeterministicEvidence {
+                candidate,
+                tool: "cargo".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: "failed".into(),
+            }),
+        ];
+        assert!(!crate::verify::verification_passed(&rows));
     }
 
     #[test]
