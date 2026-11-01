@@ -473,6 +473,172 @@ pub struct ArtifactBinding {
     pub logical_tag: Option<GraphId>,
 }
 
+/// Read-only inventory and adoption-preview report. `apply` is always false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryReport {
+    pub mode: ReportMode,
+    pub apply: bool,
+    pub blockers: Vec<BlockerCode>,
+    pub entries: Vec<InventoryEntry>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReportMode {
+    Inventory,
+    Preview,
+}
+impl ReportMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inventory => "inventory",
+            Self::Preview => "preview",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InventoryClass {
+    Active,
+    Inaccessible,
+    Legacy,
+    Missing,
+    Unknown,
+}
+impl InventoryClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inaccessible => "inaccessible",
+            Self::Legacy => "legacy",
+            Self::Missing => "missing",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnershipCode {
+    ConfiguredRoot,
+    GitRegistered,
+    LedgerOwned,
+    LegacyUnbound,
+    Unresolved,
+}
+impl OwnershipCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfiguredRoot => "configured-root",
+            Self::GitRegistered => "git-registered",
+            Self::LedgerOwned => "ledger-owned",
+            Self::LegacyUnbound => "legacy-unbound",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockerCode {
+    AdoptionPreviewOnly,
+    DriverActive,
+    ExternalPathWithheld,
+    FenceInaccessible,
+    FenceMissing,
+    GitUnavailable,
+    IdentityConflict,
+    InventoryTruncated,
+    LedgerInaccessible,
+    LedgerMissing,
+    LegacyOwnershipUnresolved,
+    PathInaccessible,
+    PathMissing,
+    ReparseBlocked,
+    RepositoryUnbound,
+    SchemaUpgradeRequired,
+    UnknownOwnership,
+}
+impl BlockerCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdoptionPreviewOnly => "adoption-preview-only",
+            Self::DriverActive => "driver-active",
+            Self::ExternalPathWithheld => "external-path-withheld",
+            Self::FenceInaccessible => "fence-inaccessible",
+            Self::FenceMissing => "fence-missing",
+            Self::GitUnavailable => "git-unavailable",
+            Self::IdentityConflict => "identity-conflict",
+            Self::InventoryTruncated => "inventory-truncated",
+            Self::LedgerInaccessible => "ledger-inaccessible",
+            Self::LedgerMissing => "ledger-missing",
+            Self::LegacyOwnershipUnresolved => "legacy-ownership-unresolved",
+            Self::PathInaccessible => "path-inaccessible",
+            Self::PathMissing => "path-missing",
+            Self::ReparseBlocked => "reparse-blocked",
+            Self::RepositoryUnbound => "repository-unbound",
+            Self::SchemaUpgradeRequired => "schema-upgrade-required",
+            Self::UnknownOwnership => "unknown-ownership",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntrySource {
+    Artifact,
+    ConfiguredEntry,
+    Driver,
+    Generation,
+    GitWorktree,
+    LegacyAttempt,
+    LegacyRun,
+    Provisional,
+}
+impl EntrySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Artifact => "artifact",
+            Self::ConfiguredEntry => "configured-entry",
+            Self::Driver => "driver",
+            Self::Generation => "generation",
+            Self::GitWorktree => "git-worktree",
+            Self::LegacyAttempt => "legacy-attempt",
+            Self::LegacyRun => "legacy-run",
+            Self::Provisional => "provisional",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocationScope {
+    ConfiguredRoot,
+    LedgerRoot,
+    Repository,
+}
+impl LocationScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfiguredRoot => "configured-root",
+            Self::LedgerRoot => "ledger-root",
+            Self::Repository => "repository",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryLocation {
+    pub scope: LocationScope,
+    pub root_alias: Option<RootAlias>,
+    pub relative_path: RelativePath,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryEntry {
+    pub class: InventoryClass,
+    pub ownership: OwnershipCode,
+    pub blockers: Vec<BlockerCode>,
+    pub source: EntrySource,
+    pub graph_id: Option<GraphId>,
+    pub lifecycle_id: Option<LifecycleId>,
+    pub location: Option<InventoryLocation>,
+    pub withheld: bool,
+}
+
 #[cfg(test)]
 mod graph_identity_tests {
     use super::*;
@@ -497,5 +663,80 @@ mod graph_identity_tests {
             assert!(RelativePath::new(path).is_err());
         }
         assert!(RelativePath::new("run/opaque-generation/artifact").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod inventory_reason_codes {
+    use super::*;
+
+    fn assert_code<T: serde::Serialize>(value: T, code: &str) {
+        assert_eq!(
+            serde_json::to_value(value).unwrap(),
+            serde_json::json!(code)
+        );
+    }
+
+    #[test]
+    fn inventory_reason_codes_serialize_as_stable_kebab_case() {
+        for (value, code) in [
+            (InventoryClass::Active, "active"),
+            (InventoryClass::Inaccessible, "inaccessible"),
+            (InventoryClass::Legacy, "legacy"),
+            (InventoryClass::Missing, "missing"),
+            (InventoryClass::Unknown, "unknown"),
+        ] {
+            assert_eq!(value.as_str(), code);
+            assert_code(value, code);
+        }
+        for (value, code) in [
+            (OwnershipCode::ConfiguredRoot, "configured-root"),
+            (OwnershipCode::GitRegistered, "git-registered"),
+            (OwnershipCode::LedgerOwned, "ledger-owned"),
+            (OwnershipCode::LegacyUnbound, "legacy-unbound"),
+            (OwnershipCode::Unresolved, "unresolved"),
+        ] {
+            assert_eq!(value.as_str(), code);
+            assert_code(value, code);
+        }
+        for (value, code) in [
+            (BlockerCode::AdoptionPreviewOnly, "adoption-preview-only"),
+            (BlockerCode::DriverActive, "driver-active"),
+            (BlockerCode::ExternalPathWithheld, "external-path-withheld"),
+            (BlockerCode::FenceInaccessible, "fence-inaccessible"),
+            (BlockerCode::FenceMissing, "fence-missing"),
+            (BlockerCode::GitUnavailable, "git-unavailable"),
+            (BlockerCode::IdentityConflict, "identity-conflict"),
+            (BlockerCode::InventoryTruncated, "inventory-truncated"),
+            (BlockerCode::LedgerInaccessible, "ledger-inaccessible"),
+            (BlockerCode::LedgerMissing, "ledger-missing"),
+            (
+                BlockerCode::LegacyOwnershipUnresolved,
+                "legacy-ownership-unresolved",
+            ),
+            (BlockerCode::PathInaccessible, "path-inaccessible"),
+            (BlockerCode::PathMissing, "path-missing"),
+            (BlockerCode::ReparseBlocked, "reparse-blocked"),
+            (BlockerCode::RepositoryUnbound, "repository-unbound"),
+            (
+                BlockerCode::SchemaUpgradeRequired,
+                "schema-upgrade-required",
+            ),
+            (BlockerCode::UnknownOwnership, "unknown-ownership"),
+        ] {
+            assert_eq!(value.as_str(), code);
+            assert_code(value, code);
+        }
+        let report = InventoryReport {
+            mode: ReportMode::Inventory,
+            apply: false,
+            blockers: vec![BlockerCode::LedgerMissing, BlockerCode::FenceMissing],
+            entries: Vec::new(),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["apply"], false);
+        assert_eq!(json["mode"], "inventory");
+        assert!(!json.to_string().contains("C:"));
+        assert!(!json.to_string().contains("\":\"/"));
     }
 }
