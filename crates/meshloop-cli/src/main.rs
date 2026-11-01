@@ -1796,6 +1796,13 @@ fn cmd_inspect(
     })
 }
 
+fn watch_status_code(reason: &str) -> u8 {
+    match reason {
+        "failed" | "cancelled" | "blocked" => 1,
+        _ => 0,
+    }
+}
+
 /// Why a `watch` stopped, and the nodes responsible. Returns `None` while the run is still moving.
 fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str, Vec<u32>)> {
     let ids = |state: TaskState| -> Vec<u32> {
@@ -1826,6 +1833,15 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
     }
     if compute_overall_status(s) == "completed" {
         return Some(("completed", Vec::new()));
+    }
+    // FailedTerminal with no Failed/Cancelled node: every remaining node is Blocked.
+    let blocked = ids(TaskState::Blocked);
+    if !blocked.is_empty()
+        && s.nodes
+            .iter()
+            .all(|n| matches!(n.state, TaskState::Integrated | TaskState::Blocked))
+    {
+        return Some(("blocked", blocked));
     }
     None
 }
@@ -1881,6 +1897,7 @@ fn cmd_watch(
         let timeout = std::time::Duration::from_secs(timeout_secs);
         let interval = std::time::Duration::from_secs(interval_secs);
         let mut seen: HashMap<u32, TaskState> = HashMap::new();
+        let mut seen_plan: Option<PlanState> = None;
         loop {
             let frame = match saga.read_frame(&selection) {
                 Ok(frame) => frame,
@@ -1936,14 +1953,29 @@ fn cmd_watch(
                     );
                 }
             }
-            let (reason, nodes, code) = match watch_exit(s) {
-                Some((reason, nodes)) => {
-                    let code = match reason {
-                        "failed" | "cancelled" => 1,
-                        _ => 0,
-                    };
-                    (reason, nodes, code)
+            if seen_plan != Some(s.plan_state) {
+                let prev_plan = seen_plan;
+                seen_plan = Some(s.plan_state);
+                if json {
+                    let mut event = serde_json::json!({
+                        "ts": ts,
+                        "graph_id": s.graph_id,
+                        "change": "plan",
+                        "from": prev_plan.map(|p| format!("{p:?}")),
+                        "to": format!("{:?}", s.plan_state),
+                    });
+                    if frame.generation_id.is_some() {
+                        event["generation_id"] = serde_json::json!(frame.generation_id);
+                        event["revision_id"] = serde_json::json!(frame.revision_id);
+                    }
+                    println!("{event}");
+                } else {
+                    let from = prev_plan.map_or("-".to_string(), |p| format!("{p:?}"));
+                    println!("[{ts}] {} plan: {from} -> {:?}", s.graph_id, s.plan_state);
                 }
+            }
+            let (reason, nodes, code) = match watch_exit(s) {
+                Some((reason, nodes)) => (reason, nodes, watch_status_code(reason)),
                 None if timeout_secs > 0 && started.elapsed() >= timeout => {
                     ("timeout", Vec::new(), 3)
                 }
@@ -2941,5 +2973,33 @@ mod watch_exit_tests {
             ],
         };
         assert_eq!(watch_exit(&s), Some(("failed", vec![2])));
+    }
+
+    #[test]
+    fn a_blocked_settled_graph_exits_nonzero() {
+        let s = RunStatus {
+            graph_id: "g".into(),
+            plan_state: PlanState::PlanAccepted,
+            nodes: vec![
+                node(1, TaskState::Integrated),
+                node(4, TaskState::Blocked),
+                node(9, TaskState::Blocked),
+            ],
+        };
+        assert_eq!(watch_exit(&s), Some(("blocked", vec![4, 9])));
+        assert_eq!(watch_status_code("blocked"), 1);
+        assert_eq!(watch_status_code("failed"), 1);
+        assert_eq!(watch_status_code("awaiting_review"), 0);
+        assert_eq!(watch_status_code("completed"), 0);
+    }
+
+    #[test]
+    fn a_running_node_keeps_watch_open_beside_a_blocked_one() {
+        let s = RunStatus {
+            graph_id: "g".into(),
+            plan_state: PlanState::PlanAccepted,
+            nodes: vec![node(1, TaskState::Running), node(2, TaskState::Blocked)],
+        };
+        assert_eq!(watch_exit(&s), None);
     }
 }
