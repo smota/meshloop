@@ -110,7 +110,14 @@ fn main() {
             let marker = "MESHLOOP_HARNESS_MARKER_0123456789AB";
             let secret = format!("sk-{}", "a".repeat(40));
             let mut out = std::io::stdout();
-            write!(out, "{marker}\n{secret}\n{}", "x".repeat(4096)).expect("stdout");
+            // Repeat the marker and key at both ends so either cap (head or tail)
+            // still leaves them in the stored evidence.
+            write!(
+                out,
+                "{marker}\n{secret}\n{}{marker}\n{secret}\n",
+                "x".repeat(4096)
+            )
+            .expect("stdout");
             out.flush().expect("flush stdout");
             let mut err = std::io::stderr();
             write!(err, "STDERR_BODY_MARKER").expect("stderr");
