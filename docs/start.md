@@ -95,7 +95,7 @@ meshloop accept --task 1 --as your-name
 meshloop resume
 ```
 
-**R1 acceptance rule:** every node stops at `AwaitingReview` after deterministic checks pass and waits for `meshloop accept`; the tier selects the harness and model only. It does not select which nodes wait for `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not enforced. Dependent nodes do not start until the predecessor is accepted and integrated through `meshloop accept` and `meshloop integrate`. `meshloop status` / `inspect` show why each node is blocked in `waiting_for` (`acceptance`, `dependency`, `plan_acceptance`, `retry_budget_exhausted`) and `blocked_by`.
+**R1 acceptance rule:** every node stops at `AwaitingReview` after deterministic checks pass and waits for `meshloop accept`; the tier selects the harness and model only. It does not select which nodes wait for `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not enforced. Dependent nodes do not start until the predecessor is accepted and `meshloop resume` merges it. `meshloop integrate` lands that result on the target branch and is a separate step. `meshloop status` / `inspect` show why each node is blocked in `waiting_for` (`acceptance`, `dependency`, `plan_acceptance`, `retry_budget_exhausted`) and `blocked_by`.
 
 ### 5. Integrate — Land Changes on Target Branch
 Only explicit integration merges verified commits into your active branch:

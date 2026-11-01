@@ -95,7 +95,8 @@ When an issue splits into independent nodes, the developer role drives Meshloop:
    The tier selects the harness and model; it does not select which nodes wait for
    `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not
    enforced. Dependent nodes do not start until the predecessor is accepted and
-   integrated through `meshloop accept` and `meshloop integrate`.
+   `meshloop resume` merges it. `meshloop integrate` lands that result on the
+   target branch and is a separate step.
 4. Integrate explicitly with `meshloop integrate --graph <id> --into work/<slug>`, then
    rerun the workspace check on the combined candidate. When one graph delivers several
    issues, tag each node with `"deliverable": "issue-<n>"` in the plan and land each issue on
