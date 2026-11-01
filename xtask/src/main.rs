@@ -2083,6 +2083,28 @@ fn wal_commit_diagnostics(
     })
 }
 
+fn world_d_exit(invariants_pass: bool) -> ExitCode {
+    if invariants_pass {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn gate_status(
+    invariants_pass: bool,
+    thresholds_pass: bool,
+) -> (&'static str, &'static str, &'static str) {
+    let overall = if invariants_pass && thresholds_pass {
+        "pass"
+    } else {
+        "fail"
+    };
+    let invariants = if invariants_pass { "pass" } else { "fail" };
+    let thresholds = if thresholds_pass { "pass" } else { "fail" };
+    (overall, invariants, thresholds)
+}
+
 fn bench(root: &Path) -> ExitCode {
     use meshloop_adapters::git::GitWorktreeAdapter;
     use meshloop_adapters::redact::redact;
@@ -3033,6 +3055,7 @@ fn bench(root: &Path) -> ExitCode {
 {scorecard_rows}| `conv.lattice.reduction_rate` | > 0 | {lattice_reduction_rate:.1} Delta Phi/round | **{lattice_row_status}** |
 
 **Overall Gate Status:** {} ({}/{} metrics within canonical thresholds)
+Process exit follows invariants. A performance miss is recorded and does not by itself fail the process.
 "#,
         if all_pass { "PASS" } else { "FAIL" },
         evaluated_list.iter().filter(|m| m.status == "pass").count(),
@@ -3110,6 +3133,9 @@ fn bench(root: &Path) -> ExitCode {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "2026-09-15T12:00:00Z".to_string());
 
+    let (status_overall, status_invariants, status_thresholds) =
+        gate_status(invariants_pass, thresholds_pass);
+
     let run_record = serde_json::json!({
         "$schema": "schemas/run-record.v1.json",
         "schema_version": "1.0.0",
@@ -3161,9 +3187,9 @@ fn bench(root: &Path) -> ExitCode {
             )
         },
         "status": {
-            "overall": if all_pass { "pass" } else { "fail" },
-            "invariants": if invariants_pass { "pass" } else { "fail" },
-            "thresholds": if thresholds_pass { "pass" } else { "fail" }
+            "overall": status_overall,
+            "invariants": status_invariants,
+            "thresholds": status_thresholds
         }
     });
 
@@ -3172,11 +3198,7 @@ fn bench(root: &Path) -> ExitCode {
         println!("Benchmark artifact saved to: {}", run_json_path.display());
     }
 
-    if all_pass {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    world_d_exit(invariants_pass)
 }
 
 #[cfg(test)]
@@ -3213,6 +3235,30 @@ mod tests {
                 .expect("timing boundary")
                 .contains("record_transition_and_attempt(record, None)")
         );
+    }
+
+    #[test]
+    fn performance_only_miss_exits_success_and_records_threshold_fail() {
+        assert_eq!(world_d_exit(true), ExitCode::SUCCESS);
+        assert_eq!(gate_status(true, false), ("fail", "pass", "fail"));
+    }
+
+    #[test]
+    fn invariant_miss_exits_failure_when_thresholds_pass() {
+        assert_eq!(world_d_exit(false), ExitCode::FAILURE);
+        assert_eq!(gate_status(false, true), ("fail", "fail", "pass"));
+    }
+
+    #[test]
+    fn invariant_and_threshold_miss_exits_failure() {
+        assert_eq!(world_d_exit(false), ExitCode::FAILURE);
+        assert_eq!(gate_status(false, false), ("fail", "fail", "fail"));
+    }
+
+    #[test]
+    fn invariants_and_thresholds_pass_exits_success() {
+        assert_eq!(world_d_exit(true), ExitCode::SUCCESS);
+        assert_eq!(gate_status(true, true), ("pass", "pass", "pass"));
     }
 
     #[test]

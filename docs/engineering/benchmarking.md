@@ -12,7 +12,7 @@ The framework operates across three distinct evaluation tiers defined in [`SPEC-
 ```mermaid
 flowchart LR
     subgraph TierD ["Tier D: Deterministic Regression Gate"]
-        D1["Continuous CI Gate\n28 Active Metrics\nFail-Closed Invariants\nZero Network / Zero LLM"]
+        D1["Continuous CI Gate\n10 Blocking Invariants\nPerformance Targets Recorded\nZero Network / Zero LLM"]
     end
 
     subgraph TierB ["Tier B: Parametric DAG Manifests"]
@@ -30,7 +30,7 @@ flowchart LR
 
 ## 2. Canonical Scorecard Metrics (28 Active Metrics)
 
-Metrics are categorized into **Fail-Closed Invariants** (which immediately block CI if violated) and **Performance Targets** (enforced by `benches/thresholds.toml`):
+Metrics are categorized into **Fail-Closed Invariants** (which block CI if violated) and **Performance Targets** (still evaluated from `benches/thresholds.toml` and uploaded; they do not by themselves fail the process):
 
 ### 2.1 Fail-Closed Architectural Invariants (Blocking Gates)
 
@@ -120,7 +120,7 @@ in the scorecard above are historical examples, not fresh measurements.
 ## 4. Benchmark Commands Reference
 
 ```bash
-# Evaluate the full 28-metric SPEC-ML-BENCH-001 regression gate
+# Evaluate the 10 blocking invariants and record the performance targets
 cargo run --release -p xtask -- bench
 
 # Benchmark petgraph topological scheduling across 7 canonical manifests

@@ -4,7 +4,18 @@ This log is the authoritative, empirical, and transparent record of Meshloop's p
 
 ---
 
-## Current Milestone: Release Candidate 0.1.0 (Hardened Regression Gate — World D)
+## Current Milestone: 0.3.0 operator surface
+
+- **Date:** 2026-11-01
+- **Commit Base:** `c49c5eb`
+- **Workspace version:** 0.3.0 (`Cargo.toml`)
+- **Issue:** [#91](https://github.com/smota/meshloop/issues/91)
+
+Live workers are direct CLI subprocesses in Git worktrees. `--fixture-only` is the CI subprocess double. The blocking CI result is check, smoke, and the 10 invariants. Performance misses stay on the scorecard ([ADR 0036](../architecture/adr/0036-world-d-ci-exit.md)). This entry does not claim a fresh 28/28 benchmark pass. The Release Candidate 0.1.0 section below, including its scorecard, is unchanged history.
+
+---
+
+## Release Candidate 0.1.0 (Hardened Regression Gate — World D)
 
 - **Date:** 2026-09-15
 - **Commit Base:** `7f1d858`

@@ -11,15 +11,19 @@ Once installed, Meshloop operations can be triggered via terminal slash commands
 | Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
 | :--- | :--- | :--- | :--- | :--- |
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
-| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
-| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
+| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan --objective "<text>"` | **Planning:** Decomposes an objective into a validated DAG (`meshloop-plan.json`). |
+| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan --plan <path> (exactly one of --accept, --decline, --adjust)` | **Human Gate:** Requires exactly one of `--accept`, `--decline`, or `--adjust`. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
+| `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
+| `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |
+| `meshloop:watch` | — | — | `meshloop watch --graph <id>` | **Watch:** Polls a graph until it settles. Interval defaults to 5s; `--timeout 0` waits without a limit. |
 | `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
 | `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Merges verified worktree changes into the target branch. |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agents. |
 | `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
+| `meshloop:mutate-plan` | — | `meshloop_mutate_plan` | `meshloop mutate-plan (--mutation <json> or --mutation-file <path>)` | **Replan:** Applies one upstream graph mutation. `--require-review` returns the plan to review. |
 | `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
 | `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
 | `meshloop:ast-skeleton` | — | `meshloop_ast_skeleton` | `meshloop ast-skeleton --path <file>` | **Context:** Returns one file's AST skeleton (bodies elided) with approximate token counts. Read-only; confined to the working directory. |

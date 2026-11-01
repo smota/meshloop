@@ -669,7 +669,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop bundle [--dest <dir>] [--gitignore]\n\
      Origin (supervisor-only): --origin-harness <name> --origin-session <id>\n\
      \x20 or MESHLOOP_ORIGIN_HARNESS / MESHLOOP_ORIGIN_SESSION.\n\
-     Live workers are the default (Herdr). --fixture-only forces the CI subprocess double."
+     Live workers are direct CLI subprocesses in Git worktrees. --fixture-only forces the CI subprocess double."
 }
 
 #[cfg(test)]

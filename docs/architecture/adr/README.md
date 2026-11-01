@@ -44,13 +44,14 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0025 | Host process-tree ownership via Windows Job Objects | Accepted |
 | 0026 | Attempt-scoped inner-loop self-repair with session resumption | Proposed |
 | 0027 | Modular MCP server and client integration | Proposed |
-| 0028 | Upstream graph mutation and dynamic replanning | Proposed |
+| 0028 | Upstream graph mutation and dynamic replanning | Accepted |
 | 0029 | Deterministic loop algorithms and quantized signature retrieval | Proposed |
 | 0030 | Internalized petgraph DAG engine, parametric manifests, and scheduling latency gates | Accepted |
 | 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
 | 0033 | Workspace lifecycle and durable history | Accepted |
 | 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Accepted |
 | 0035 | [Atomic Windows process assignment to owned jobs](0035-atomic-process-job-assignment.md) | Accepted |
+| 0036 | [World D CI exit](0036-world-d-ci-exit.md) | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 

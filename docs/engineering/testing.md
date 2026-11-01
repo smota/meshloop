@@ -55,7 +55,7 @@ Evaluates all 28 metrics against [`benches/thresholds.toml`](../../benches/thres
 ```bash
 cargo run --release -p xtask -- bench
 ```
-*Fail-closed rule:* If any of the 10 architectural invariants fail, or if any performance metric misses its target, the command exits with code 1.
+*Fail-closed rule:* An invariant miss exits 1. A missing smoke artifact exits 1. A performance-only miss exits 0 while `status.thresholds` is `fail` and the scorecard records the miss. `xtask check` and `xtask smoke` still fail their own commands.
 
 ### 2.3 DAG Manifest Latency Benchmarks (`xtask bench-dag`)
 Tests scheduler and topological sorting overhead using `hdrhistogram` across 7 canonical manifests in `benches/manifests/`:

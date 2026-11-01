@@ -13,7 +13,7 @@
 [![crates.io](https://img.shields.io/crates/v/meshloop-cli.svg?style=flat-square)](https://crates.io/crates/meshloop-cli)
 [![Version](https://img.shields.io/badge/version-0.3.0-informational?style=flat-square)](Cargo.toml)
 [![Rust: 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
-[![Regression Gate: 28/28 PASS](https://img.shields.io/badge/regression--gate-28%2F28%20PASS-brightgreen?style=flat-square)](benches/thresholds.toml)
+[![Blocking Gate: Invariants](https://img.shields.io/badge/blocking--gate-invariants-brightgreen?style=flat-square)](benches/thresholds.toml)
 [![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D6?style=flat-square&logo=windows&logoColor=white)](#quickstart-up-and-running-in-2-minutes)
 [![Architecture: Zero Daemons](https://img.shields.io/badge/runtime-daemonless--direct-1A6B66?style=flat-square)](#3-architecture-what-we-reused-vs-what-we-built-from-scratch)
 [![Code Safety: Unsafe Forbidden](https://img.shields.io/badge/unsafe--code-forbid-success?style=flat-square)](Cargo.toml)
@@ -107,9 +107,9 @@ Meshloop rejects vanity claims. Every capability, lock resolution mechanism, and
 
 *Full empirical progression and test narratives: **[Product & Engineering Log](docs/product/product-log.md)** and **[Architectural Rounds & Peer Sparring History](docs/engineering/architectural-rounds-and-decisions.md)**.*
 
-### Benchmark Scorecard: 28/28 Active Metrics Passing
+### Historical Benchmark Scorecard (Blocking Gate: Invariants)
 
-The regression gate is enforced by `cargo run --release -p xtask -- bench` against [`benches/thresholds.toml`](benches/thresholds.toml):
+The numeric scorecard below is a historical example. The blocking gate is the invariants. `cargo run --release -p xtask -- bench` still evaluates [`benches/thresholds.toml`](benches/thresholds.toml):
 
 | Category | Invariant / Target Metric | Target Threshold | Observed Value | Gate Status | Verification Methodology |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -189,10 +189,10 @@ Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
 meshloop doctor
 
 # 2. Decompose a high-level objective into an iterative DAG
-meshloop plan "Implement strict email format validation"
+meshloop plan --objective "Implement strict email format validation"
 
-# 3. Interactively review the plan: Accept, Decline, or Adjust
-meshloop review-plan
+# 3. Review the plan with exactly one of --accept, --decline, or --adjust
+meshloop review-plan --plan meshloop-plan.json --accept
 
 # 4. Execute workers in isolated worktrees with compiler-driven self-repair
 meshloop run
@@ -207,14 +207,19 @@ Every capability is universally accessible across terminal CLI verbs, in-agent s
 | Canonical ID | Slash Command | MCP Tool | CLI Equivalent | Stage & Function |
 | :--- | :--- | :--- | :--- | :--- |
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
-| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated task DAG (`meshloop-plan.json`). |
-| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
+| `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan --objective "<text>"` | **Planning:** Decomposes an objective into a validated task DAG (`meshloop-plan.json`). |
+| `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan --plan <path> (exactly one of --accept, --decline, --adjust)` | **Human Gate:** Requires exactly one of `--accept`, `--decline`, or `--adjust`. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Spawns workers in ephemeral Git worktrees with Job Object ownership. |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
+| `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
+| `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |
+| `meshloop:watch` | — | — | `meshloop watch --graph <id>` | **Watch:** Polls a graph until it settles. Interval defaults to 5s; `--timeout 0` waits without a limit. |
 | `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic compiler evidence and diff for a completed task. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
 | `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Safely merges verified worktree changes into the target branch. |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agent harnesses. |
+| `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
+| `meshloop:mutate-plan` | — | `meshloop_mutate_plan` | `meshloop mutate-plan (--mutation <json> or --mutation-file <path>)` | **Replan:** Applies one upstream graph mutation. `--require-review` returns the plan to review. |
 | `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
 | `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
 | `meshloop:ast-skeleton` | — | `meshloop_ast_skeleton` | `meshloop ast-skeleton --path <file>` | **Context:** Returns one file's AST skeleton (bodies elided) with approximate token counts. Read-only; confined to the working directory. |
