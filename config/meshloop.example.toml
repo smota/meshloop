@@ -3,10 +3,17 @@
 #
 # `kind` is the harness identifier. Isolation is git worktrees.
 #
-# NOT RUNNABLE AS-IS: live dispatch needs an `invoke_args_template` per harness, the argv
-# that runs one prompt non-interactively (`{prompt_file}` = prompt file path, `{model_ref}`).
-# Meshloop ships no per-harness CLI flags (ADR 0003); take them from each CLI's docs.
-# Without one, a harness is probed but never dispatched. Check with:
+# Live dispatch is not claimed here. Templates below are copied from each CLI's own
+# help at the version in that harness's comment. Meshloop ships no per-harness CLI
+# flags (ADR 0003).
+#
+# Placeholders are replaced inside an argument, not only as a whole argument:
+# `{prompt_file}` is the prompt file path, `{model_ref}` is the model, and `{prompt}`
+# is the prompt text. `{prompt}` expands for `prompt_via = "arg"`, and for `stdin`
+# only when the template contains it. Unknown `{...}` tokens stay literal.
+# `prompt_via` is `file` (default), `arg`, or `stdin`. Any other value is a config
+# error that names the harness. Stdin is null unless `prompt_via` is `stdin`.
+# An empty `invoke_args_template` is probed but never dispatched. Check with:
 #   meshloop doctor --config meshloop.toml
 selected_harnesses = ["grok", "claude", "codex"]
 
@@ -34,30 +41,49 @@ kind = "grok"
 executable = "grok"
 # Read-only probe; must exit without interaction. Defaults to ["--version"].
 version_args = ["--version"]
-# invoke_args_template = [...]  # required for live dispatch; see header
+# grok 1.0.70 (f50904eaee6c) [stable]. `grok --help` shows `--prompt-file <PATH>`
+# ("Single-turn prompt from a file"). `prompt_via` stays the default `file`.
+# Live dispatch was not run.
+invoke_args_template = ["--prompt-file", "{prompt_file}"]
 model_ref = "grok"
 model_tier = "top"
 
 [harnesses.claude]
 kind = "claude"
 executable = "claude"
+# 2.1.316 (Claude Code). `claude --help` shows `-p, --print` ("Print response and
+# exit") and argument `prompt` ("Your prompt"). Live dispatch was not run.
+prompt_via = "arg"
+invoke_args_template = ["--print", "{prompt}"]
 model_ref = "claude"
 model_tier = "top"
 
 [harnesses.codex]
 kind = "codex"
 executable = "codex"
+# codex-cli 0.165.0. `codex --help` lists `exec` ("Run Codex non-interactively").
+# `codex exec --help` shows `[PROMPT]` and that `-` reads instructions from stdin.
+# Live dispatch was not run.
+prompt_via = "stdin"
+invoke_args_template = ["exec", "-"]
 model_ref = "codex"
 model_tier = "top"
 
 [harnesses.pi]
 kind = "pi"
 executable = "pi"
+# 1.4.0. `pi --help` shows `--print, -p` ("Non-interactive mode: process prompt
+# and exit") and the example `pi -p "..."`. Live dispatch was not run.
+prompt_via = "arg"
+invoke_args_template = ["-p", "{prompt}"]
 model_ref = "pi"
 model_tier = "mid"
 
 [harnesses.agy]
 kind = "agy"
 executable = "agy"
+# 1.4.12. `agy --help` (usage on stderr) shows `--print` / `-p` ("Run a single
+# prompt non-interactively") but not where the prompt text is passed. Not verified.
+# Live dispatch was not run.
 model_ref = "agy"
 model_tier = "mid"

@@ -2,14 +2,14 @@
 //! configured executable's own version flag — real signal, never an assumed version string.
 //! The probe is bounded by `probe_timeout` and runs in an owned process tree (ADR 0025), so
 //! a harness whose version call opens an interactive UI is rejected instead of hanging.
-//! `invoke`'s argument shape is entirely config-supplied (`invoke_args_template`); Meshloop
-//! ships no hardcoded per-harness CLI flag, per ADR 0003.
+//! `invoke`'s argument shape is entirely config-supplied (`invoke_args_template`,
+//! `prompt_via`); Meshloop ships no hardcoded per-harness CLI flag, per ADR 0003.
 
-use crate::process::{OwnedSpawnSpec, OwnedStdio};
+use crate::process::{OwnedChild, OwnedSpawnSpec, OwnedStdio};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,6 +18,30 @@ use meshloop_domain::capability::{Compatibility, HarnessError, HarnessProfile};
 use meshloop_engine::agent::AgentSpec;
 use meshloop_engine::ports::{HarnessCapabilities, HarnessHandle, HarnessOutcome, LiveCheck};
 
+/// How the rendered prompt is delivered. The argv shape stays in config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptVia {
+    /// Prompt text is only in the prompt file. Stdin is null. `{prompt}` stays literal.
+    #[default]
+    File,
+    /// Also replace `{prompt}` with the prompt text. Stdin stays null.
+    Arg,
+    /// Write the prompt to the child stdin. `{prompt}` is replaced only if the template has it.
+    Stdin,
+}
+
+impl PromptVia {
+    /// `file`, `arg`, or `stdin`. Any other string is rejected by config load.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "file" => Some(Self::File),
+            "arg" => Some(Self::Arg),
+            "stdin" => Some(Self::Stdin),
+            _ => None,
+        }
+    }
+}
+
 pub struct CliHarnessConfig {
     pub name: String,
     pub executable: PathBuf,
@@ -25,10 +49,95 @@ pub struct CliHarnessConfig {
     /// Deadline for the version call; on expiry the process tree is killed and the harness
     /// is reported `Unsupported` with a timeout reason.
     pub probe_timeout: Duration,
-    /// Argument template for a dispatch; `{prompt_file}` is substituted with the path to a
-    /// temp file holding the rendered prompt. Supplied by the user's configuration, never
-    /// hardcoded per harness in this project.
+    /// Argument template for a dispatch. `{prompt_file}` and `{model_ref}` are replaced
+    /// inside each argument. `{prompt}` is replaced for [`PromptVia::Arg`], and for
+    /// [`PromptVia::Stdin`] when the template contains it. Unknown `{...}` tokens stay
+    /// literal. Supplied by configuration, never hardcoded per harness.
     pub invoke_args_template: Vec<String>,
+    pub prompt_via: PromptVia,
+}
+
+/// Joined executable plus argv, with one space before each argument.
+const MAX_ARG_INVOCATION_BYTES: usize = 30_000;
+const ARG_TOO_LONG: &str = "the prompt is too long for an argument";
+
+fn render_invoke_args(
+    template: &[String],
+    via: PromptVia,
+    prompt_file: &Path,
+    model_ref: &str,
+    prompt: &str,
+) -> Vec<String> {
+    let prompt_path = prompt_file.to_string_lossy();
+    // File mode must not copy the prompt text into argv. Arg always expands
+    // `{prompt}`. Stdin expands it only when the template already contains it.
+    let prompt_text = match via {
+        PromptVia::File => None,
+        PromptVia::Arg | PromptVia::Stdin => Some(prompt),
+    };
+    template
+        .iter()
+        .map(|arg| substitute_arg(arg, &prompt_path, model_ref, prompt_text))
+        .collect()
+}
+
+/// Replaces known placeholders inside one argument. The replacement is not scanned again.
+fn substitute_arg(
+    template: &str,
+    prompt_file: &str,
+    model_ref: &str,
+    prompt: Option<&str>,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        if let Some(end) = after.find('}') {
+            let token = &after[..=end];
+            let replacement = match token {
+                "{prompt_file}" => Some(prompt_file),
+                "{model_ref}" => Some(model_ref),
+                "{prompt}" => prompt,
+                _ => None,
+            };
+            match replacement {
+                Some(value) => out.push_str(value),
+                None => out.push_str(token),
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push_str(after);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn joined_invocation_len(executable: &Path, args: &[String]) -> usize {
+    let mut len = executable.to_string_lossy().len();
+    for arg in args {
+        len = len.saturating_add(1 + arg.len());
+    }
+    len
+}
+
+fn write_prompt_stdin(child: &mut OwnedChild, prompt: &[u8]) -> Result<(), HarnessError> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| HarnessError::ProcessFault {
+            detail: "harness stdin was not piped".into(),
+        })?;
+    stdin
+        .write_all(prompt)
+        .map_err(|e| HarnessError::ProcessFault {
+            detail: e.to_string(),
+        })?;
+    // Dropping the writer closes the pipe so the child observes EOF.
+    drop(stdin);
+    Ok(())
 }
 
 const CAPTURE_SLOTS: usize = 16;
@@ -361,6 +470,23 @@ impl HarnessCapabilities for CliHarness {
         if self.config.invoke_args_template.is_empty() {
             return Err(HarnessError::Unsupported);
         }
+        let prompt_file = spec
+            .worktree_path
+            .join(format!(".meshloop-prompt-{}", spec.attempt_id.0));
+        let args = render_invoke_args(
+            &self.config.invoke_args_template,
+            self.config.prompt_via,
+            &prompt_file,
+            &spec.model_ref,
+            &spec.prompt,
+        );
+        if self.config.prompt_via == PromptVia::Arg
+            && joined_invocation_len(&self.config.executable, &args) > MAX_ARG_INVOCATION_BYTES
+        {
+            return Err(HarnessError::ProcessFault {
+                detail: ARG_TOO_LONG.into(),
+            });
+        }
         let permit = CapturePermit::reserve()?;
         {
             let mut registry = self.running.lock().map_err(|_| capture_fault())?;
@@ -375,32 +501,18 @@ impl HarnessCapabilities for CliHarness {
             }
         }
         let launch = (|| {
-            let prompt_file = spec
-                .worktree_path
-                .join(format!(".meshloop-prompt-{}", spec.attempt_id.0));
             fs::write(&prompt_file, &spec.prompt).map_err(|e| HarnessError::ProcessFault {
                 detail: e.to_string(),
             })?;
 
-            let args: Vec<String> = self
-                .config
-                .invoke_args_template
-                .iter()
-                .map(|a| {
-                    if a == "{prompt_file}" {
-                        prompt_file.to_string_lossy().to_string()
-                    } else if a == "{model_ref}" {
-                        spec.model_ref.clone()
-                    } else {
-                        a.clone()
-                    }
-                })
-                .collect();
-
             let mut cmd = OwnedSpawnSpec::new(&self.config.executable);
             cmd.args(&args)
                 .current_dir(&spec.worktree_path)
-                .stdin(OwnedStdio::Null)
+                .stdin(if self.config.prompt_via == PromptVia::Stdin {
+                    OwnedStdio::Piped
+                } else {
+                    OwnedStdio::Null
+                })
                 .stdout(OwnedStdio::Piped)
                 .stderr(OwnedStdio::Piped);
             let mut child =
@@ -408,6 +520,12 @@ impl HarnessCapabilities for CliHarness {
                     detail: e.to_string(),
                 })?;
             let capture = Capture::start(&mut child, permit.clone())?;
+            if self.config.prompt_via == PromptVia::Stdin
+                && let Err(error) = write_prompt_stdin(&mut child, spec.prompt.as_bytes())
+            {
+                child.kill_tree();
+                return Err(error);
+            }
 
             Ok(Running {
                 cancellation_attempted: false,
@@ -612,6 +730,7 @@ mod capture_tests {
             version_args: vec![],
             probe_timeout: Duration::from_secs(1),
             invoke_args_template: vec!["--noop".into()],
+            prompt_via: PromptVia::File,
         });
         let permit = CapturePermit::reserve().unwrap();
         let failed = Arc::new(AtomicUsize::new(0));
@@ -742,6 +861,7 @@ mod capture_tests {
                 version_args: vec![],
                 probe_timeout: Duration::from_secs(1),
                 invoke_args_template: vec![],
+                prompt_via: PromptVia::File,
             }));
         }
         assert!(CapturePermit::reserve().is_err());
@@ -754,6 +874,7 @@ mod capture_tests {
             version_args: vec![],
             probe_timeout: Duration::from_secs(1),
             invoke_args_template: vec!["--noop".into()],
+            prompt_via: PromptVia::File,
         });
         let spec = AgentSpec {
             task_id: meshloop_domain::task_graph::TaskId(1),

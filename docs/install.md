@@ -102,6 +102,8 @@ executable = "codex"
 version_args = ["--version"]
 # Required for live dispatch: argv that runs one prompt non-interactively.
 # `{prompt_file}` becomes the path of a file holding the prompt; `{model_ref}` the model.
+# `{prompt}` is the prompt text when `prompt_via` is `arg` (and, for `stdin`, only if
+# the template contains `{prompt}`). `prompt_via` is `file` (default), `arg`, or `stdin`.
 # Meshloop ships no per-harness flags (ADR 0003); take these from your CLI's docs.
 invoke_args_template = []
 model_ref = "codex"
@@ -112,6 +114,15 @@ A harness with an empty `invoke_args_template` is probed but never dispatched, s
 sample is **not runnable as-is**. Every probe is bounded by `[limits] probe_timeout_seconds`
 (default 15); a version call that opens an interactive UI is reported as a probe timeout.
 Run `meshloop doctor --config meshloop.toml` to see each harness's readiness.
+
+Verified templates live in [`config/meshloop.example.toml`](../config/meshloop.example.toml).
+They were copied from each CLI's own help and are not a claim that live dispatch works:
+
+- grok `grok 1.0.70 (f50904eaee6c) [stable]`, `grok --help` shows `--prompt-file <PATH>`: `["--prompt-file", "{prompt_file}"]` with default `prompt_via = "file"`.
+- claude `2.1.316 (Claude Code)`, `claude --help` shows `--print` and argument `prompt`: `prompt_via = "arg"`, `["--print", "{prompt}"]`.
+- codex `codex-cli 0.165.0`. `codex --help` lists `exec`. `codex exec --help` shows that `-` reads stdin: `prompt_via = "stdin"`, `["exec", "-"]`.
+- pi `1.4.0`, `pi --help` shows `-p` / `--print` and example `pi -p "..."`: `prompt_via = "arg"`, `["-p", "{prompt}"]`.
+- agy `1.4.12`, `agy --help` shows `--print` but not where the prompt text goes. Not verified; no template.
 
 - **Planner harness:** `plan` routes the planner as a Tier3 task, so by default only a
   harness with `model_tier = "top"` can plan. To plan with a cheaper model, name it, or

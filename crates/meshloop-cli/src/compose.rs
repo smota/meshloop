@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use meshloop_adapters::check::CommandCheckRunner;
 use meshloop_adapters::git::GitWorktreeAdapter;
-use meshloop_adapters::harness::{CliHarness, CliHarnessConfig};
+use meshloop_adapters::harness::{CliHarness, CliHarnessConfig, PromptVia};
 use meshloop_adapters::process::HostProcessView;
 use meshloop_adapters::store::SqliteStore;
 use meshloop_domain::capability::{HarnessError, HarnessProfile};
@@ -132,6 +132,7 @@ pub fn cli_harness(name: &str, hc: &HarnessConfig, limits: &Limits) -> CliHarnes
         version_args: hc.version_args.clone(),
         probe_timeout: Duration::from_secs(limits.probe_timeout_seconds),
         invoke_args_template: hc.invoke_args_template.clone(),
+        prompt_via: PromptVia::parse(&hc.prompt_via).unwrap_or(PromptVia::File),
     })
 }
 
@@ -355,6 +356,7 @@ mod collection_delegation_tests {
             version_args: vec!["--version".into()],
             probe_timeout: Duration::from_secs(5),
             invoke_args_template,
+            prompt_via: PromptVia::File,
         }));
         let spec = AgentSpec {
             task_id: meshloop_domain::task_graph::TaskId(1),

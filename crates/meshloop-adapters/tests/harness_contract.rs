@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use meshloop_adapters::harness::{CliHarness, CliHarnessConfig};
+use meshloop_adapters::harness::{CliHarness, CliHarnessConfig, PromptVia};
 use meshloop_domain::capability::{Compatibility, HarnessError};
 use meshloop_domain::evidence::AttemptId;
 use meshloop_domain::task_graph::TaskId;
@@ -23,6 +23,7 @@ fn harness_with_invoke() -> CliHarness {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec!["--prompt-file".into(), "{prompt_file}".into()],
+        prompt_via: PromptVia::File,
     })
 }
 
@@ -51,6 +52,7 @@ fn owned_cancellation_refuses_forged_handles_and_never_falls_back_to_pid() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(5),
         invoke_args_template: vec!["--hang".into()],
+        prompt_via: PromptVia::File,
     });
     let handle = harness.invoke(&spec(dir.clone(), 501)).unwrap();
     let mut unrelated = meshloop_adapters::process::spawn_command(
@@ -98,6 +100,7 @@ fn probe_reports_the_fixtures_real_reported_version() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let profile = harness.probe().expect("probe should succeed");
     assert_eq!(profile.version, "fixture-harness 1.0.0");
@@ -112,6 +115,7 @@ fn probe_marks_a_failing_executable_unsupported_not_a_crash() {
         version_args: vec!["--fail".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let profile = harness
         .probe()
@@ -128,6 +132,7 @@ fn probe_of_a_non_exiting_version_call_times_out_unsupported() {
         version_args: vec!["--hang".into()],
         probe_timeout: Duration::from_millis(500),
         invoke_args_template: vec!["--prompt-file".into(), "{prompt_file}".into()],
+        prompt_via: PromptVia::File,
     });
     let start = std::time::Instant::now();
     let profile = harness
@@ -152,6 +157,7 @@ fn probe_without_an_invoke_template_is_not_dispatchable_and_says_why() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let profile = harness.probe().expect("probe should succeed");
     assert_eq!(profile.compatibility, Compatibility::Compatible);
@@ -168,6 +174,7 @@ fn probe_failure_reason_names_the_exit_code() {
         version_args: vec!["--fail".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let profile = harness.probe().expect("probe should succeed");
     let reason = profile.rejection_reason().unwrap_or_default();
@@ -182,6 +189,7 @@ fn invoke_without_a_configured_template_is_unsupported() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let dir = std::env::temp_dir();
     let result = harness.invoke(&spec(dir, 1));
@@ -214,6 +222,7 @@ fn cancel_terminates_a_hung_process_and_is_idempotent() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec!["--hang".into()],
+        prompt_via: PromptVia::File,
     });
     let dir = std::env::temp_dir().join(format!("meshloop-test-{}-b", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
@@ -296,6 +305,7 @@ fn cancel_kills_an_orphaned_tree_left_by_a_previous_process() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let handle = HarnessHandle {
         attempt_id: AttemptId(4242),
@@ -338,6 +348,7 @@ fn cancel_leaves_an_unrelated_process_with_a_recorded_pid_alone() {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(10),
         invoke_args_template: vec![],
+        prompt_via: PromptVia::File,
     });
     let handle = HarnessHandle {
         attempt_id: AttemptId(4243),
@@ -364,6 +375,7 @@ fn capture_harness(args: &[&str]) -> CliHarness {
         version_args: vec!["--version".into()],
         probe_timeout: Duration::from_secs(5),
         invoke_args_template: args.iter().map(|s| (*s).into()).collect(),
+        prompt_via: PromptVia::File,
     })
 }
 
@@ -471,6 +483,7 @@ fn bounded_capture_probe_overflow_reports_capture_fault() {
         version_args: vec!["--large-output".into(), "4194305".into()],
         probe_timeout: Duration::from_secs(5),
         invoke_args_template: vec!["--noop".into()],
+        prompt_via: PromptVia::File,
     });
     assert!(
         matches!(harness.probe(), Err(HarnessError::ProcessFault { detail }) if detail == "harness-output-overflow")
@@ -504,11 +517,160 @@ fn bounded_capture_failed_spawn_releases_admission_and_attempt_reservation() {
         version_args: vec![],
         probe_timeout: Duration::from_secs(5),
         invoke_args_template: vec!["--noop".into()],
+        prompt_via: PromptVia::File,
     });
     for _ in 0..20 {
         assert!(
             matches!(harness.invoke(&spec(dir.clone(), 706)), Err(HarnessError::ProcessFault { detail }) if detail != "harness-output-capacity-blocked" && detail != "harness-output-capture-failed")
         );
     }
+    fs::remove_dir_all(dir).ok();
+}
+
+fn delivery_harness(template: Vec<String>, via: PromptVia) -> CliHarness {
+    CliHarness::new(CliHarnessConfig {
+        name: "fixture".into(),
+        executable: fixture_path(),
+        version_args: vec!["--version".into()],
+        probe_timeout: Duration::from_secs(10),
+        invoke_args_template: template,
+        prompt_via: via,
+    })
+}
+
+#[test]
+fn probe_reports_supports_noninteractive_for_a_nonempty_embedded_template() {
+    let embedded = delivery_harness(vec!["--prompt-file={prompt_file}".into()], PromptVia::File);
+    let profile = embedded.probe().expect("probe");
+    assert!(profile.supports_noninteractive);
+    assert!(profile.is_dispatchable());
+
+    let stdin_template = delivery_harness(vec!["--echo-stdin".into()], PromptVia::Stdin);
+    let profile = stdin_template.probe().expect("probe");
+    assert!(profile.supports_noninteractive);
+    assert!(profile.is_dispatchable());
+}
+
+#[test]
+fn embedded_prompt_file_placeholder_is_one_argument_and_the_file_holds_the_prompt() {
+    let dir = capture_dir("embedded-file");
+    let harness = delivery_harness(vec!["--prompt-file={prompt_file}".into()], PromptVia::File);
+    let attempt = 271;
+    let input = spec(dir.clone(), attempt);
+    let handle = harness.invoke(&input).expect("invoke");
+    let outcome = harness.collect(&handle).expect("collect");
+    assert_eq!(outcome.exit_code, 0);
+    let prompt_file = dir.join(format!(".meshloop-prompt-{attempt}"));
+    let stored = fs::read_to_string(&prompt_file).unwrap();
+    assert_eq!(stored, input.prompt);
+    let arg = format!("--prompt-file={}", prompt_file.to_string_lossy());
+    assert!(
+        outcome.output_redacted.contains("FIXTURE_ARGC:1"),
+        "{}",
+        outcome.output_redacted
+    );
+    assert!(
+        outcome
+            .output_redacted
+            .contains(&format!("FIXTURE_ARG:{arg}")),
+        "{}",
+        outcome.output_redacted
+    );
+    assert!(
+        outcome
+            .output_redacted
+            .contains(&format!("FIXTURE_HANDLED:{}", input.prompt)),
+        "{}",
+        outcome.output_redacted
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn stdin_prompt_reaches_the_child_without_an_argv_prompt() {
+    let dir = capture_dir("stdin");
+    let harness = delivery_harness(vec!["--echo-stdin".into()], PromptVia::Stdin);
+    let mut input = spec(dir.clone(), 272);
+    input.prompt = "payload-from-stdin\nsecond".into();
+    let handle = harness.invoke(&input).expect("invoke");
+    let outcome = harness.collect(&handle).expect("collect");
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.output_redacted, input.prompt);
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn placeholders_inside_arguments_replace_known_tokens_only() {
+    let dir = capture_dir("tokens");
+    let harness = delivery_harness(
+        vec![
+            "--echo-args".into(),
+            "--prompt-file={prompt_file}".into(),
+            "model={model_ref}".into(),
+            "{not_a_token}".into(),
+            "{prompt}".into(),
+        ],
+        PromptVia::File,
+    );
+    let attempt = 273;
+    let input = spec(dir.clone(), attempt);
+    let handle = harness.invoke(&input).expect("invoke");
+    let outcome = harness.collect(&handle).expect("collect");
+    assert_eq!(outcome.exit_code, 0);
+    let prompt_file = dir.join(format!(".meshloop-prompt-{attempt}"));
+    assert_eq!(fs::read_to_string(&prompt_file).unwrap(), input.prompt);
+    let path = prompt_file.to_string_lossy();
+    let expected = format!(
+        "FIXTURE_ARGC:5\nFIXTURE_ARG:--echo-args\nFIXTURE_ARG:--prompt-file={path}\nFIXTURE_ARG:model=m\nFIXTURE_ARG:{{not_a_token}}\nFIXTURE_ARG:{{prompt}}\n"
+    );
+    assert_eq!(outcome.output_redacted, expected);
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn arg_mode_replaces_prompt_text_inside_an_argument() {
+    let dir = capture_dir("arg");
+    let harness = delivery_harness(
+        vec!["--echo-args".into(), "p={prompt}".into()],
+        PromptVia::Arg,
+    );
+    let mut input = spec(dir.clone(), 274);
+    input.prompt = "hello arg".into();
+    let handle = harness.invoke(&input).expect("invoke");
+    let outcome = harness.collect(&handle).expect("collect");
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(
+        outcome.output_redacted,
+        "FIXTURE_ARGC:2\nFIXTURE_ARG:--echo-args\nFIXTURE_ARG:p=hello arg\n"
+    );
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn arg_prompt_over_the_invocation_limit_does_not_spawn() {
+    let dir = capture_dir("arg-limit");
+    let harness = delivery_harness(vec!["--hang".into(), "{prompt}".into()], PromptVia::Arg);
+    let mut input = spec(dir.clone(), 275);
+    input.prompt = "y".repeat(40_000);
+    let started = std::time::Instant::now();
+    let result = harness.invoke(&input);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "limit check must not wait on a child"
+    );
+    match result {
+        Err(HarnessError::ProcessFault { detail }) => {
+            assert!(
+                detail.contains("the prompt is too long for an argument"),
+                "{detail}"
+            );
+        }
+        Ok(handle) => {
+            let _ = harness.cancel(&handle);
+            panic!("over-long prompt spawned a child");
+        }
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!dir.join("fixture-touched.txt").exists());
     fs::remove_dir_all(dir).ok();
 }
