@@ -561,6 +561,7 @@ fn decompose_inner(
                 let outcome = HarnessOutcome {
                     exit_code: 0,
                     output_redacted: String::new(),
+                    stderr_redacted: String::new(),
                     worktree_changed: true,
                 };
                 if let Ok(graph) = parse_graph(spec, &outcome) {
@@ -641,6 +642,7 @@ mod tests {
                 Ok(json) => Ok(HarnessOutcome {
                     exit_code: 0,
                     output_redacted: json.clone(),
+                    stderr_redacted: String::new(),
                     worktree_changed: false,
                 }),
                 Err(e) => Err(e.clone()),

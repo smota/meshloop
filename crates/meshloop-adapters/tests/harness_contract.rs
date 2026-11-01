@@ -380,10 +380,17 @@ fn bounded_capture_drains_large_simultaneous_pipes_without_deadlock() {
     let handle = harness.invoke(&spec(dir.clone(), 700)).unwrap();
     let outcome = harness.collect(&handle).unwrap();
     assert_eq!(outcome.exit_code, 0);
-    // 262144 bytes were captured, then redacted: marker with that length, then the tail.
+    // 262144 bytes on each stream, then redacted: marker with that length, then the tail.
     let marker = "…[truncated 262144 bytes]…";
-    let tail = "x".repeat((2048 + 3) - marker.len());
-    assert_eq!(outcome.output_redacted, format!("{marker}{tail}"));
+    let body = (2048 + 3) - marker.len();
+    assert_eq!(
+        outcome.output_redacted,
+        format!("{marker}{}", "x".repeat(body))
+    );
+    assert_eq!(
+        outcome.stderr_redacted,
+        format!("{marker}{}", "e".repeat(body))
+    );
     fs::remove_dir_all(dir).ok();
 }
 

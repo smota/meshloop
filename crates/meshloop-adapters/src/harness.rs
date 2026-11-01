@@ -563,6 +563,7 @@ impl HarnessCapabilities for CliHarness {
             return Ok(Some(HarnessOutcome {
                 exit_code: status.code().unwrap_or(-1),
                 output_redacted: crate::redact::redact(&stdout),
+                stderr_redacted: crate::redact::redact(&stderr),
                 worktree_changed: false,
             }));
         }

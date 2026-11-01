@@ -3104,6 +3104,7 @@ impl meshloop_engine::ports::HarnessCapabilities for OwnedScriptedPlanner {
         Ok(meshloop_engine::ports::HarnessOutcome {
             exit_code: 0,
             output_redacted: self.responses[self.prompts.lock().unwrap().len() - 1].clone(),
+            stderr_redacted: String::new(),
             worktree_changed: true,
         })
     }
@@ -3370,4 +3371,126 @@ fn provisional_planning_large_simultaneous_output_completes_and_retains_owned_pl
         .unwrap();
     assert_eq!(generations, 0);
     fs::remove_dir_all(dir).ok();
+}
+
+const TRANSCRIPT_MARKER: &str = "MESHLOOP_HARNESS_MARKER_0123456789AB";
+const STDERR_MARKER: &str = "STDERR_BODY_MARKER";
+
+fn transcript_secret() -> String {
+    format!("sk-{}", "a".repeat(40))
+}
+
+fn run_transcript(tag: &str, graph_id: &str, empty_diff_ok: bool) -> serde_json::Value {
+    let dir = disposable_repo(tag);
+    let config_path = write_config(&dir, r#"["--emit-transcript"]"#);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"{graph_id}","nodes":[{{"id":1,"description":"transcript","depends_on":[],"tier":null,"empty_diff_ok":{empty_diff_ok}}}]}}"#
+        ),
+    )
+    .unwrap();
+    let run = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run");
+    if empty_diff_ok {
+        assert!(
+            run.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    } else {
+        assert!(
+            !run.status.success(),
+            "empty diff without empty_diff_ok must fail verification\nstdout: {}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
+    let inspected = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--graph", graph_id, "--task", "1", "--attempts"],
+    );
+    fs::remove_dir_all(&dir).ok();
+    inspected
+}
+
+fn harness_output_summary(inspected: &serde_json::Value) -> String {
+    let evidence = inspected["data"]["attempts"][0]["evidence"]
+        .as_array()
+        .unwrap_or_else(|| panic!("attempts missing: {inspected}"));
+    let row = evidence
+        .iter()
+        .find(|e| e["tool"] == "harness-output")
+        .unwrap_or_else(|| panic!("no harness-output row: {inspected}"));
+    assert_eq!(row["exit_code"], 0, "{row}");
+    row["summary_redacted"]
+        .as_str()
+        .unwrap_or_else(|| panic!("summary missing: {row}"))
+        .to_string()
+}
+
+#[test]
+fn harness_output_is_saved_for_an_awaiting_review_node() {
+    assert_eq!(TRANSCRIPT_MARKER.len(), 36);
+    let secret = transcript_secret();
+    assert_eq!(secret.len(), 43);
+    let inspected = run_transcript("harness-output", "hout", true);
+    assert_eq!(inspected["data"]["state"], "AwaitingReview", "{inspected}");
+    let summary = harness_output_summary(&inspected);
+    assert!(
+        summary.starts_with("exit=7\n"),
+        "process exit belongs in the text, not the row gate: {summary}"
+    );
+    assert!(summary.contains(TRANSCRIPT_MARKER), "{summary}");
+    assert!(summary.contains("[REDACTED]"), "{summary}");
+    assert!(!summary.contains(&secret), "{summary}");
+    assert!(summary.contains('…'), "{summary}");
+    assert!(
+        summary.contains(STDERR_MARKER),
+        "stderr body must survive the join: {summary}"
+    );
+    let evidence = inspected["data"]["attempts"][0]["evidence"]
+        .as_array()
+        .unwrap();
+    let git_diff = evidence
+        .iter()
+        .find(|e| e["tool"] == "git-diff")
+        .expect("git-diff");
+    assert_eq!(git_diff["exit_code"], 0, "{inspected}");
+}
+
+#[test]
+fn harness_output_row_does_not_hide_an_empty_diff_failure() {
+    let inspected = run_transcript("harness-output-fail", "hout-fail", false);
+    assert_eq!(inspected["data"]["state"], "Failed", "{inspected}");
+    let summary = harness_output_summary(&inspected);
+    assert!(summary.contains(TRANSCRIPT_MARKER), "{summary}");
+    assert!(summary.starts_with("exit=7\n"), "{summary}");
+    let evidence = inspected["data"]["attempts"][0]["evidence"]
+        .as_array()
+        .unwrap();
+    let git_diff = evidence
+        .iter()
+        .find(|e| e["tool"] == "git-diff")
+        .expect("git-diff");
+    assert_eq!(
+        git_diff["exit_code"], 1,
+        "empty diff must still fail when empty_diff_ok is false: {inspected}"
+    );
 }

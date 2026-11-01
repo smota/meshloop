@@ -21,9 +21,9 @@ use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::converge::{RepairAction, RepairBudget, RepairSession};
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_owned};
 use crate::ports::{
-    AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, LiveCheck,
-    ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord, WorkspaceError,
-    WorkspacePort,
+    AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, HarnessOutcome,
+    LiveCheck, ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord,
+    WorkspaceError, WorkspacePort,
 };
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
@@ -945,7 +945,7 @@ impl<'a> RunLoop<'a> {
                     };
                     let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
                     match h.try_collect(&handle) {
-                        Ok(Some(_)) => {
+                        Ok(Some(outcome)) => {
                             let rec = self.append(
                                 graph_id,
                                 node.id,
@@ -977,6 +977,7 @@ impl<'a> RunLoop<'a> {
                                 &start,
                                 tier,
                                 &candidate,
+                                &outcome,
                             )?;
                             return Ok(Some(tick));
                         }
@@ -1050,9 +1051,10 @@ impl<'a> RunLoop<'a> {
                 continue;
             };
             let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
-            if !matches!(h.try_collect(&handle), Ok(Some(_))) {
-                continue;
-            }
+            let outcome = match h.try_collect(&handle) {
+                Ok(Some(outcome)) => outcome,
+                _ => continue,
+            };
             let rec = self.append(
                 graph_id,
                 node.id,
@@ -1084,6 +1086,7 @@ impl<'a> RunLoop<'a> {
                 &start,
                 tier,
                 &candidate,
+                &outcome,
             )?;
             return Ok(Some(tick));
         }
@@ -1416,7 +1419,7 @@ impl<'a> RunLoop<'a> {
                         )?;
                         self.maybe_fallback(graph_id, task_id, fail, &selected)
                     }
-                    Ok(Some(_)) => {
+                    Ok(Some(outcome)) => {
                         let rec = self.append(
                             graph_id,
                             task_id,
@@ -1428,6 +1431,7 @@ impl<'a> RunLoop<'a> {
                         let _ = rec;
                         self.verify_attempt(
                             graph_id, graph, node, attempt_id, &wt, &start, tier, &candidate,
+                            &outcome,
                         )
                     }
                     Ok(None) => Ok(Tick::Transition {
@@ -1648,6 +1652,7 @@ impl<'a> RunLoop<'a> {
         base: &str,
         tier: Tier,
         candidate: &Candidate,
+        outcome: &HarnessOutcome,
     ) -> Result<Tick, OrchestratorError> {
         let prompt = format!(".meshloop-prompt-{}", attempt_id.0);
         let _ = self.workspace.remove_file(wt, &prompt);
@@ -1658,6 +1663,14 @@ impl<'a> RunLoop<'a> {
 
         let (mut rows, current_lattice, mut current_diag) =
             self.run_deterministic_checks(node, attempt_id, wt, base, &current_revision)?;
+        rows.push(harness_output_evidence(
+            CandidateRef {
+                task_id: node.id,
+                attempt_id,
+                revision: current_revision.clone(),
+            },
+            outcome,
+        ));
 
         for row in &rows {
             self.store.record(row.clone())?;
@@ -2589,6 +2602,22 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
     }
 }
 
+/// Worker transcript for the attempt. `exit_code` stays 0: a non-zero process
+/// status is not the verification gate (`all_deterministic_passed` would fail
+/// the node). The real status is the first line of the text.
+fn harness_output_evidence(candidate: CandidateRef, outcome: &HarnessOutcome) -> Evidence {
+    Evidence::Deterministic(DeterministicEvidence {
+        candidate,
+        tool: "harness-output".into(),
+        tool_version: "n/a".into(),
+        exit_code: 0,
+        output_redacted: format!(
+            "exit={}\nstdout:\n{}\nstderr:\n{}",
+            outcome.exit_code, outcome.output_redacted, outcome.stderr_redacted
+        ),
+    })
+}
+
 /// Evidence recorded when no `verify_command` is configured, so the skipped check is visible.
 fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
     Evidence::Deterministic(DeterministicEvidence {
@@ -2955,6 +2984,32 @@ mod tests {
                 assert_eq!(ev.tool, "verify");
                 assert_eq!(ev.exit_code, 0);
                 assert!(ev.output_redacted.starts_with("skipped:"));
+                assert_eq!(ev.candidate, candidate);
+            }
+            other => panic!("expected deterministic evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn harness_output_evidence_keeps_streams_and_does_not_fail_the_gate() {
+        let candidate = CandidateRef {
+            task_id: TaskId(1),
+            attempt_id: AttemptId(4),
+            revision: "rev".into(),
+        };
+        let outcome = HarnessOutcome {
+            exit_code: 7,
+            output_redacted: "STDOUT_MARKER".into(),
+            stderr_redacted: "STDERR_BODY".into(),
+            worktree_changed: false,
+        };
+        match harness_output_evidence(candidate.clone(), &outcome) {
+            Evidence::Deterministic(ev) => {
+                assert_eq!(ev.tool, "harness-output");
+                assert_eq!(ev.exit_code, 0);
+                assert!(ev.output_redacted.starts_with("exit=7\n"));
+                assert!(ev.output_redacted.contains("stdout:\nSTDOUT_MARKER"));
+                assert!(ev.output_redacted.contains("stderr:\nSTDERR_BODY"));
                 assert_eq!(ev.candidate, candidate);
             }
             other => panic!("expected deterministic evidence, got {other:?}"),

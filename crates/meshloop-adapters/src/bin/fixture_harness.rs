@@ -103,6 +103,21 @@ fn main() {
             }
             eprint!("{out}");
         }
+        Some("--emit-transcript") => {
+            // No worktree writes, so an empty_diff_ok node stays an empty diff.
+            // Stdout exceeds the redact cap after a marker and a bounded `sk-` key.
+            use std::io::Write;
+            let marker = "MESHLOOP_HARNESS_MARKER_0123456789AB";
+            let secret = format!("sk-{}", "a".repeat(40));
+            let mut out = std::io::stdout();
+            write!(out, "{marker}\n{secret}\n{}", "x".repeat(4096)).expect("stdout");
+            out.flush().expect("flush stdout");
+            let mut err = std::io::stderr();
+            write!(err, "STDERR_BODY_MARKER").expect("stderr");
+            err.flush().expect("flush stderr");
+            // Non-zero so evidence can show the process code without failing the gate.
+            std::process::exit(7);
+        }
         Some("--prompt-file") => {
             let path = args.get(1).expect("fixture requires a prompt file path");
             let prompt = fs::read_to_string(path).unwrap_or_default();

@@ -145,6 +145,7 @@ mod tests {
             script: std::sync::Mutex::new(vec![Ok(HarnessOutcome {
                 exit_code: 0,
                 output_redacted: "done".into(),
+                stderr_redacted: String::new(),
                 worktree_changed: true,
             })]),
         };

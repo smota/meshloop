@@ -35,7 +35,10 @@ pub struct HarnessHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessOutcome {
     pub exit_code: i32,
+    /// Redacted stdout. Planner JSON is parsed from this field alone.
     pub output_redacted: String,
+    /// Redacted stderr. Empty when the worker wrote none.
+    pub stderr_redacted: String,
     pub worktree_changed: bool,
 }
 
