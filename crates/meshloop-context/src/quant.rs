@@ -164,7 +164,17 @@ impl SignatureIndex {
             .enumerate()
             .map(|(i, e)| (score_query(&q, &e.code, self.bit_width), i))
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Exact name first: a one-token query ties at 1.0 with same-bucket headings.
+        if let Some(name) = single_identifier_query(query) {
+            let exact: Vec<bool> = self.entries.iter().map(|e| e.name == name).collect();
+            scored.sort_by(|a, b| {
+                exact[b.1]
+                    .cmp(&exact[a.1])
+                    .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+            });
+        } else {
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
         scored.truncate(k);
         scored
             .into_iter()
@@ -181,31 +191,52 @@ impl SignatureIndex {
     }
 
     /// Best score per file path, descending. Ties broken by path for determinism.
+    ///
+    /// When `query` is a single identifier, a file that contains that exact name
+    /// sorts first. The returned score stays the best quantized score.
     pub fn rank_files(&self, query: &str, k: usize) -> Vec<(String, f32)> {
         if k == 0 || self.entries.is_empty() {
             return Vec::new();
         }
         let q = rotate_unit(query, self.seed);
-        let mut best: HashMap<&str, f32> = HashMap::with_capacity(self.entries.len());
+        let exact_name = single_identifier_query(query);
+        let mut best: HashMap<&str, (f32, bool)> = HashMap::with_capacity(self.entries.len());
         for entry in &self.entries {
             let score = score_query(&q, &entry.code, self.bit_width);
+            let is_exact = exact_name.is_some_and(|name| entry.name == name);
             best.entry(entry.path.as_str())
-                .and_modify(|s| {
-                    if score > *s {
-                        *s = score;
+                .and_modify(|(best_score, exact)| {
+                    if score > *best_score {
+                        *best_score = score;
+                    }
+                    if is_exact {
+                        *exact = true;
                     }
                 })
-                .or_insert(score);
+                .or_insert((score, is_exact));
         }
-        let mut files: Vec<(String, f32)> =
-            best.into_iter().map(|(p, s)| (p.to_string(), s)).collect();
-        files.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        let mut files: Vec<(String, f32, bool)> = best
+            .into_iter()
+            .map(|(path, (score, exact))| (path.to_string(), score, exact))
+            .collect();
+        if exact_name.is_some() {
+            files.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        } else {
+            files.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        }
         files.truncate(k);
         files
+            .into_iter()
+            .map(|(path, score, _)| (path, score))
+            .collect()
     }
 }
 
@@ -317,6 +348,19 @@ fn embed(text: &str, seed: u64) -> [f32; DIM] {
 fn tokenize(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .filter(|t| t.len() >= 2)
+}
+
+/// Trimmed query that is exactly one token, so `SignatureIndex` matches and
+/// `pub struct SignatureIndex` does not.
+fn single_identifier_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    let mut tokens = tokenize(trimmed);
+    let token = tokens.next()?;
+    if tokens.next().is_none() && token == trimmed {
+        Some(token)
+    } else {
+        None
+    }
 }
 
 fn fwht(a: &mut [f32; DIM]) {
@@ -531,5 +575,119 @@ mod tests {
         );
         assert_eq!(selected[0].0, "src/auth.rs");
         assert_eq!(selected.len(), 5);
+    }
+
+    const DECLARING_PATH: &str = "crates/meshloop-context/src/quant.rs";
+    const COLLIDING_HEADING_PATH: &str = "roles/developer/ROLE.md";
+
+    fn index_with_signature_index_and_headings() -> SignatureIndex {
+        let mut index = SignatureIndex::new(BitWidth::Two);
+        index.add_signature(&Signature {
+            path: COLLIDING_HEADING_PATH.into(),
+            kind: SignatureKind::Heading,
+            name: "Handoffs".into(),
+            text: "Handoffs".into(),
+        });
+        for (i, name) in [
+            "Purpose",
+            "Scope",
+            "Behavior",
+            "Authority",
+            "Completion",
+            "Extensions",
+            "Overview",
+            "Notes",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = name.to_string();
+            index.add_signature(&Signature {
+                path: format!("roles/r{i}/ROLE.md"),
+                kind: SignatureKind::Heading,
+                name: name.clone(),
+                text: name,
+            });
+        }
+        for i in 0..48 {
+            let name = format!("Topic{i}");
+            index.add_signature(&Signature {
+                path: format!("docs/topic{i}.md"),
+                kind: SignatureKind::Heading,
+                name: name.clone(),
+                text: name,
+            });
+        }
+        index.add_signature(&Signature {
+            path: DECLARING_PATH.into(),
+            kind: SignatureKind::Type,
+            name: "SignatureIndex".into(),
+            text: "pub struct SignatureIndex {".into(),
+        });
+        index
+    }
+
+    #[test]
+    fn single_identifier_ranks_exact_name_first() {
+        let index = index_with_signature_index_and_headings();
+        let hits = index.search("SignatureIndex", 5);
+        assert_eq!(hits[0].name, "SignatureIndex");
+        assert_eq!(hits[0].path, DECLARING_PATH);
+        let direct = super::score_query(
+            &super::rotate_unit("SignatureIndex", DEFAULT_SEED),
+            &super::encode("pub struct SignatureIndex {", DEFAULT_SEED, BitWidth::Two),
+            BitWidth::Two,
+        );
+        assert_eq!(hits[0].score, direct);
+
+        let all = index.search("SignatureIndex", index.len());
+        assert!(
+            all.iter()
+                .any(|hit| hit.name != "SignatureIndex" && hit.score > hits[0].score),
+            "same-bucket one-token heading should outscore the declaration: {all:?}"
+        );
+        assert_eq!(
+            index.search("  SignatureIndex  ", 1)[0].name,
+            "SignatureIndex"
+        );
+        assert_ne!(
+            index.search("signatureindex", 1)[0].name,
+            "SignatureIndex",
+            "exact-name rank is case-sensitive"
+        );
+
+        let multi = index.search("pub struct SignatureIndex", index.len());
+        for pair in multi.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "multi-token search must stay score-ordered"
+            );
+        }
+    }
+
+    #[test]
+    fn single_identifier_rank_files_prefers_declaring_file() {
+        let index = index_with_signature_index_and_headings();
+        let ranked = index.rank_files("SignatureIndex", index.len());
+        assert_eq!(ranked[0].0, DECLARING_PATH);
+        let colliding = ranked
+            .iter()
+            .position(|(path, _)| path == COLLIDING_HEADING_PATH)
+            .expect("colliding heading file");
+        assert!(colliding > 0);
+        assert!(
+            ranked[colliding].1 > ranked[0].1,
+            "heading score {} should beat declaration score {} before the exact-name key",
+            ranked[colliding].1,
+            ranked[0].1
+        );
+
+        let multi = index.rank_files("implement Auth trait verify token", index.len());
+        for pair in multi.windows(2) {
+            assert!(
+                pair[0].1 > pair[1].1 || (pair[0].1 == pair[1].1 && pair[0].0 <= pair[1].0),
+                "multi-token rank_files must stay score-then-path"
+            );
+        }
     }
 }
