@@ -2069,6 +2069,20 @@ fn bench_world_s(root: &Path, args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn wal_commit_diagnostics(
+    samples_ms: &[f64],
+    p95_index_zero_based: usize,
+    p95_ms: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "samples_ms": samples_ms,
+        "sample_count": samples_ms.len(),
+        "p95_index_zero_based": p95_index_zero_based,
+        "p95_ms": p95_ms,
+        "timing_boundary": "record_transition_and_attempt(record, None), including success check; excludes store open/schema setup, record construction, sorting and artifact serialization"
+    })
+}
+
 fn bench(root: &Path) -> ExitCode {
     use meshloop_adapters::git::GitWorktreeAdapter;
     use meshloop_adapters::redact::redact;
@@ -2384,6 +2398,7 @@ fn bench(root: &Path) -> ExitCode {
             .expect("record transition");
         commit_latencies.push(t_commit.elapsed().as_secs_f64() * 1000.0);
     }
+    let chronological_commit_latencies = commit_latencies.clone();
     commit_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let p95_idx = (commit_latencies.len() as f64 * 0.95) as usize;
     let wal_commit_ms = commit_latencies[p95_idx.min(commit_latencies.len() - 1)];
@@ -2401,12 +2416,16 @@ fn bench(root: &Path) -> ExitCode {
     }
     let p1 = tmp_db_conc.clone();
     let p2 = tmp_db_conc.clone();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-    let b1 = barrier.clone();
-    let b2 = barrier.clone();
+    let ready = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let ready1 = ready.clone();
+    let ready2 = ready.clone();
+    let start1 = start.clone();
+    let start2 = start.clone();
     let h1 = std::thread::spawn(move || {
         let mut s1 = SqliteStore::open(&p1).expect("open s1");
-        b1.wait();
+        ready1.wait();
+        start1.wait();
         for i in 0..25 {
             let r = TransitionRecord {
                 graph_id: "conc_g".to_string(),
@@ -2425,7 +2444,8 @@ fn bench(root: &Path) -> ExitCode {
     });
     let h2 = std::thread::spawn(move || {
         let mut s2 = SqliteStore::open(&p2).expect("open s2");
-        b2.wait();
+        ready2.wait();
+        start2.wait();
         for i in 25..50 {
             let r = TransitionRecord {
                 graph_id: "conc_g".to_string(),
@@ -2442,8 +2462,9 @@ fn bench(root: &Path) -> ExitCode {
                 .expect("s2 record");
         }
     });
-    barrier.wait();
+    ready.wait();
     let conc_t0 = Instant::now();
+    start.wait();
     h1.join().expect("h1 join");
     h2.join().expect("h2 join");
     let conc_elapsed = conc_t0.elapsed();
@@ -2471,23 +2492,29 @@ fn bench(root: &Path) -> ExitCode {
     let mid = work_items.len() / 2;
     let w1_items = work_items[..mid].to_vec();
     let w2_items = work_items[mid..].to_vec();
-    let bar_th = std::sync::Arc::new(std::sync::Barrier::new(3));
-    let b_th1 = bar_th.clone();
-    let b_th2 = bar_th.clone();
+    let ready_th = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let start_th = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let ready_th1 = ready_th.clone();
+    let ready_th2 = ready_th.clone();
+    let start_th1 = start_th.clone();
+    let start_th2 = start_th.clone();
     let th1 = std::thread::spawn(move || {
-        b_th1.wait();
+        ready_th1.wait();
+        start_th1.wait();
         for (src, lang) in w1_items {
             let _ = extract_skeleton(src, lang);
         }
     });
     let th2 = std::thread::spawn(move || {
-        b_th2.wait();
+        ready_th2.wait();
+        start_th2.wait();
         for (src, lang) in w2_items {
             let _ = extract_skeleton(src, lang);
         }
     });
-    bar_th.wait();
+    ready_th.wait();
     let par_t0 = Instant::now();
+    start_th.wait();
     th1.join().expect("th1 join");
     th2.join().expect("th2 join");
     let par_duration = par_t0.elapsed().as_secs_f64();
@@ -3126,6 +3153,13 @@ fn bench(root: &Path) -> ExitCode {
             "wall_clock_s": smoke_wall_clock_s
         },
         "metrics": metrics_json,
+        "diagnostics": {
+            "wal_commit": wal_commit_diagnostics(
+                &chronological_commit_latencies,
+                p95_idx,
+                wal_commit_ms,
+            )
+        },
         "status": {
             "overall": if all_pass { "pass" } else { "fail" },
             "invariants": if invariants_pass { "pass" } else { "fail" },
@@ -3148,6 +3182,38 @@ fn bench(root: &Path) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wal_artifact_preserves_chronology_and_canonical_p95() {
+        let samples: Vec<f64> = (1..=50).rev().map(f64::from).collect();
+        let mut sorted = samples.clone();
+        sorted.sort_by(f64::total_cmp);
+        let index = (sorted.len() as f64 * 0.95) as usize;
+        let canonical_p95 = sorted[index];
+        let artifact = serde_json::json!({
+            "diagnostics": {
+                "wal_commit": wal_commit_diagnostics(&samples, index, canonical_p95)
+            },
+            "metrics": [{"name": "orch.txn.wal_commit_ms.p95", "value": canonical_p95}]
+        });
+        let serialized = serde_json::to_string(&artifact).expect("serialize WAL artifact");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&serialized).expect("read WAL artifact");
+        let diagnostics = &decoded["diagnostics"]["wal_commit"];
+        let recorded: Vec<f64> = serde_json::from_value(diagnostics["samples_ms"].clone())
+            .expect("read ordered WAL samples");
+        assert_eq!(recorded, samples);
+        assert_eq!(diagnostics["sample_count"], 50);
+        assert_eq!(diagnostics["p95_index_zero_based"], 47);
+        assert_eq!(diagnostics["p95_ms"], 48.0);
+        assert_eq!(diagnostics["p95_ms"], decoded["metrics"][0]["value"]);
+        assert!(
+            diagnostics["timing_boundary"]
+                .as_str()
+                .expect("timing boundary")
+                .contains("record_transition_and_attempt(record, None)")
+        );
+    }
 
     #[test]
     fn wilson_empty_sample_yields_zero() {

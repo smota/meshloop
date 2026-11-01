@@ -53,14 +53,14 @@ Metrics are categorized into **Fail-Closed Invariants** (which immediately block
 | :--- | :--- | :--- | :--- |
 | `ctx.tokens.reduction_pct` | $\ge 65.0\%$ | **67.7%** | Polyglot AST skeleton pruning across 7 languages. |
 | `ctx.parse.latency_ms.p95` | $\le 15.0\text{ ms}$ | **0.011 ms** | True $P_{95}$ across 700 timed parse iterations. |
-| `quant.search.latency_us.p95` | $\le 500.0\ \mu\text{s}$ | **324.0 $\mu$s** | True $P_{95}$ zero-copy FWHT vector ranking queries. |
+| `quant.search.latency_us.p95` | $\le 500.0\ \mu\text{s}$ | **324.0 $\mu$s** | Sorted-array $P_{95}$ across 1,000 FWHT vector ranking queries. |
 | `quant.index.compression_ratio` | $\ge 4.0\times$ | **5.5x** | Raw module characters vs 2-bit quantized vector bytes. |
 | `quant.recall_at_k` | $\ge 95.0\%$ | **100.0%** | Top-k signature retrieval accuracy against uncompressed baseline. |
-| `orch.txn.wal_commit_ms.p95` | $\le 10.0\text{ ms}$ | **1.24 ms** | SQLite fsync latency under concurrent dual-worker writes. |
+| `orch.txn.wal_commit_ms.p95` | $\le 10.0\text{ ms}$ | **1.24 ms** | Sorted-array $P_{95}$ across 50 single-writer SQLite transition calls. |
 | `orch.wave.dispatch_overhead_ms` | $\le 1500.0\text{ ms}$ | **856.8 ms** | Dispatch latency across multi-stage wave transitions. |
-| `orch.schedule.overhead_ms.p95` | $\le 25.0\text{ ms}$ | **0.053 ms** | Iterative `petgraph` scheduling latency via `hdrhistogram`. |
+| `orch.schedule.overhead_ms.p95` | $\le 25.0\text{ ms}$ | **0.053 ms** | `hdrhistogram` over 300 topological-order samples across six valid DAG manifests. |
 | `orch.mutation.overhead_ms.p95` | $\le 15.0\text{ ms}$ | **1.75 ms** | Dynamic upstream graph mutation overhead across 6 manifests. |
-| `conc.wal.write_contention_ms` | $\le 15.0\text{ ms}$ | **1.28 ms** | Commit latency under concurrent multi-threaded writes. |
+| `conc.wal.write_contention_ms` | $\le 15.0\text{ ms}$ | **1.28 ms** | Two-worker elapsed write duration divided by 50 operations. |
 | `conc.git_admin.lock_contention_ms` | $\le 200.0\text{ ms}$ | **71.39 ms** | `GitAdminMutex` exponential backoff under rival `.git/index.lock`. |
 | `conc.throughput_gain` | $\ge 1.0\times$ | **1.42x** | Speedup of 2 parallel workers vs 1 sequential worker. |
 | `conv.self_repair.success_rate` | $\ge 80.0\%$ | **100.0%** | Monotonic Lyapunov compiler error resolution to clean build. |
@@ -81,8 +81,39 @@ $$w = \frac{1}{1 + \frac{z^2}{n}} \left( \hat{p} + \frac{z^2}{2n} \pm z \sqrt{\f
 
 This formulation provides exact boundary behavior ($[0, 1]$) even for small sample sizes or extreme success rates ($k=0$ or $k=n$), implemented without external statistical dependencies.
 
-### 3.2 High Dynamic Range Percentiles (`hdrhistogram`)
-Latency percentiles ($P_{95}$) for scheduling overhead, SQLite commits, and FWHT vector search are computed using `hdrhistogram` with 3 significant figures of precision across 1,000+ timed samples, completely avoiding average-latency distortions.
+### 3.2 Percentiles and timing boundaries
+
+DAG scheduling uses `hdrhistogram` with three significant figures over 300 timed
+topological-order operations: 50 for each of six valid manifests. The seventh manifest
+is a cycle-rejection negative control and contributes no latency samples.
+
+WAL commit latency uses 50 sorted-array samples; FWHT search uses 1,000. Each selects
+the zero-based index `floor(sample_count * 0.95)`, bounded by the final index: 47 for
+WAL and 950 for search. These measurements do not use `hdrhistogram`.
+
+The single-writer WAL timer surrounds
+`record_transition_and_attempt(record, None)` and its success check. Store opening,
+schema setup, record construction, sorting and artifact serialization are excluded.
+The record carries an attempt ID, but the optional attempt-row argument is `None`.
+This measures the full transition call, including its production guards and commit;
+it does not isolate SQLite fsync cost.
+
+Contention and parallel throughput each use separate readiness and start barriers.
+Workers finish connection/setup before signaling readiness. The coordinator waits
+for both workers, starts the clock, then releases the start barrier and joins them.
+The interval includes release overhead, all released work and completion/join overhead,
+while excluding worker initialization. Contention reports that elapsed duration
+divided by 50 writes, rather than a percentile of individual commits. Throughput
+compares 200 sequential in-process `extract_skeleton` calls with the same work split
+across two workers; it does not measure process spawning.
+
+`artifacts/bench/run.json` adds `diagnostics.wal_commit` containing chronological
+`samples_ms`, `sample_count`, `p95_index_zero_based`, `p95_ms` and `timing_boundary`.
+The diagnostic samples are copied before sorting, and the p95 is the existing gated
+metric. Diagnostics do not alter thresholds or acceptance. They describe one run's
+50 observations; they do not establish a latency distribution across hosts, identify
+a regression cause, or guarantee that a later CI run will pass. The observed values
+in the scorecard above are historical examples, not fresh measurements.
 
 ---
 
