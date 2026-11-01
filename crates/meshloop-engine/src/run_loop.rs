@@ -1962,7 +1962,9 @@ impl<'a> RunLoop<'a> {
                             pid,
                             image_name: a.image_name.clone(),
                         };
-                        !matches!(self.processes.is_live(&hint), LiveCheck::Live)
+                        // Ambiguous is an image mismatch, not a confirmed death. Leave
+                        // the attempt Running so a later exit stays replayable (#62).
+                        matches!(self.processes.is_live(&hint), LiveCheck::Dead)
                     }
                 },
                 None => true,
@@ -3420,5 +3422,453 @@ mod tests {
         assert_eq!(kept.ended_at.as_deref(), Some("5"));
         let unrelated = store.load_attempt(AttemptId(4)).unwrap().unwrap();
         assert!(unrelated.ended_at.is_none());
+    }
+
+    fn pid_running_ports(pid: Option<u32>) -> EndedAtPorts {
+        let mut attempt = open_attempt(1, 1, "1000", None);
+        attempt.pid = pid;
+        attempt.image_name = Some("claude".into());
+        EndedAtPorts {
+            run: RunRow {
+                graph_id: "g".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "main".into(),
+                plan_json: r#"{"graph_id":"g","nodes":[
+                    {"id":1,"description":"worker","depends_on":[],"tier":null}
+                ]}"#
+                .into(),
+                plan_id: "p".into(),
+                created_at: "1".into(),
+                review_note: None,
+            },
+            events: running_events(1, 1).to_vec(),
+            attempts: vec![attempt],
+        }
+    }
+
+    fn crash_loop<'a>(
+        store: &'a mut EndedAtPorts,
+        processes: &'a dyn ProcessView,
+        other: &'a AdmissionPorts,
+    ) -> RunLoop<'a> {
+        RunLoop {
+            harnesses: HashMap::new(),
+            candidates: vec![],
+            workspace: other,
+            store,
+            processes,
+            checks: other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+        }
+    }
+
+    #[test]
+    fn crash_fail_ambiguous_pid_stays_running_and_dead_pid_fails() {
+        // (view answer, pid, attempt must stay Running)
+        let cases = [
+            (LiveCheck::Ambiguous, Some(44900), true),
+            (LiveCheck::Live, Some(44900), true),
+            (LiveCheck::Dead, Some(44900), false),
+            (LiveCheck::Live, None, false),
+        ];
+        for (answer, pid, stays_running) in cases {
+            let mut store = pid_running_ports(pid);
+            let view = FakeView::new(answer);
+            let other = admission_ports(Ok(None));
+            {
+                let mut run = crash_loop(&mut store, &view, &other);
+                run.crash_fail("g").expect("crash_fail");
+            }
+            let crashed = store.events.iter().any(|event| {
+                event.task_id == TaskId(1)
+                    && event.event == Event::HarnessCrashedOrTimeout
+                    && event.reason.as_deref() == Some("resume: no live process")
+            });
+            let state = replay_tasks(&store.events).expect("fold")[&TaskId(1)];
+            if stays_running {
+                assert!(!crashed, "{answer:?} pid={pid:?} recorded a crash");
+                assert_eq!(state, TaskState::Running, "{answer:?} pid={pid:?}");
+            } else {
+                assert!(crashed, "{answer:?} pid={pid:?} was not failed");
+                assert_eq!(state, TaskState::Failed, "{answer:?} pid={pid:?}");
+            }
+            assert_eq!(
+                view.calls.get(),
+                u32::from(pid.is_some()),
+                "{answer:?} pid={pid:?} probe count"
+            );
+        }
+    }
+
+    /// Harness key is `claude`; the OS image `dispatch_ready` must persist is not.
+    struct ClaudeImage;
+
+    impl HarnessCapabilities for ClaudeImage {
+        fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
+            Ok(meshloop_domain::capability::HarnessProfile {
+                harness: "claude".into(),
+                version: "0".into(),
+                compatibility: meshloop_domain::capability::Compatibility::Compatible,
+                supports_noninteractive: true,
+                supports_structured_output: true,
+                supports_cancellation: true,
+                reason: None,
+            })
+        }
+        fn invoke(&self, spec: &crate::agent::AgentSpec) -> Result<HarnessHandle, HarnessError> {
+            Ok(HarnessHandle {
+                attempt_id: spec.attempt_id,
+                pid: Some(44900),
+                pane_id: None,
+            })
+        }
+        fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn collect(
+            &self,
+            _handle: &HarnessHandle,
+        ) -> Result<crate::ports::HarnessOutcome, HarnessError> {
+            Err(HarnessError::Unsupported)
+        }
+        fn try_collect(
+            &self,
+            _handle: &HarnessHandle,
+        ) -> Result<Option<crate::ports::HarnessOutcome>, HarnessError> {
+            Ok(None)
+        }
+        fn process_image(&self) -> Option<String> {
+            Some("node.exe".into())
+        }
+    }
+
+    struct QuietWorkspace;
+
+    impl WorkspacePort for QuietWorkspace {
+        fn worktree_exists(&self, _path: &Path) -> bool {
+            false
+        }
+        fn branch_exists(&self, _branch: &str) -> Result<bool, WorkspaceError> {
+            Ok(false)
+        }
+        fn add_worktree_from(
+            &self,
+            _path: &Path,
+            _branch: &str,
+            _start_point: &str,
+        ) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        forbidden_port_calls! {
+            fn repo_root(&self) -> &Path;
+            fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
+            fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
+            fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
+            fn prune(&self) -> Result<(), WorkspaceError>;
+            fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, WorkspaceError>;
+            fn checkout_ref(&self, git_ref: &str) -> Result<(), WorkspaceError>;
+            fn merge_ff_only(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn merge_no_ff(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn current_head(&self) -> Result<String, WorkspaceError>;
+            fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError>;
+            fn remove_file(&self, worktree: &Path, rel: &str) -> Result<(), WorkspaceError>;
+            fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
+            fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
+            fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
+        }
+    }
+
+    struct DispatchStore {
+        run: RunRow,
+        events: Vec<TransitionRecord>,
+        attempts: Vec<AttemptRow>,
+    }
+
+    impl DispatchStore {
+        fn new() -> Self {
+            Self {
+                run: RunRow {
+                    graph_id: "g".into(),
+                    plan_state: PlanState::PlanAccepted,
+                    run_base: "base".into(),
+                    integrate_ref: "main".into(),
+                    plan_json: "{}".into(),
+                    plan_id: "p".into(),
+                    created_at: "1".into(),
+                    review_note: None,
+                },
+                events: Vec::new(),
+                attempts: Vec::new(),
+            }
+        }
+    }
+
+    impl crate::ports::EvidenceStore for DispatchStore {
+        forbidden_port_calls! {
+            fn record(&mut self, evidence: Evidence) -> Result<(), StoreError>;
+            fn evidence_for(&self, candidate: &CandidateRef) -> Result<Vec<Evidence>, StoreError>;
+            fn evidence_for_attempt( &self, task_id: TaskId, attempt_id: AttemptId, ) -> Result<Vec<Evidence>, StoreError>;
+        }
+    }
+    impl crate::ports::RoutingFeedbackStore for DispatchStore {
+        fn record_outcome(&mut self, _key: &FeedbackKey, _success: bool) -> Result<(), StoreError> {
+            Ok(())
+        }
+        fn counters(&self, _key: &FeedbackKey) -> Result<FeedbackCounters, StoreError> {
+            Ok(FeedbackCounters::default())
+        }
+    }
+    impl crate::ports::EventLog for DispatchStore {
+        fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
+            self.events.push(record);
+            Ok(())
+        }
+        fn records_for_graph(&self, graph_id: &str) -> Result<Vec<TransitionRecord>, StoreError> {
+            Ok(self
+                .events
+                .iter()
+                .filter(|record| record.graph_id == graph_id)
+                .cloned()
+                .collect())
+        }
+    }
+    impl crate::ports::QuotaStore for DispatchStore {
+        fn load_quota(&self, _harness: &str) -> Result<QuotaState, StoreError> {
+            Ok(QuotaState::default())
+        }
+        fn save_quota(&mut self, _harness: &str, _state: &QuotaState) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+    impl RunStore for DispatchStore {
+        fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError> {
+            Ok((self.run.graph_id == graph_id).then(|| self.run.clone()))
+        }
+        fn next_attempt_id(&self) -> Result<AttemptId, StoreError> {
+            Ok(AttemptId(1))
+        }
+        fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
+            if let Some(existing) = self
+                .attempts
+                .iter_mut()
+                .find(|saved| saved.attempt_id == row.attempt_id)
+            {
+                *existing = row.clone();
+            } else {
+                self.attempts.push(row.clone());
+            }
+            Ok(())
+        }
+        fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts
+                .iter()
+                .find(|row| row.attempt_id == attempt_id)
+                .cloned())
+        }
+        fn attempts_for_task(
+            &self,
+            graph_id: &str,
+            task_id: TaskId,
+        ) -> Result<Vec<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts
+                .iter()
+                .filter(|row| row.graph_id == graph_id && row.task_id == task_id)
+                .cloned()
+                .collect())
+        }
+        fn latest_attempt_for_task(
+            &self,
+            graph_id: &str,
+            task_id: TaskId,
+        ) -> Result<Option<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts_for_task(graph_id, task_id)?
+                .into_iter()
+                .max_by_key(|row| row.attempt_id.0))
+        }
+        fn update_attempt_pid(
+            &mut self,
+            attempt_id: AttemptId,
+            pid: Option<u32>,
+            image_name: Option<&str>,
+        ) -> Result<(), StoreError> {
+            let row = self
+                .attempts
+                .iter_mut()
+                .find(|saved| saved.attempt_id == attempt_id)
+                .ok_or_else(|| StoreError::Corrupt("attempt missing".into()))?;
+            row.pid = pid;
+            row.image_name = image_name.map(str::to_string);
+            Ok(())
+        }
+        fn update_attempt_pane(
+            &mut self,
+            attempt_id: AttemptId,
+            pane_id: Option<&str>,
+        ) -> Result<(), StoreError> {
+            let row = self
+                .attempts
+                .iter_mut()
+                .find(|saved| saved.attempt_id == attempt_id)
+                .ok_or_else(|| StoreError::Corrupt("attempt missing".into()))?;
+            row.pane_id = pane_id.map(str::to_string);
+            Ok(())
+        }
+        forbidden_port_calls! {
+            fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
+            fn save_run_and_events( &mut self, row: &RunRow, events: &[TransitionRecord], ) -> Result<(), StoreError>;
+            fn latest_run(&self) -> Result<Option<RunRow>, StoreError>;
+            fn list_runs(&self) -> Result<Vec<RunRow>, StoreError>;
+            fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError>;
+            fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError>;
+        }
+    }
+    impl crate::workspace::WorkspaceLedger for DispatchStore {
+        forbidden_port_calls! {
+            fn bind_repository(&mut self, fence: &dyn RepositoryFence) -> Result<(), StoreError>;
+            fn repository(&self, id: &LifecycleId) -> Result<Option<RepositoryRecord>, StoreError>;
+            fn register_root( &mut self, fence: &dyn RepositoryFence, alias: &RootAlias, ) -> Result<(), StoreError>;
+            fn insert_generation( &mut self, fence: &dyn RepositoryFence, record: &GenerationRecord, ) -> Result<(), StoreError>;
+            fn generation(&self, id: &LifecycleId) -> Result<Option<GenerationRecord>, StoreError>;
+            fn generations( &self, repository: &LifecycleId, graph: &GraphId, ) -> Result<Vec<GenerationRecord>, StoreError>;
+            fn insert_artifacts( &mut self, fence: &dyn RepositoryFence, records: &[ArtifactRecord], dependencies: &[ArtifactDependency], ) -> Result<(), StoreError>;
+            fn artifact(&self, id: &LifecycleId) -> Result<Option<ArtifactRecord>, StoreError>;
+            fn dependencies(&self, artifact: &LifecycleId) -> Result<Vec<ArtifactDependency>, StoreError>;
+            fn append_fact( &mut self, fence: &dyn RepositoryFence, fact: &LifecycleFact, ) -> Result<(), StoreError>;
+            fn facts(&self, artifact: &LifecycleId) -> Result<Vec<LifecycleFact>, StoreError>;
+            fn append_journal( &mut self, fence: &dyn RepositoryFence, entry: &JournalEntry, ) -> Result<(), StoreError>;
+            fn journal(&self, artifact: &LifecycleId) -> Result<Vec<JournalEntry>, StoreError>;
+        }
+    }
+    impl crate::workspace::RuntimeLedger for DispatchStore {
+        fn legacy_ownership_unresolved(&self, _: &GraphId) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError> {
+            assert!(GraphId::new(graph.as_str()).is_ok());
+            Ok(None)
+        }
+        forbidden_port_calls! {
+            fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError>;
+            fn generation_initial_revision( &self, scope: &ExecutionScope, ) -> Result<Option<LifecycleId>, StoreError>;
+            fn project_revision( &mut self, fence: &dyn RepositoryFence, graph: &GraphId, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn record_scoped_evidence( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, evidence: &meshloop_domain::evidence::Evidence, ) -> Result<(), StoreError>;
+            fn scoped_evidence( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<meshloop_domain::evidence::Evidence>, StoreError>;
+            fn artifacts(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactRecord>, StoreError>;
+            fn bind_artifact( &mut self, fence: &dyn RepositoryFence, binding: &ArtifactBinding, ) -> Result<(), StoreError>;
+            fn artifact_bindings(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactBinding>, StoreError>;
+            fn create_run_binding( &mut self, fence: &dyn RepositoryFence, binding: &RunBinding, ) -> Result<(), StoreError>;
+            fn create_provisional( &mut self, fence: &dyn RepositoryFence, owner: &ProvisionalOwner, ) -> Result<(), StoreError>;
+            fn provisionals(&self, repository: &LifecycleId) -> Result<Vec<ProvisionalOwner>, StoreError>;
+            fn promote_provisional( &mut self, fence: &dyn RepositoryFence, promotion: &ProvisionalPromotion, ) -> Result<(), StoreError>;
+            fn append_revision( &mut self, fence: &dyn RepositoryFence, revision: &PlanRevisionSnapshot, ) -> Result<(), StoreError>;
+            fn revision(&self, id: &LifecycleId) -> Result<Option<PlanRevisionSnapshot>, StoreError>;
+            fn authorize_revision( &mut self, fence: &dyn RepositoryFence, authorization: &RevisionAuthorization, ) -> Result<(), StoreError>;
+            fn authorizations( &self, revision: &LifecycleId, ) -> Result<Vec<RevisionAuthorization>, StoreError>;
+            fn activate_generation( &mut self, fence: &dyn RepositoryFence, activation: &GenerationActivation, ) -> Result<(), StoreError>;
+            fn select_revision( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn resolve_scope( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Option<ExecutionScope>, StoreError>;
+            fn scoped_events( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredEvent>, StoreError>;
+            fn append_scoped_event( &mut self, fence: &dyn RepositoryFence, event: &ScopedEvent, ) -> Result<(), StoreError>;
+            fn reserve_attempt( &mut self, fence: &dyn RepositoryFence, reservation: &AttemptReservation, ) -> Result<ScopedAttempt, StoreError>;
+            fn update_scoped_attempt( &mut self, fence: &dyn RepositoryFence, attempt: &ScopedAttempt, ) -> Result<(), StoreError>;
+            fn scoped_attempts( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredAttempt>, StoreError>;
+            fn append_operation( &mut self, fence: &dyn RepositoryFence, operation: &ProducerOperation, ) -> Result<(), StoreError>;
+            fn operations( &self, repository: &LifecycleId, scope: Option<&ExecutionScope>, ) -> Result<Vec<ProducerOperation>, StoreError>;
+            fn append_operation_step( &mut self, fence: &dyn RepositoryFence, step: &OperationStep, ) -> Result<(), StoreError>;
+            fn operation_steps(&self, id: &LifecycleId) -> Result<Vec<OperationStep>, StoreError>;
+            fn register_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn update_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn drivers(&self, repository: &LifecycleId) -> Result<Vec<DriverRecord>, StoreError>;
+            fn cancellation_requests( &self, driver: &LifecycleId, ) -> Result<Vec<CancellationObservation>, StoreError>;
+            fn acknowledge_cancellation( &mut self, fence: &dyn RepositoryFence, id: &LifecycleId, status: CancellationStatus, ) -> Result<(), StoreError>;
+        }
+    }
+
+    #[test]
+    fn dispatch_stores_process_image_not_the_harness_key() {
+        let harness = ClaudeImage;
+        let workspace = QuietWorkspace;
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        let mut run = RunLoop {
+            harnesses: HashMap::from([("claude".into(), &harness as &dyn HarnessCapabilities)]),
+            candidates: vec![Candidate {
+                harness: "claude".into(),
+                model_ref: "claude-sonnet".into(),
+                model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+            }],
+            workspace: &workspace,
+            store: &mut store,
+            processes: &other,
+            checks: &other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(30),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: false,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![meshloop_domain::task_graph::TaskNode {
+                id: TaskId(1),
+                description: "worker".into(),
+                depends_on: vec![],
+                tier: None,
+                allowed_paths: vec![],
+                empty_diff_ok: false,
+                deliverable: None,
+            }],
+        };
+        let tick = run
+            .dispatch_ready("g", &graph, TaskId(1))
+            .expect("dispatch");
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::AttemptStarted,
+                    to: TaskState::Running,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        let row = store
+            .load_attempt(AttemptId(1))
+            .expect("load")
+            .expect("attempt row");
+        assert_eq!(row.harness.as_deref(), Some("claude"));
+        assert_eq!(row.pid, Some(44900));
+        assert_eq!(row.image_name.as_deref(), Some("node.exe"));
+        assert_ne!(row.image_name.as_deref(), Some("claude"));
+        assert!(
+            store
+                .events
+                .iter()
+                .all(|event| event.event != Event::HarnessCrashedOrTimeout)
+        );
     }
 }

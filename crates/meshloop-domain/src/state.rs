@@ -88,6 +88,8 @@ pub fn transition(from: TaskState, event: Event) -> Result<TaskState, IllegalTra
         (Accepted, StaleBaseDetected) => Failed,
         (Failed, RetryAuthorized) => Ready,
         (Failed, LiveWorkerSettled) => Verifying,
+        // Late exit after a crash or timeout: keep the failure, but store the event (#62).
+        (Failed, HarnessExited) => Failed,
         (Blocked, DependencyCleared) => Pending,
         (Ready, GraphMutated) => Pending,
         (Pending, GraphMutated) => Pending,
@@ -137,6 +139,7 @@ mod tests {
         (Accepted, StaleBaseDetected, Failed),
         (Failed, RetryAuthorized, Ready),
         (Failed, LiveWorkerSettled, Verifying),
+        (Failed, HarnessExited, Failed),
         (Blocked, DependencyCleared, Pending),
         (Ready, GraphMutated, Pending),
         (Pending, GraphMutated, Pending),
