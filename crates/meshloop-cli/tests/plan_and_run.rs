@@ -1919,6 +1919,169 @@ fn run_concurrent_workers_executes_parallel_tasks() {
     fs::remove_dir_all(&dir).ok();
 }
 
+fn write_overlap_config(dir: &Path, concurrency: u32, verify_log: &Path) -> PathBuf {
+    let config_path = dir.join("meshloop.toml");
+    let fixture = fixture_path().replace('\\', "\\\\");
+    let log = verify_log.to_string_lossy().replace('\\', "\\\\");
+    let contents = format!(
+        r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = {concurrency}
+max_retries = 1
+task_timeout_seconds = 60
+
+[verify]
+verify_command = ["{fixture}", "--record-verify", "{log}", "1500"]
+
+[harnesses.fixture]
+executable = "{fixture}"
+version_args = ["--version"]
+invoke_args_template = ["--prompt-file", "{{prompt_file}}", "2000"]
+model_ref = "fixture-model"
+model_tier = "top"
+"#
+    );
+    fs::write(&config_path, contents).unwrap();
+    config_path
+}
+
+fn event_types(db: &Path, graph_id: &str) -> Vec<(i64, String)> {
+    let conn = sqlite(db);
+    let mut stmt = conn
+        .prepare("SELECT task_id, event_type FROM events WHERE graph_id = ?1 ORDER BY event_id")
+        .expect("prepare events");
+    stmt.query_map([graph_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query events")
+        .map(|row| row.expect("event row"))
+        .collect()
+}
+
+fn verify_marks(log: &str) -> Vec<(u64, u64)> {
+    let mut open: Option<u64> = None;
+    let mut pairs = Vec::new();
+    for line in log.lines().filter(|line| !line.is_empty()) {
+        let mut parts = line.split_whitespace();
+        match (
+            parts.next(),
+            parts.next().and_then(|value| value.parse().ok()),
+        ) {
+            (Some("start"), Some(start)) => {
+                assert!(open.is_none(), "nested verify start: {log}");
+                open = Some(start);
+            }
+            (Some("end"), Some(end)) => {
+                let start = open
+                    .take()
+                    .unwrap_or_else(|| panic!("end without start: {log}"));
+                pairs.push((start, end));
+            }
+            _ => panic!("bad verify line {line:?} in:\n{log}"),
+        }
+    }
+    assert!(open.is_none(), "unclosed verify: {log}");
+    pairs
+}
+
+/// Two independent nodes. The harness sleeps before it exits; `verify_command`
+/// records its start, sleeps, then records its end. `started_at` is whole seconds.
+fn assert_verify_dispatch_order(concurrency: u32) {
+    let dir = disposable_repo(&format!("verify-overlap-{concurrency}"));
+    let log_path = dir.join("verify.log");
+    let config_path = write_overlap_config(&dir, concurrency, &log_path);
+    let plan_path = dir.join("plan.json");
+    let db_path = dir.join(".meshloop").join("state.sqlite");
+    let worktree_base = dir.join("worktrees");
+    let graph_id = format!("g-overlap-{concurrency}");
+    fs::create_dir_all(dir.join(".meshloop")).unwrap();
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"{graph_id}","nodes":[{{"id":1,"description":"first","depends_on":[],"tier":null}},{{"id":2,"description":"second","depends_on":[],"tier":null}}]}}"#
+        ),
+    )
+    .unwrap();
+
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args(["--accept-plan", "--config"])
+        .arg(&config_path)
+        .args(["--worktree-base"])
+        .arg(&worktree_base)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("run overlap");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "concurrency={concurrency} stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let started = |task: i64| -> u64 {
+        let value: String = sqlite(&db_path)
+            .query_row(
+                "SELECT started_at FROM attempts WHERE graph_id = ?1 AND task_id = ?2",
+                rusqlite::params![graph_id.as_str(), task],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|err| panic!("started_at task {task}: {err}\n{stdout}\n{stderr}"));
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("bad started_at {value}"))
+    };
+    let first = started(1);
+    let second = started(2);
+    let log = fs::read_to_string(&log_path).unwrap_or_else(|err| panic!("verify log: {err}"));
+    let marks = verify_marks(&log);
+    assert_eq!(marks.len(), 2, "verify log:\n{log}");
+    let events = event_types(&db_path, &graph_id);
+    let attempt2 = events
+        .iter()
+        .position(|(task, event)| *task == 2 && event == "AttemptStarted")
+        .unwrap_or_else(|| panic!("missing attempt 2: {events:?}"));
+    let checks1 = events
+        .iter()
+        .position(|(task, event)| *task == 1 && event == "DeterministicChecksPassed")
+        .unwrap_or_else(|| panic!("missing checks for task 1: {events:?}"));
+    if concurrency > 1 {
+        assert!(
+            attempt2 < checks1,
+            "second attempt must be logged before the first check: {events:?}"
+        );
+        assert!(
+            first < marks[0].0 && second < marks[0].0,
+            "both started_at ({first}, {second}) must be earlier than verify start {}: {log}",
+            marks[0].0
+        );
+    } else {
+        assert!(
+            checks1 < attempt2,
+            "second attempt must wait until the first check is logged: {events:?}"
+        );
+        assert!(
+            second >= marks[0].1,
+            "task 2 started_at {second} is before verify end {}: {log}",
+            marks[0].1
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn two_workers_start_before_the_first_verification() {
+    assert_verify_dispatch_order(2);
+}
+
+#[test]
+fn one_worker_starts_the_next_attempt_only_after_verification() {
+    assert_verify_dispatch_order(1);
+}
+
 #[test]
 fn mutate_plan_inserts_prerequisite_and_resumes_to_completion() {
     let dir = disposable_repo("mutate_insert");
@@ -3809,6 +3972,7 @@ fn scripted_owned_plan(
         worktree_base: root,
         active_graph: None,
         planner: meshloop_engine::run_loop::PlannerSelection::default(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     let result = run.plan("private-objective-marker", "scope", &mut lease);
     (result, harness.prompts.into_inner().unwrap())

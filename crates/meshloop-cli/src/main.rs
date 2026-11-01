@@ -462,6 +462,7 @@ fn cmd_plan(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     eprintln!(
         "meshloop:plan probing {} harness(es) in parallel (timeout {}s)",
@@ -660,6 +661,7 @@ fn cmd_review_plan(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
 
     let mut graph = graph;
@@ -895,6 +897,7 @@ fn cmd_run(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     if json {
         eprintln!(
@@ -1131,6 +1134,7 @@ fn with_saga(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     f(&mut saga)
 }
@@ -1216,6 +1220,7 @@ fn with_read_only_saga(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     f(&mut saga)
 }
@@ -2816,6 +2821,7 @@ fn cmd_mutate_plan(
         worktree_base: composed.worktree_base.clone(),
         active_graph: None,
         planner: composed.planner.clone(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
 
     let graph_id = match graph_arg {
