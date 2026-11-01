@@ -777,6 +777,7 @@ fn with_reader<T>(
         worktree_base: fixture.base.join("unused"),
         active_graph: None,
         planner: Default::default(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     observe(&saga)
 }

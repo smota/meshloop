@@ -1620,6 +1620,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         worktree_base: tmp_repo.join("worktrees"),
         active_graph: None,
         planner: Default::default(),
+        pending_outcomes: std::collections::HashMap::new(),
     };
 
     #[derive(PartialEq, Eq, Debug)]

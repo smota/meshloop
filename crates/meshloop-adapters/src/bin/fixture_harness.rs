@@ -2,6 +2,7 @@
 //! "a fixture/stub harness binary in test fixtures"). Never used against a real subscription.
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 fn main() {
@@ -134,7 +135,32 @@ fn main() {
         }
         Some("--prompt-file") => {
             let path = args.get(1).expect("fixture requires a prompt file path");
+            if let Some(ms) = args.get(2).and_then(|value| value.parse::<u64>().ok()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             deliver_prompt_file(path);
+        }
+        Some("--record-verify") => {
+            let log = args.get(1).expect("verify log path");
+            let ms: u64 = args
+                .get(2)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1500);
+            let now = || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or(0)
+            };
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .expect("verify log");
+            writeln!(file, "start {}", now()).expect("verify start");
+            file.flush().expect("flush verify start");
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            writeln!(file, "end {}", now()).expect("verify end");
         }
         Some(arg) if arg.starts_with("--prompt-file=") => {
             let path = arg.strip_prefix("--prompt-file=").expect("prefix matched");

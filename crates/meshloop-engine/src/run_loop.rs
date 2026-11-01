@@ -167,6 +167,9 @@ pub struct RunLoop<'a> {
     pub worktree_base: PathBuf,
     pub active_graph: Option<String>,
     pub planner: PlannerSelection,
+    /// Stdout/stderr from `HarnessExited` in this process. A later tick passes it to
+    /// `verify_attempt`. A new process has no entry and uses `recover_verifying` (#60).
+    pub pending_outcomes: HashMap<AttemptId, HarnessOutcome>,
 }
 
 /// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
@@ -776,9 +779,6 @@ impl<'a> RunLoop<'a> {
         if let Some(tick) = self.reattach_running(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
-        if let Some(tick) = self.recover_verifying(&graph_id, &graph, &tasks)? {
-            return Ok(tick);
-        }
         if let Some(tick) = self.harvest_live_failures(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
@@ -806,8 +806,12 @@ impl<'a> RunLoop<'a> {
             .nodes
             .iter()
             .any(|n| tasks.get(&n.id) == Some(&TaskState::Running));
+        let any_verifying = graph
+            .nodes
+            .iter()
+            .any(|n| tasks.get(&n.id) == Some(&TaskState::Verifying));
 
-        if any_awaiting && !any_ready && !any_accepted && !any_running {
+        if any_awaiting && !any_ready && !any_accepted && !any_running && !any_verifying {
             return Ok(Tick::Idle {
                 reason: IdleReason::AwaitingHumanAcceptance,
             });
@@ -830,6 +834,38 @@ impl<'a> RunLoop<'a> {
             .map(|n| n.id)
             .collect();
 
+        // `verify_command` blocks the tick. A free slot is filled before that, and
+        // `Verifying` holds a slot so `max_concurrent_workers = 1` stays serial (#67).
+        let occupied = graph
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    tasks.get(&n.id),
+                    Some(TaskState::Running | TaskState::Verifying)
+                )
+            })
+            .count();
+        let capacity = self.limits.max_concurrent_workers as usize;
+        if !ready.is_empty() && occupied < capacity {
+            for id in ready.iter().copied() {
+                match self.dispatch_ready(&graph_id, &graph, id)? {
+                    Tick::Idle {
+                        reason: IdleReason::NoCapableCandidate,
+                    } => continue,
+                    other => return Ok(other),
+                }
+            }
+            if let Some(tick) = self.verify_deferred(&graph_id, &graph, &tasks)? {
+                return Ok(tick);
+            }
+            return Ok(Tick::Idle {
+                reason: IdleReason::NoCapableCandidate,
+            });
+        }
+        if let Some(tick) = self.verify_deferred(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
         if ready.is_empty() {
             if graph
                 .nodes
@@ -849,28 +885,8 @@ impl<'a> RunLoop<'a> {
                 reason: IdleReason::FailedTerminal,
             });
         }
-
-        let running_count = graph
-            .nodes
-            .iter()
-            .filter(|n| tasks.get(&n.id) == Some(&TaskState::Running))
-            .count();
-        if running_count >= self.limits.max_concurrent_workers as usize {
-            return Ok(Tick::Idle {
-                reason: IdleReason::WaitingOnLiveWorker,
-            });
-        }
-
-        for id in ready {
-            match self.dispatch_ready(&graph_id, &graph, id)? {
-                Tick::Idle {
-                    reason: IdleReason::NoCapableCandidate,
-                } => continue,
-                other => return Ok(other),
-            }
-        }
         Ok(Tick::Idle {
-            reason: IdleReason::NoCapableCandidate,
+            reason: IdleReason::WaitingOnLiveWorker,
         })
     }
 
@@ -953,38 +969,12 @@ impl<'a> RunLoop<'a> {
                     let handle = Self::attempt_handle(&attempt, self.resolve_pane(&attempt));
                     match h.try_collect(&handle) {
                         Ok(Some(outcome)) => {
-                            let rec = self.append(
+                            let tick = self.defer_harness_exit(
                                 graph_id,
                                 node.id,
-                                Some(attempt.attempt_id),
-                                TaskState::Running,
-                                Event::HarnessExited,
-                                Some("reattach: live pane settled".into()),
-                            )?;
-                            let _ = rec;
-                            let tier = node.tier.unwrap_or(Tier::Tier2);
-                            let candidate = Candidate {
-                                harness: name,
-                                model_ref: attempt.model_ref.clone().unwrap_or_default(),
-                                model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
-                            };
-                            let wt = attempt.worktree_path.clone().unwrap_or_default();
-                            let start = attempt
-                                .outcome
-                                .as_deref()
-                                .and_then(|s| s.strip_prefix("base:"))
-                                .unwrap_or("")
-                                .to_string();
-                            let tick = self.verify_attempt(
-                                graph_id,
-                                graph,
-                                node,
                                 attempt.attempt_id,
-                                &wt,
-                                &start,
-                                tier,
-                                &candidate,
-                                &outcome,
+                                outcome,
+                                Some("reattach: live pane settled".into()),
                             )?;
                             return Ok(Some(tick));
                         }
@@ -1427,19 +1417,7 @@ impl<'a> RunLoop<'a> {
                         self.maybe_fallback(graph_id, task_id, fail, &selected)
                     }
                     Ok(Some(outcome)) => {
-                        let rec = self.append(
-                            graph_id,
-                            task_id,
-                            Some(attempt_id),
-                            TaskState::Running,
-                            Event::HarnessExited,
-                            None,
-                        )?;
-                        let _ = rec;
-                        self.verify_attempt(
-                            graph_id, graph, node, attempt_id, &wt, &start, tier, &candidate,
-                            &outcome,
-                        )
+                        self.defer_harness_exit(graph_id, task_id, attempt_id, outcome, None)
                     }
                     Ok(None) => Ok(Tick::Transition {
                         task: task_id,
@@ -1646,6 +1624,91 @@ impl<'a> RunLoop<'a> {
                     u8::from(fidelity_ok)
                 ),
             }));
+    }
+
+    /// Record `HarnessExited` and return. The blocking check runs on a later tick.
+    fn defer_harness_exit(
+        &mut self,
+        graph_id: &str,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        outcome: HarnessOutcome,
+        reason: Option<String>,
+    ) -> Result<Tick, OrchestratorError> {
+        let rec = self.append(
+            graph_id,
+            task_id,
+            Some(attempt_id),
+            TaskState::Running,
+            Event::HarnessExited,
+            reason,
+        )?;
+        self.pending_outcomes.insert(attempt_id, outcome);
+        Ok(Tick::Transition {
+            task: task_id,
+            attempt: Some(attempt_id),
+            from: rec.from,
+            to: rec.to,
+            event: rec.event,
+        })
+    }
+
+    /// One `Verifying` task, after no further `Ready` node can be dispatched.
+    /// An exit still held in memory uses `verify_attempt`. Otherwise the #60
+    /// orphan path re-runs checks in the existing worktree.
+    fn verify_deferred(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        let mut staged: Option<(TaskId, AttemptRow, HarnessOutcome)> = None;
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::Verifying) {
+                continue;
+            }
+            let Some(attempt) = self.store.latest_attempt_for_task(graph_id, node.id)? else {
+                continue;
+            };
+            if let Some(outcome) = self.pending_outcomes.remove(&attempt.attempt_id) {
+                staged = Some((node.id, attempt, outcome));
+                break;
+            }
+        }
+        if let Some((task_id, attempt, outcome)) = staged {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|n| n.id == task_id)
+                .ok_or_else(|| OrchestratorError::Illegal("missing node".into()))?;
+            let tier = node.tier.unwrap_or(Tier::Tier2);
+            let candidate = Candidate {
+                harness: attempt.harness.clone().unwrap_or_default(),
+                model_ref: attempt.model_ref.clone().unwrap_or_default(),
+                model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+            };
+            let wt = attempt.worktree_path.clone().unwrap_or_default();
+            let start = attempt
+                .outcome
+                .as_deref()
+                .and_then(|value| value.strip_prefix("base:"))
+                .unwrap_or("")
+                .to_string();
+            return self
+                .verify_attempt(
+                    graph_id,
+                    graph,
+                    node,
+                    attempt.attempt_id,
+                    &wt,
+                    &start,
+                    tier,
+                    &candidate,
+                    &outcome,
+                )
+                .map(Some);
+        }
+        self.recover_verifying(graph_id, graph, tasks)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1932,6 +1995,7 @@ impl<'a> RunLoop<'a> {
                 "resume --restart requires a PlanAccepted graph".into(),
             ));
         }
+        self.pending_outcomes.clear();
         let attempts = self.store.attempts_for_graph(graph_id)?;
         for attempt in &attempts {
             if let Some(name) = &attempt.harness
@@ -2997,6 +3061,7 @@ mod tests {
             )),
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
         }
     }
     fn admission_graph() -> TaskGraph {
@@ -3530,6 +3595,7 @@ mod tests {
             worktree_base: std::env::temp_dir(),
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
         }
     }
 
@@ -3636,6 +3702,7 @@ mod tests {
             worktree_base: std::env::temp_dir(),
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
         }
     }
 
@@ -3995,6 +4062,7 @@ mod tests {
             worktree_base: std::env::temp_dir(),
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
         };
         let graph = TaskGraph {
             graph_id: "g".into(),

@@ -2043,6 +2043,7 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
         worktree_base: worktrees,
         active_graph: None,
         planner: meshloop_engine::run_loop::PlannerSelection::Harness("fixture".into()),
+        pending_outcomes: std::collections::HashMap::new(),
     };
     assert!(loop_.plan("fixture", "fixture", &mut lease).is_ok());
     let request = harness.request.lock().unwrap().clone().unwrap();
