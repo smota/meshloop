@@ -294,6 +294,10 @@ struct RepairTick {
     revision: String,
 }
 
+/// How often a live driver rewrites its store heartbeat. Status does not wait this
+/// long to report a dead PID as lost.
+pub const DRIVER_HEARTBEAT: Duration = Duration::from_secs(5);
+
 /// Liveness for display (`status`/`inspect`): widens the owned view with an OS-level probe
 /// for detached workers another process owns. Recovery must keep using the owned view, where
 /// `Dead` means "this process cannot collect it".
@@ -1866,7 +1870,18 @@ impl<'a> RunLoop<'a> {
     }
 
     pub fn loop_until_idle(&mut self) -> Result<IdleReason, OrchestratorError> {
+        let mut heartbeat_at = std::time::Instant::now();
         loop {
+            if heartbeat_at.elapsed() >= DRIVER_HEARTBEAT {
+                heartbeat_at = std::time::Instant::now();
+                if let Some(graph_id) = self.active_graph.clone()
+                    && let Ok(Some(_)) = self.store.load_driver(&graph_id)
+                {
+                    let _ =
+                        self.store
+                            .record_driver_heartbeat(&graph_id, std::process::id(), &stamp());
+                }
+            }
             match self.tick()? {
                 Tick::Idle {
                     reason: IdleReason::WaitingOnLiveWorker,

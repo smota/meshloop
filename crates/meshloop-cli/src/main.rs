@@ -6,6 +6,7 @@ mod args;
 mod compose;
 mod config;
 mod context_tools;
+mod driver_liveness;
 mod gitignore;
 mod json_out;
 mod mcp;
@@ -21,7 +22,7 @@ use meshloop_domain::state::{PlanDecision, PlanState, TaskState};
 use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
 use meshloop_engine::ports::{HarnessCapabilities, RunStore, WorkspacePort};
 use meshloop_engine::router::Router;
-use meshloop_engine::run_loop::{OrchestratorError, RunLoop, idle_exit_code};
+use meshloop_engine::run_loop::{OrchestratorError, RunLoop, RunStatus, idle_exit_code};
 
 use crate::args::{Command, Invocation};
 
@@ -845,7 +846,7 @@ fn cmd_run(
     let root = repo_root();
     let mut composed = match compose::compose(compose::ComposeRequest {
         config: &cfg,
-        repo_root: root,
+        repo_root: root.clone(),
         db_path: db.as_deref(),
         worktree_base: worktree_base.clone(),
         origin: origin.clone(),
@@ -984,7 +985,21 @@ fn cmd_run(
         if fixture_only {
             cmd.arg("--fixture-only");
         }
-        match meshloop_adapters::process::spawn_detached(cmd) {
+        let log_path = driver_liveness::driver_log_path(&root, db.as_deref(), &gid);
+        let log_path = match driver_liveness::prepare_log(&log_path) {
+            Ok(path) => path,
+            Err(e) => {
+                let message = format!("Failed to open driver log: {e}");
+                if json {
+                    println!("{}", json_out::err("meshloop:run", origin, message));
+                } else {
+                    eprintln!("{message}");
+                }
+                return ExitCode::from(1);
+            }
+        };
+        cmd.env(driver_liveness::LOG_ENV, &log_path);
+        match meshloop_adapters::process::spawn_detached(cmd, &log_path) {
             Ok(_) => {
                 if json {
                     println!(
@@ -997,11 +1012,13 @@ fn cmd_run(
                                 "graph_id": gid,
                                 "status": "running",
                                 "detached": true,
+                                "driver_log": log_path.display().to_string(),
                             }),
                         )
                     );
                 } else {
                     println!("Detached session started: {gid}");
+                    println!("driver log: {}", log_path.display());
                 }
                 return ExitCode::SUCCESS;
             }
@@ -1372,44 +1389,37 @@ fn cmd_status(
                 let s = &frame.status;
                 if json {
                     let summary = frame.summary;
-                    println!(
-                        "{}",
-                        json_out::ok(
-                            "meshloop:status",
-                            origin.clone(),
-                            serde_json::json!({
-                                "graph_id": s.graph_id,
-                                "generation_id": frame.generation_id,
-                                "revision_id": frame.revision_id,
-                                "git_export_unavailable": frame.generation_id.as_ref().map(|_| meshloop_engine::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE),
-                                "summary": {
-                                    "attempts": summary.attempts,
-                                    "retries": summary.retries,
-                                    "worker_wall_seconds": summary.worker_wall_seconds,
-                                },
-                                "plan_state": format!("{:?}", s.plan_state),
-                                "nodes": s.nodes.iter().map(|n| serde_json::json!({
-                                    "id": n.task_id.0,
-                                    "state": format!("{:?}", n.state),
-                                    "description": n.description,
-                                    "pane_id": n.pane_id,
-                                    "live": n.live,
-                                    "location": frame.locations.get(&n.task_id),
-                                    "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
-                                    "note": n.note,
-                                    "waiting_for": n.waiting_for.map(|w| w.as_str()),
-                                    "deliverable": n.deliverable,
-                                    "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
-                                })).collect::<Vec<_>>(),
-                            }),
-                        )
-                    );
+                    let mut data = serde_json::json!({
+                        "graph_id": s.graph_id,
+                        "generation_id": frame.generation_id,
+                        "revision_id": frame.revision_id,
+                        "git_export_unavailable": frame.generation_id.as_ref().map(|_| meshloop_engine::workspace::read::BOUND_GIT_EXPORT_UNAVAILABLE),
+                        "summary": {
+                            "attempts": summary.attempts,
+                            "retries": summary.retries,
+                            "worker_wall_seconds": summary.worker_wall_seconds,
+                        },
+                        "plan_state": format!("{:?}", s.plan_state),
+                        "nodes": s.nodes.iter().map(|n| serde_json::json!({
+                            "id": n.task_id.0,
+                            "state": format!("{:?}", n.state),
+                            "description": n.description,
+                            "pane_id": n.pane_id,
+                            "live": n.live,
+                            "location": frame.locations.get(&n.task_id),
+                            "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                            "note": n.note,
+                            "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                            "deliverable": n.deliverable,
+                            "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
+                        })).collect::<Vec<_>>(),
+                    });
+                    attach_driver_json(&mut data, saga, s);
+                    println!("{}", json_out::ok("meshloop:status", origin.clone(), data));
                 } else {
-                    print!(
-                        "{}{}",
-                        report::format_read_scope(&frame),
-                        report::format_status(s)
-                    );
+                    print!("{}", report::format_read_scope(&frame));
+                    print_driver(saga, s);
+                    print!("{}", report::format_status(s));
                 }
                 ExitCode::SUCCESS
             }
@@ -1455,18 +1465,39 @@ fn cmd_resume(
             eprintln!("{message}");
             return ExitCode::from(1);
         }
+        let tracked = std::env::var_os(driver_liveness::LOG_ENV);
+        if let Some(log) = &tracked {
+            if let Err(error) =
+                driver_liveness::register(saga.store, &id, std::path::Path::new(log))
+            {
+                eprintln!("driver liveness: {error:?}");
+                return ExitCode::from(1);
+            }
+            driver_liveness::panic_if_requested(fixture_only);
+        }
         match saga.resume(&id, retry, restart) {
             Ok(reason) => {
                 let status = saga.status(&id).ok();
+                let code = status
+                    .as_ref()
+                    .map(|s| idle_exit_code(reason, s))
+                    .unwrap_or(1);
+                if tracked.is_some() {
+                    driver_liveness::finish(saga.store, &id, code);
+                }
                 println!("{}", report::format_idle(reason, status.as_ref()));
                 if let Some(s) = &status {
+                    print_driver(saga, s);
                     print!("{}", report::format_status(s));
-                    ExitCode::from(idle_exit_code(reason, s) as u8)
+                    ExitCode::from(code as u8)
                 } else {
                     ExitCode::SUCCESS
                 }
             }
             Err(e) => {
+                if tracked.is_some() {
+                    driver_liveness::finish(saga.store, &id, 1);
+                }
                 eprintln!("resume failed: {e:?}");
                 ExitCode::from(1)
             }
@@ -1562,6 +1593,23 @@ fn cmd_cancel(
     })
 }
 
+fn attach_driver_json(data: &mut serde_json::Value, saga: &RunLoop<'_>, status: &RunStatus) {
+    let Some(report) = driver_liveness::observe(saga.store, saga.processes, status) else {
+        return;
+    };
+    data["driver"] = serde_json::Value::String(report.label);
+    data["driver_log"] = serde_json::Value::String(report.log_path);
+    if report.suggest_resume {
+        data["driver_hint"] = serde_json::Value::String("resume".into());
+    }
+}
+
+fn print_driver(saga: &RunLoop<'_>, status: &RunStatus) {
+    if let Some(report) = driver_liveness::observe(saga.store, saga.processes, status) {
+        print!("{}", report.text());
+    }
+}
+
 fn compute_overall_status(s: &meshloop_engine::run_loop::RunStatus) -> &'static str {
     if s.nodes.is_empty() {
         return "idle";
@@ -1624,32 +1672,28 @@ fn cmd_inspect(
                     if let Some(n) = s.nodes.iter().find(|n| n.task_id.0 == t) {
                         let attempts = frame.attempts.get(&n.task_id).cloned().unwrap_or_default();
                         if json {
-                            println!(
-                                "{}",
-                                json_out::ok(
-                                    "meshloop:inspect",
-                                    origin.clone(),
-                                    serde_json::json!({
-                                        "session_id": id,
-                                        "generation_id": frame.generation_id,
-                                        "revision_id": frame.revision_id,
-                                        "task_id": n.task_id.0,
-                                        "state": format!("{:?}", n.state),
-                                        "description": n.description,
-                                        "location": frame.locations.get(&n.task_id),
-                                    "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
-                                        "pane_id": n.pane_id,
-                                        "live": n.live,
-                                        "note": n.note,
-                                        "waiting_for": n.waiting_for.map(|w| w.as_str()),
-                                        "deliverable": n.deliverable,
-                                        "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
-                                        "attempts": attempts.iter().map(|a| report::scoped_attempt_json(a, &frame)).collect::<Vec<_>>(),
-                                    }),
-                                )
-                            );
+                            let mut data = serde_json::json!({
+                                "session_id": id,
+                                "generation_id": frame.generation_id,
+                                "revision_id": frame.revision_id,
+                                "task_id": n.task_id.0,
+                                "state": format!("{:?}", n.state),
+                                "description": n.description,
+                                "location": frame.locations.get(&n.task_id),
+                                "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
+                                "pane_id": n.pane_id,
+                                "live": n.live,
+                                "note": n.note,
+                                "waiting_for": n.waiting_for.map(|w| w.as_str()),
+                                "deliverable": n.deliverable,
+                                "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
+                                "attempts": attempts.iter().map(|a| report::scoped_attempt_json(a, &frame)).collect::<Vec<_>>(),
+                            });
+                            attach_driver_json(&mut data, saga, s);
+                            println!("{}", json_out::ok("meshloop:inspect", origin.clone(), data));
                         } else {
                             print!("{}", report::format_read_scope(&frame));
+                            print_driver(saga, s);
                             println!(
                                 "task {} state={:?} {} worktree={:?}",
                                 n.task_id.0, n.state, n.description, n.worktree
@@ -1700,6 +1744,7 @@ fn cmd_inspect(
                                 "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                             })).collect::<Vec<_>>(),
                         });
+                        attach_driver_json(&mut data, saga, s);
                         if with_attempts {
                             for node in data["nodes"].as_array_mut().into_iter().flatten() {
                                 let tid = TaskId(node["id"].as_u64().unwrap_or(0) as u32);
@@ -1720,11 +1765,9 @@ fn cmd_inspect(
                         }
                         println!("{}", json_out::ok("meshloop:inspect", origin.clone(), data));
                     } else {
-                        print!(
-                            "{}{}",
-                            report::format_read_scope(&frame),
-                            report::format_status(s)
-                        );
+                        print!("{}", report::format_read_scope(&frame));
+                        print_driver(saga, s);
+                        print!("{}", report::format_status(s));
                     }
                     ExitCode::SUCCESS
                 }

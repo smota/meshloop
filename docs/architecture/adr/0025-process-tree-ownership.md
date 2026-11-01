@@ -81,3 +81,15 @@ Constraints:
 **Consequences.** Only the three standard handles are covered. Other inheritable handles that the CLI itself inherited from its parent are still passed on, which is acceptable because the CLI opens none of its own as inheritable. Concurrent spawns during the window are unaffected, because std duplicates inherited stdio into fresh inheritable handles.
 
 **Verification.** `crates/meshloop-adapters/tests/process_tree.rs::detached_spawn_does_not_hold_the_callers_output_pipe` launches a fixture that detaches a 3 s sleeper and asserts that capturing the fixture's output returns in under 2 s. With the inherit-clearing disabled it fails after 3.25 s; with it, it passes.
+
+## Amendment 2026-11-01: detached stdout and stderr are a log file
+
+- Status: Accepted
+- Approval evidence: GitHub issue #61. The accepted #5 inherit-clear stays in place.
+- Executor: Grok
+
+**Context.** `spawn_detached` set stdin, stdout, and stderr to null. A `run --detach` driver that panicked or exited left no log, and `status` still reported the graph as running.
+
+**Decision.** Stdin stays null. Stdout and stderr are a log file this function opens (`.meshloop/runs/<graph_id>/driver.log`). Those handles are not the caller's pipes. On Windows, `spawn_detached` still clears `HANDLE_FLAG_INHERIT` on the caller's three standard handles for the duration of the spawn. That unsafe block is unchanged.
+
+**Verification.** `detached_spawn_does_not_hold_the_callers_output_pipe` still returns while a detached sleeper is alive. `detached_spawn_writes_stdout_and_stderr_to_the_log_file` checks both streams land in the log and not in the caller's captured output.

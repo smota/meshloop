@@ -1121,7 +1121,11 @@ mod tests {
             let launch = std::thread::spawn(move || {
                 started_send.send(()).unwrap();
                 let child = if detached {
-                    crate::process::spawn_detached(fixture_command("sleep", &other_root)).unwrap()
+                    crate::process::spawn_detached(
+                        fixture_command("sleep", &other_root),
+                        &other_root.join("detached.log"),
+                    )
+                    .unwrap()
                 } else {
                     crate::process::spawn_command(&mut fixture_command("sleep", &other_root))
                         .unwrap()

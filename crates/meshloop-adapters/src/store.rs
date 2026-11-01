@@ -11,7 +11,7 @@ use meshloop_domain::evidence::{AttemptId, CandidateRef, Evidence};
 use meshloop_domain::state::{Event, PlanState, TaskState};
 use meshloop_domain::task_graph::TaskId;
 use meshloop_engine::ports::{
-    AttemptRow, EventLog, EvidenceStore, FeedbackCounters, FeedbackKey, QuotaStore,
+    AttemptRow, DriverLiveness, EventLog, EvidenceStore, FeedbackCounters, FeedbackKey, QuotaStore,
     RoutingFeedbackStore, RunRow, RunStore, StoreError, TransitionRecord,
 };
 
@@ -834,6 +834,84 @@ impl RunStore for SqliteStore {
         Ok(())
     }
 
+    fn upsert_driver(&mut self, row: &DriverLiveness) -> Result<(), StoreError> {
+        self.reject_bound_graph(&row.graph_id)?;
+        self.conn
+            .execute(
+                "INSERT INTO run_driver_liveness
+                    (graph_id, pid, started_at, heartbeat_at, exit_code, log_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(graph_id) DO UPDATE SET
+                    pid=?2, started_at=?3, heartbeat_at=?4, exit_code=?5, log_path=?6",
+                params![
+                    row.graph_id,
+                    row.pid,
+                    row.started_at,
+                    row.heartbeat_at,
+                    row.exit_code,
+                    row.log_path,
+                ],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn record_driver_heartbeat(
+        &mut self,
+        graph_id: &str,
+        pid: u32,
+        at: &str,
+    ) -> Result<(), StoreError> {
+        self.reject_bound_graph(graph_id)?;
+        self.conn
+            .execute(
+                "UPDATE run_driver_liveness SET heartbeat_at=?1
+                 WHERE graph_id=?2 AND pid=?3 AND exit_code IS NULL",
+                params![at, graph_id, pid],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn record_driver_exit(
+        &mut self,
+        graph_id: &str,
+        pid: u32,
+        code: i32,
+        at: &str,
+    ) -> Result<(), StoreError> {
+        self.reject_bound_graph(graph_id)?;
+        self.conn
+            .execute(
+                "UPDATE run_driver_liveness SET exit_code=?1, heartbeat_at=?2
+                 WHERE graph_id=?3 AND pid=?4",
+                params![code, at, graph_id, pid],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn load_driver(&self, graph_id: &str) -> Result<Option<DriverLiveness>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT graph_id, pid, started_at, heartbeat_at, exit_code, log_path
+                 FROM run_driver_liveness WHERE graph_id=?1",
+                params![graph_id],
+                |row| {
+                    Ok(DriverLiveness {
+                        graph_id: row.get(0)?,
+                        pid: row.get::<_, i64>(1)? as u32,
+                        started_at: row.get(2)?,
+                        heartbeat_at: row.get(3)?,
+                        exit_code: row.get(4)?,
+                        log_path: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| StoreError::Io(e.to_string()))
+    }
+
     fn integrity_check(&self) -> Result<bool, StoreError> {
         Self::integrity_check(self)
     }
@@ -860,7 +938,9 @@ mod tests {
     use super::*;
     use meshloop_domain::evidence::DeterministicEvidence;
     use meshloop_domain::state::{Event, TaskState};
-    use meshloop_engine::ports::{AttemptRow, EventLog, RunStore, TierKey, TransitionRecord};
+    use meshloop_engine::ports::{
+        AttemptRow, DriverLiveness, EventLog, RunStore, TierKey, TransitionRecord,
+    };
 
     fn candidate() -> CandidateRef {
         CandidateRef {
@@ -893,6 +973,47 @@ mod tests {
             .unwrap();
         let loaded = store.load_attempt(AttemptId(1)).unwrap().unwrap();
         assert_eq!(loaded.pane_id.as_deref(), Some("w3:p2"));
+    }
+
+    #[test]
+    fn driver_liveness_round_trips_pid_heartbeat_and_exit() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "g".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "abc".into(),
+                integrate_ref: "meshloop/g/integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: "x".into(),
+                created_at: "0".into(),
+                review_note: None,
+            })
+            .unwrap();
+        store
+            .upsert_driver(&DriverLiveness {
+                graph_id: "g".into(),
+                pid: 42,
+                started_at: "10".into(),
+                heartbeat_at: "10".into(),
+                exit_code: None,
+                log_path: "/repo/.meshloop/runs/g/driver.log".into(),
+            })
+            .unwrap();
+        store.record_driver_heartbeat("g", 42, "20").unwrap();
+        store.record_driver_heartbeat("g", 7, "99").unwrap();
+        let loaded = store.load_driver("g").unwrap().unwrap();
+        assert_eq!(loaded.heartbeat_at, "20");
+        assert_eq!(loaded.exit_code, None);
+        assert_eq!(loaded.log_path, "/repo/.meshloop/runs/g/driver.log");
+        store.record_driver_exit("g", 99, 1, "30").unwrap();
+        assert_eq!(store.load_driver("g").unwrap().unwrap().exit_code, None);
+        store.record_driver_exit("g", 42, 0, "21").unwrap();
+        let exited = store.load_driver("g").unwrap().unwrap();
+        assert_eq!(exited.exit_code, Some(0));
+        assert_eq!(exited.heartbeat_at, "21");
+        store.record_driver_heartbeat("g", 42, "99").unwrap();
+        assert_eq!(store.load_driver("g").unwrap().unwrap().heartbeat_at, "21");
     }
 
     #[test]

@@ -60,13 +60,13 @@ mixed-graph event batches, so changing a supplied graph cannot bypass protection
 CLI mutation entry points perform a read-only preflight before writer composition
 (including gitignore maintenance). Plan adjustment, cancellation and orchestration
 admit before planner ownership, process termination, review pack creation or reviewer
-invocation. Pre-v6 ledgers return `SchemaUpgradeRequired` from this preflight: an
+invocation. Pre-v7 ledgers return `SchemaUpgradeRequired` from this preflight: an
 explicit writer schema migration is required first; mutation commands do not perform
 that migration implicitly. Migration does not adopt ownership. Refusals identify
 the original graph and require explicit ownership adoption, unavailable in this
 milestone. Status, inspect and export remain readable; Git export retains its
 existing bound-run restriction and does not reject unresolved legacy markers.
-Fresh schema6 unmarked, unbound runs keep the existing legacy path.
+Fresh schema7 unmarked, unbound runs keep the existing legacy path.
 This is a snapshot admission check, not a cross-process fence or complete exclusion
 of ownership changes after the check. It does not activate generations, implement
 successful bound producers, adoption or safe cleanup, or complete S3.

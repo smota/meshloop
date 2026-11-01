@@ -253,3 +253,46 @@ fn detached_spawn_does_not_hold_the_callers_output_pipe() {
         "capturing the spawner's output waited {elapsed:?}; the detached 3 s sleeper holds its pipe"
     );
 }
+
+#[test]
+fn detached_spawn_writes_stdout_and_stderr_to_the_log_file() {
+    let dir = unique_temp_dir("detach_log");
+    let log = dir.join("driver.log");
+    let start = Instant::now();
+    let out = guarded_output(
+        std::process::Command::new(fixture_path())
+            .arg("--spawn-detached-marker")
+            .arg(&log),
+    )
+    .expect("run spawner");
+    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let pid: u32 = stdout
+        .trim()
+        .parse()
+        .expect("spawner prints the detached pid");
+    assert!(out.status.success(), "spawner failed: {out:?}");
+    assert!(
+        elapsed < Duration::from_millis(2000),
+        "capturing the spawner's output waited {elapsed:?}"
+    );
+    assert!(!stdout.contains("STDOUT_MARKER"), "{stdout}");
+    assert!(!stderr.contains("STDERR_MARKER"), "{stderr}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut body = String::new();
+    while Instant::now() < deadline {
+        body = fs::read_to_string(&log).unwrap_or_default();
+        if body.contains("STDOUT_MARKER") && body.contains("STDERR_MARKER") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    meshloop_adapters::process::kill_process_tree(pid);
+    assert!(
+        body.contains("STDOUT_MARKER") && body.contains("STDERR_MARKER"),
+        "log {body:?} at {}",
+        log.display()
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -222,6 +222,17 @@ pub trait ReviewTransport {
     fn close_pane(&self, pane_id: &str) -> Result<(), ReviewError>;
 }
 
+/// Detached `run` driver identity persisted beside the run row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverLiveness {
+    pub graph_id: String,
+    pub pid: u32,
+    pub started_at: String,
+    pub heartbeat_at: String,
+    pub exit_code: Option<i32>,
+    pub log_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRow {
     pub graph_id: String,
@@ -349,6 +360,29 @@ pub trait RunStore:
         attempt_id: AttemptId,
         pane_id: Option<&str>,
     ) -> Result<(), StoreError>;
+    fn upsert_driver(&mut self, _row: &DriverLiveness) -> Result<(), StoreError> {
+        Ok(())
+    }
+    fn record_driver_heartbeat(
+        &mut self,
+        _graph_id: &str,
+        _pid: u32,
+        _at: &str,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+    fn record_driver_exit(
+        &mut self,
+        _graph_id: &str,
+        _pid: u32,
+        _code: i32,
+        _at: &str,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+    fn load_driver(&self, _graph_id: &str) -> Result<Option<DriverLiveness>, StoreError> {
+        Ok(None)
+    }
     fn graph_from_run(&self, graph_id: &str) -> Result<TaskGraph, StoreError> {
         let row = self
             .load_run(graph_id)?

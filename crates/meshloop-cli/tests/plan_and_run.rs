@@ -2526,6 +2526,17 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
         .as_str()
         .expect("session_id string");
     assert_eq!(session_id, "g_detach");
+    let driver_log = parsed["data"]["driver_log"]
+        .as_str()
+        .expect("driver_log string");
+    assert!(
+        driver_log.contains("g_detach") && driver_log.ends_with("driver.log"),
+        "{driver_log}"
+    );
+    assert!(
+        Path::new(driver_log).is_file(),
+        "driver log missing: {driver_log}"
+    );
 
     // 2. Inspect session non-blockingly
     let inspect = meshloop()
@@ -2572,6 +2583,288 @@ fn detached_run_and_session_inspect_and_cancel_lifecycle() {
     assert_eq!(cancel_parsed["command"], "meshloop:cancel");
     assert_eq!(cancel_parsed["data"]["status"], "cancelled");
 
+    fs::remove_dir_all(&dir).ok();
+}
+
+struct DetachedReaper {
+    db: PathBuf,
+}
+
+impl DetachedReaper {
+    fn pids(&self) -> Vec<u32> {
+        let Ok(conn) = rusqlite::Connection::open(&self.db) else {
+            return Vec::new();
+        };
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+        let mut pids = Vec::new();
+        for sql in [
+            "SELECT pid FROM run_driver_liveness",
+            "SELECT pid FROM attempts WHERE pid IS NOT NULL",
+        ] {
+            let Ok(mut stmt) = conn.prepare(sql) else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map([], |row| row.get::<_, i64>(0)) else {
+                continue;
+            };
+            pids.extend(
+                rows.filter_map(Result::ok)
+                    .filter(|pid| *pid > 0)
+                    .map(|pid| pid as u32),
+            );
+        }
+        pids
+    }
+
+    fn reap(&self) {
+        for pid in self.pids() {
+            meshloop_adapters::process::kill_process_tree(pid);
+        }
+    }
+}
+
+impl Drop for DetachedReaper {
+    fn drop(&mut self) {
+        self.reap();
+    }
+}
+
+fn cli_json(dir: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
+    let output = meshloop()
+        .current_dir(dir)
+        .args(args)
+        .guarded_output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!("{stdout}{stderr}"));
+    }
+    serde_json::from_str(stdout.trim()).map_err(|e| format!("{e}: {stdout}{stderr}"))
+}
+
+fn detach_plan(dir: &Path, config: &Path, db: &Path, graph_id: &str) -> serde_json::Value {
+    let plan_path = dir.join(format!("{graph_id}.json"));
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{"graph_id":"{graph_id}","nodes":[{{"id":1,"description":"detached task","depends_on":[],"tier":null}}]}}"#
+        ),
+    )
+    .unwrap();
+    let output = meshloop()
+        .current_dir(dir)
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--detach",
+            "--json",
+            "--config",
+        ])
+        .arg(config)
+        .args(["--db"])
+        .arg(db)
+        .args(["--worktree-base"])
+        .arg(dir.join("worktrees"))
+        .guarded_output()
+        .expect("run --detach");
+    assert!(
+        output.status.success(),
+        "run --detach failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("run json")
+}
+
+#[test]
+fn detached_driver_panic_is_in_the_log_and_status_names_it() {
+    let dir = disposable_repo("detach-panic");
+    let config = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let db = dir.join("state.sqlite");
+    let _reaper = DetachedReaper { db: db.clone() };
+    let plan_path = dir.join("panic-plan.json");
+    fs::write(
+        &plan_path,
+        r#"{"graph_id":"g_panic","nodes":[{"id":1,"description":"panic driver","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    let output = meshloop()
+        .current_dir(&dir)
+        .env("MESHLOOP_DRIVER_PANIC", "1")
+        .args(["run", "--plan"])
+        .arg(&plan_path)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--detach",
+            "--json",
+            "--config",
+        ])
+        .arg(&config)
+        .args(["--db"])
+        .arg(&db)
+        .args(["--worktree-base"])
+        .arg(dir.join("worktrees"))
+        .guarded_output()
+        .expect("run --detach");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).expect("run json");
+    let driver_log = parsed["data"]["driver_log"]
+        .as_str()
+        .expect("driver_log")
+        .to_string();
+    assert!(
+        driver_log.contains("g_panic") && driver_log.ends_with("driver.log"),
+        "{driver_log}"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut body = String::new();
+    let mut status = serde_json::Value::Null;
+    while std::time::Instant::now() < deadline {
+        body = fs::read_to_string(&driver_log).unwrap_or_default();
+        if let Ok(value) = cli_json(
+            &dir,
+            &[
+                "status",
+                "--graph",
+                "g_panic",
+                "--json",
+                "--config",
+                config.to_str().unwrap(),
+                "--db",
+                db.to_str().unwrap(),
+            ],
+        ) {
+            status = value;
+            let label = status["data"]["driver"].as_str().unwrap_or("");
+            if body.contains("meshloop driver panic")
+                && (label == "lost" || label.starts_with("exited("))
+            {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        body.contains("meshloop driver panic"),
+        "driver log missing panic: {body}"
+    );
+    let label = status["data"]["driver"].as_str().unwrap_or("");
+    assert!(
+        label == "lost" || label.starts_with("exited("),
+        "status driver: {status}"
+    );
+    assert_eq!(status["data"]["driver_log"], driver_log);
+    assert_eq!(status["data"]["driver_hint"], "resume");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn killed_detached_driver_is_lost_within_one_heartbeat() {
+    let dir = disposable_repo("detach-lost");
+    let config = write_config(&dir, r#"["--hang"]"#);
+    let db = dir.join("state.sqlite");
+    let reaper = DetachedReaper { db: db.clone() };
+    let started = detach_plan(&dir, &config, &db, "g_lost");
+    let driver_log = started["data"]["driver_log"]
+        .as_str()
+        .expect("driver_log")
+        .to_string();
+    assert!(driver_log.contains("g_lost") && Path::new(&driver_log).is_file());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut alive = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(status) = cli_json(
+            &dir,
+            &[
+                "status",
+                "--graph",
+                "g_lost",
+                "--json",
+                "--config",
+                config.to_str().unwrap(),
+                "--db",
+                db.to_str().unwrap(),
+            ],
+        ) && status["data"]["driver"] == "alive"
+        {
+            alive = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(alive, "detached driver was not reported alive");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let pid: i64 = conn
+        .query_row(
+            "SELECT pid FROM run_driver_liveness WHERE graph_id='g_lost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert!(pid > 0);
+    meshloop_adapters::process::kill_process_tree(pid as u32);
+    let killed = std::time::Instant::now();
+    let mut status = serde_json::Value::Null;
+    while killed.elapsed() < std::time::Duration::from_secs(5) {
+        if let Ok(value) = cli_json(
+            &dir,
+            &[
+                "status",
+                "--graph",
+                "g_lost",
+                "--json",
+                "--config",
+                config.to_str().unwrap(),
+                "--db",
+                db.to_str().unwrap(),
+            ],
+        ) {
+            status = value;
+            if status["data"]["driver"] == "lost" {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        status["data"]["driver"],
+        "lost",
+        "status after kill ({:?}): {status}",
+        killed.elapsed()
+    );
+    assert!(
+        killed.elapsed() < std::time::Duration::from_secs(5),
+        "lost took {:?}",
+        killed.elapsed()
+    );
+    assert_eq!(status["data"]["driver_log"], driver_log);
+    assert_eq!(status["data"]["driver_hint"], "resume");
+    let inspect = cli_json(
+        &dir,
+        &[
+            "inspect",
+            "--graph",
+            "g_lost",
+            "--json",
+            "--config",
+            config.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+        ],
+    )
+    .expect("inspect");
+    assert_eq!(inspect["data"]["driver"], "lost");
+    assert_eq!(inspect["data"]["driver_log"], driver_log);
+    assert_eq!(inspect["data"]["driver_hint"], "resume");
+    reaper.reap();
     fs::remove_dir_all(&dir).ok();
 }
 

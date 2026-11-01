@@ -149,6 +149,13 @@ fn main() {
         }
         Some("--spawn-detached-sleeper") => {
             let ms = args.get(1).cloned().unwrap_or_else(|| "3000".to_string());
+            let log = args
+                .get(2)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::temp_dir()
+                        .join(format!("meshloop-detached-{}.log", std::process::id()))
+                });
             let exe = env::current_exe().expect("current exe");
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--sleep-ms").arg(ms);
@@ -156,8 +163,26 @@ fn main() {
                 clippy::zombie_processes,
                 reason = "the detached sleeper is meant to outlive this fixture; the test kills it"
             )]
-            let child = meshloop_adapters::process::spawn_detached(cmd).expect("spawn detached");
+            let child =
+                meshloop_adapters::process::spawn_detached(cmd, &log).expect("spawn detached");
             println!("{}", child.id());
+        }
+        Some("--spawn-detached-marker") => {
+            let log = args.get(1).expect("log path");
+            let exe = env::current_exe().expect("current exe");
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--write-stdio-markers");
+            #[allow(
+                clippy::zombie_processes,
+                reason = "the marker child may still be exiting when this fixture returns"
+            )]
+            let child = meshloop_adapters::process::spawn_detached(cmd, std::path::Path::new(log))
+                .expect("spawn detached");
+            println!("{}", child.id());
+        }
+        Some("--write-stdio-markers") => {
+            println!("STDOUT_MARKER");
+            eprintln!("STDERR_MARKER");
         }
         Some("--grandchild-heartbeat") => {
             let path = args.get(1).expect("heartbeat file path required");

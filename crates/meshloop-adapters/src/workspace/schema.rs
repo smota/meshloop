@@ -371,6 +371,17 @@ CREATE INDEX workspace_attempts_scope ON attempts(graph_id,generation_id,attempt
 CREATE TRIGGER workspace_bound_event_insert BEFORE INSERT ON events WHEN EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=NEW.graph_id) AND (NEW.generation_id IS NULL OR NEW.revision_id IS NULL) BEGIN SELECT RAISE(ABORT,'bound event requires scope'); END;
 CREATE TRIGGER workspace_bound_attempt_insert BEFORE INSERT ON attempts WHEN EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=NEW.graph_id) AND (NEW.generation_id IS NULL OR NEW.revision_id IS NULL OR NEW.worktree_path IS NOT NULL) BEGIN SELECT RAISE(ABORT,'bound attempt requires portable scope'); END;
 ";
+/// Additive driver liveness for `run --detach`. Not part of the v6 statements.
+pub(super) const DRIVER_LIVENESS_SCHEMA: &str = "
+CREATE TABLE run_driver_liveness (
+    graph_id TEXT PRIMARY KEY REFERENCES runs(graph_id),
+    pid INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    exit_code INTEGER,
+    log_path TEXT NOT NULL
+);
+";
 pub(super) fn schema_version(conn: &Connection) -> Result<Option<i64>, StoreError> {
     let exists: bool = conn
         .query_row(
@@ -466,13 +477,42 @@ pub(super) fn validate6(conn: &Connection) -> Result<(), StoreError> {
     }
     Ok(())
 }
+pub(super) fn validate7(conn: &Connection) -> Result<(), StoreError> {
+    validate6(conn)?;
+    let canonical = Connection::open_in_memory().map_err(err)?;
+    canonical.execute_batch(BASE_SCHEMA).map_err(err)?;
+    canonical.execute_batch(LIFECYCLE_SCHEMA).map_err(err)?;
+    canonical.execute_batch(RUNTIME_SCHEMA).map_err(err)?;
+    canonical
+        .execute_batch(DRIVER_LIVENESS_SCHEMA)
+        .map_err(err)?;
+    if owned_objects(conn, "run_driver_liveness")?
+        != owned_objects(&canonical, "run_driver_liveness")?
+    {
+        return Err(err("noncanonical v7 schema"));
+    }
+    Ok(())
+}
+fn migrate_v6_to_v7(conn: &Connection) -> Result<(), StoreError> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(err)?;
+    tx.execute_batch(DRIVER_LIVENESS_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=7", [])
+        .map_err(err)?;
+    validate7(&tx)?;
+    tx.commit().map_err(err)
+}
 pub(super) fn migrate_with_fault(
     conn: &Connection,
     fail_after_ddl: bool,
 ) -> Result<(), StoreError> {
     let version = schema_version(conn)?;
+    if version == Some(7) {
+        return validate7(conn);
+    }
     if version == Some(6) {
-        return validate6(conn);
+        validate6(conn)?;
+        return migrate_v6_to_v7(conn);
     }
     if matches!(version,Some(v) if !matches!(v,1|2|4|5)) {
         return Err(err("unsupported schema"));
@@ -494,5 +534,9 @@ CREATE TABLE workspace_run_bindings(graph_id TEXT PRIMARY KEY);")
     tx.execute("UPDATE schema_meta SET version=6", [])
         .map_err(err)?;
     validate6(&tx)?;
+    tx.execute_batch(DRIVER_LIVENESS_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=7", [])
+        .map_err(err)?;
+    validate7(&tx)?;
     tx.commit().map_err(err)
 }
