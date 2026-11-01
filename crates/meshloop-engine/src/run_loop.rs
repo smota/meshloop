@@ -395,10 +395,13 @@ impl<'a> RunLoop<'a> {
             occurred_at: stamp(),
         };
         self.store.append(rec.clone())?;
-        // A normal exit ends the attempt. Crash/timeout leaves `ended_at` unset: a live pane
-        // may still be harvested, and liveness treats any ended attempt as Dead.
-        if event == Event::HarnessExited
-            && let Some(id) = attempt
+        // Exit, crash/timeout, and cancel end the attempt once. An existing
+        // `ended_at` stays put so a later event cannot move it. Liveness treats
+        // an ended attempt as dead and stops probing its PID.
+        if matches!(
+            event,
+            Event::HarnessExited | Event::HarnessCrashedOrTimeout | Event::Cancel
+        ) && let Some(id) = attempt
             && let Some(mut row) = self.store.load_attempt(id)?
             && row.ended_at.is_none()
         {
@@ -2008,8 +2011,9 @@ impl<'a> RunLoop<'a> {
             if transition(state, Event::Cancel).is_err() {
                 continue;
             }
+            let attempt = self.store.latest_attempt_for_task(graph_id, id)?;
             if state == TaskState::Running
-                && let Some(a) = self.store.latest_attempt_for_task(graph_id, id)?
+                && let Some(a) = &attempt
                 && let Some(name) = &a.harness
                 && let Some(h) = self.harnesses.get(name)
             {
@@ -2029,7 +2033,14 @@ impl<'a> RunLoop<'a> {
                     });
                 }
             }
-            let _ = self.append(graph_id, id, None, state, Event::Cancel, None)?;
+            let _ = self.append(
+                graph_id,
+                id,
+                attempt.as_ref().map(|a| a.attempt_id),
+                state,
+                Event::Cancel,
+                None,
+            )?;
         }
         Ok(())
     }
@@ -3042,5 +3053,317 @@ mod tests {
         let got = observed_live(LiveCheck::Live, &attempt(Some(7), None), &view);
         assert_eq!(got, LiveCheck::Live);
         assert_eq!(view.calls.get(), 0);
+    }
+
+    struct EndedAtPorts {
+        run: RunRow,
+        events: Vec<TransitionRecord>,
+        attempts: Vec<AttemptRow>,
+    }
+
+    impl crate::ports::EvidenceStore for EndedAtPorts {
+        forbidden_port_calls! {
+            fn record(&mut self, evidence: Evidence) -> Result<(), StoreError>;
+            fn evidence_for(&self, candidate: &CandidateRef) -> Result<Vec<Evidence>, StoreError>;
+            fn evidence_for_attempt( &self, task_id: TaskId, attempt_id: AttemptId, ) -> Result<Vec<Evidence>, StoreError>;
+        }
+    }
+    impl crate::ports::RoutingFeedbackStore for EndedAtPorts {
+        forbidden_port_calls! {
+            fn record_outcome(&mut self, key: &FeedbackKey, success: bool) -> Result<(), StoreError>;
+            fn counters(&self, key: &FeedbackKey) -> Result<FeedbackCounters, StoreError>;
+        }
+    }
+    impl crate::ports::EventLog for EndedAtPorts {
+        fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
+            self.events.push(record);
+            Ok(())
+        }
+        fn records_for_graph(&self, graph_id: &str) -> Result<Vec<TransitionRecord>, StoreError> {
+            Ok(self
+                .events
+                .iter()
+                .filter(|record| record.graph_id == graph_id)
+                .cloned()
+                .collect())
+        }
+    }
+    impl crate::ports::QuotaStore for EndedAtPorts {
+        forbidden_port_calls! {
+            fn load_quota(&self, harness: &str) -> Result<QuotaState, StoreError>;
+            fn save_quota(&mut self, harness: &str, state: &QuotaState) -> Result<(), StoreError>;
+        }
+    }
+    impl RunStore for EndedAtPorts {
+        fn load_run(&self, graph_id: &str) -> Result<Option<RunRow>, StoreError> {
+            Ok((self.run.graph_id == graph_id).then(|| self.run.clone()))
+        }
+        fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
+            if let Some(existing) = self
+                .attempts
+                .iter_mut()
+                .find(|saved| saved.attempt_id == row.attempt_id)
+            {
+                *existing = row.clone();
+            } else {
+                self.attempts.push(row.clone());
+            }
+            Ok(())
+        }
+        fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts
+                .iter()
+                .find(|row| row.attempt_id == attempt_id)
+                .cloned())
+        }
+        fn attempts_for_task(
+            &self,
+            graph_id: &str,
+            task_id: TaskId,
+        ) -> Result<Vec<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts
+                .iter()
+                .filter(|row| row.graph_id == graph_id && row.task_id == task_id)
+                .cloned()
+                .collect())
+        }
+        fn latest_attempt_for_task(
+            &self,
+            graph_id: &str,
+            task_id: TaskId,
+        ) -> Result<Option<AttemptRow>, StoreError> {
+            Ok(self
+                .attempts_for_task(graph_id, task_id)?
+                .into_iter()
+                .max_by_key(|row| row.attempt_id.0))
+        }
+        forbidden_port_calls! {
+            fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
+            fn save_run_and_events( &mut self, row: &RunRow, events: &[TransitionRecord], ) -> Result<(), StoreError>;
+            fn latest_run(&self) -> Result<Option<RunRow>, StoreError>;
+            fn list_runs(&self) -> Result<Vec<RunRow>, StoreError>;
+            fn next_attempt_id(&self) -> Result<AttemptId, StoreError>;
+            fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError>;
+            fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError>;
+            fn update_attempt_pid( &mut self, attempt_id: AttemptId, pid: Option<u32>, image_name: Option<&str>, ) -> Result<(), StoreError>;
+            fn update_attempt_pane( &mut self, attempt_id: AttemptId, pane_id: Option<&str>, ) -> Result<(), StoreError>;
+        }
+    }
+    impl crate::workspace::WorkspaceLedger for EndedAtPorts {
+        forbidden_port_calls! {
+            fn bind_repository(&mut self, fence: &dyn RepositoryFence) -> Result<(), StoreError>;
+            fn repository(&self, id: &LifecycleId) -> Result<Option<RepositoryRecord>, StoreError>;
+            fn register_root( &mut self, fence: &dyn RepositoryFence, alias: &RootAlias, ) -> Result<(), StoreError>;
+            fn insert_generation( &mut self, fence: &dyn RepositoryFence, record: &GenerationRecord, ) -> Result<(), StoreError>;
+            fn generation(&self, id: &LifecycleId) -> Result<Option<GenerationRecord>, StoreError>;
+            fn generations( &self, repository: &LifecycleId, graph: &GraphId, ) -> Result<Vec<GenerationRecord>, StoreError>;
+            fn insert_artifacts( &mut self, fence: &dyn RepositoryFence, records: &[ArtifactRecord], dependencies: &[ArtifactDependency], ) -> Result<(), StoreError>;
+            fn artifact(&self, id: &LifecycleId) -> Result<Option<ArtifactRecord>, StoreError>;
+            fn dependencies(&self, artifact: &LifecycleId) -> Result<Vec<ArtifactDependency>, StoreError>;
+            fn append_fact( &mut self, fence: &dyn RepositoryFence, fact: &LifecycleFact, ) -> Result<(), StoreError>;
+            fn facts(&self, artifact: &LifecycleId) -> Result<Vec<LifecycleFact>, StoreError>;
+            fn append_journal( &mut self, fence: &dyn RepositoryFence, entry: &JournalEntry, ) -> Result<(), StoreError>;
+            fn journal(&self, artifact: &LifecycleId) -> Result<Vec<JournalEntry>, StoreError>;
+        }
+    }
+    impl crate::workspace::RuntimeLedger for EndedAtPorts {
+        fn legacy_ownership_unresolved(&self, _: &GraphId) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError> {
+            assert!(GraphId::new(graph.as_str()).is_ok());
+            Ok(None)
+        }
+        forbidden_port_calls! {
+            fn with_read_snapshot(&self, observe: &mut dyn FnMut()) -> Result<(), StoreError>;
+            fn generation_initial_revision( &self, scope: &ExecutionScope, ) -> Result<Option<LifecycleId>, StoreError>;
+            fn project_revision( &mut self, fence: &dyn RepositoryFence, graph: &GraphId, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn record_scoped_evidence( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, evidence: &meshloop_domain::evidence::Evidence, ) -> Result<(), StoreError>;
+            fn scoped_evidence( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<meshloop_domain::evidence::Evidence>, StoreError>;
+            fn artifacts(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactRecord>, StoreError>;
+            fn bind_artifact( &mut self, fence: &dyn RepositoryFence, binding: &ArtifactBinding, ) -> Result<(), StoreError>;
+            fn artifact_bindings(&self, scope: &ExecutionScope) -> Result<Vec<ArtifactBinding>, StoreError>;
+            fn create_run_binding( &mut self, fence: &dyn RepositoryFence, binding: &RunBinding, ) -> Result<(), StoreError>;
+            fn create_provisional( &mut self, fence: &dyn RepositoryFence, owner: &ProvisionalOwner, ) -> Result<(), StoreError>;
+            fn provisionals(&self, repository: &LifecycleId) -> Result<Vec<ProvisionalOwner>, StoreError>;
+            fn promote_provisional( &mut self, fence: &dyn RepositoryFence, promotion: &ProvisionalPromotion, ) -> Result<(), StoreError>;
+            fn append_revision( &mut self, fence: &dyn RepositoryFence, revision: &PlanRevisionSnapshot, ) -> Result<(), StoreError>;
+            fn revision(&self, id: &LifecycleId) -> Result<Option<PlanRevisionSnapshot>, StoreError>;
+            fn authorize_revision( &mut self, fence: &dyn RepositoryFence, authorization: &RevisionAuthorization, ) -> Result<(), StoreError>;
+            fn authorizations( &self, revision: &LifecycleId, ) -> Result<Vec<RevisionAuthorization>, StoreError>;
+            fn activate_generation( &mut self, fence: &dyn RepositoryFence, activation: &GenerationActivation, ) -> Result<(), StoreError>;
+            fn select_revision( &mut self, fence: &dyn RepositoryFence, scope: &ExecutionScope, revision: &LifecycleId, ) -> Result<(), StoreError>;
+            fn resolve_scope( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Option<ExecutionScope>, StoreError>;
+            fn scoped_events( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredEvent>, StoreError>;
+            fn append_scoped_event( &mut self, fence: &dyn RepositoryFence, event: &ScopedEvent, ) -> Result<(), StoreError>;
+            fn reserve_attempt( &mut self, fence: &dyn RepositoryFence, reservation: &AttemptReservation, ) -> Result<ScopedAttempt, StoreError>;
+            fn update_scoped_attempt( &mut self, fence: &dyn RepositoryFence, attempt: &ScopedAttempt, ) -> Result<(), StoreError>;
+            fn scoped_attempts( &self, graph: &GraphId, scope: &RunScope, ) -> Result<Vec<StoredAttempt>, StoreError>;
+            fn append_operation( &mut self, fence: &dyn RepositoryFence, operation: &ProducerOperation, ) -> Result<(), StoreError>;
+            fn operations( &self, repository: &LifecycleId, scope: Option<&ExecutionScope>, ) -> Result<Vec<ProducerOperation>, StoreError>;
+            fn append_operation_step( &mut self, fence: &dyn RepositoryFence, step: &OperationStep, ) -> Result<(), StoreError>;
+            fn operation_steps(&self, id: &LifecycleId) -> Result<Vec<OperationStep>, StoreError>;
+            fn register_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn update_driver( &mut self, fence: &dyn RepositoryFence, driver: &DriverRecord, ) -> Result<(), StoreError>;
+            fn drivers(&self, repository: &LifecycleId) -> Result<Vec<DriverRecord>, StoreError>;
+            fn cancellation_requests( &self, driver: &LifecycleId, ) -> Result<Vec<CancellationObservation>, StoreError>;
+            fn acknowledge_cancellation( &mut self, fence: &dyn RepositoryFence, id: &LifecycleId, status: CancellationStatus, ) -> Result<(), StoreError>;
+        }
+    }
+
+    fn open_attempt(id: u32, task: u32, started: &str, ended: Option<&str>) -> AttemptRow {
+        AttemptRow {
+            attempt_id: AttemptId(id),
+            graph_id: "g".into(),
+            task_id: TaskId(task),
+            harness: None,
+            model_ref: None,
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: Some(started.into()),
+            ended_at: ended.map(str::to_string),
+            outcome: None,
+        }
+    }
+
+    fn running_events(task: u32, attempt: u32) -> [TransitionRecord; 2] {
+        [
+            TransitionRecord {
+                graph_id: "g".into(),
+                task_id: TaskId(task),
+                attempt_id: None,
+                from: TaskState::Pending,
+                to: TaskState::Ready,
+                event: Event::DependencySatisfied,
+                reason: None,
+                executor: "test".into(),
+                occurred_at: "1".into(),
+            },
+            TransitionRecord {
+                graph_id: "g".into(),
+                task_id: TaskId(task),
+                attempt_id: Some(AttemptId(attempt)),
+                from: TaskState::Ready,
+                to: TaskState::Running,
+                event: Event::AttemptStarted,
+                reason: None,
+                executor: "test".into(),
+                occurred_at: "1".into(),
+            },
+        ]
+    }
+
+    fn ended_at_ports() -> EndedAtPorts {
+        let mut events = Vec::new();
+        for (task, attempt) in [(1, 1), (2, 2), (3, 3)] {
+            events.extend(running_events(task, attempt));
+        }
+        EndedAtPorts {
+            run: RunRow {
+                graph_id: "g".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "main".into(),
+                plan_json: r#"{"graph_id":"g","nodes":[
+                    {"id":1,"description":"cancel","depends_on":[],"tier":null},
+                    {"id":2,"description":"crash","depends_on":[],"tier":null},
+                    {"id":3,"description":"kept","depends_on":[],"tier":null}
+                ]}"#
+                .into(),
+                plan_id: "p".into(),
+                created_at: "1".into(),
+                review_note: None,
+            },
+            events,
+            attempts: vec![
+                open_attempt(1, 1, "1000", None),
+                open_attempt(2, 2, "2000", None),
+                open_attempt(3, 3, "1", Some("5")),
+                open_attempt(4, 4, "3000", None),
+            ],
+        }
+    }
+
+    fn ended_loop<'a>(store: &'a mut EndedAtPorts, other: &'a AdmissionPorts) -> RunLoop<'a> {
+        RunLoop {
+            harnesses: HashMap::new(),
+            candidates: vec![],
+            workspace: other,
+            store,
+            processes: other,
+            checks: other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+        }
+    }
+
+    fn occurred(store: &EndedAtPorts, task: TaskId, event: Event) -> String {
+        store
+            .events
+            .iter()
+            .rev()
+            .find(|record| record.task_id == task && record.event == event)
+            .unwrap_or_else(|| panic!("missing {event:?} for task {}", task.0))
+            .occurred_at
+            .clone()
+    }
+
+    fn assert_closed(row: &AttemptRow, occurred_at: &str) {
+        assert_eq!(row.ended_at.as_deref(), Some(occurred_at));
+        let started: u64 = row.started_at.as_deref().unwrap().parse().unwrap();
+        let ended: u64 = occurred_at.parse().unwrap();
+        assert!(
+            ended >= started,
+            "ended_at {ended} earlier than started_at {started}"
+        );
+    }
+
+    #[test]
+    fn cancelled_and_timed_out_attempts_record_ended_at() {
+        let mut store = ended_at_ports();
+        let other = admission_ports(Ok(None));
+        let mut run = ended_loop(&mut store, &other);
+        run.cancel("g", Some(TaskId(1)))
+            .expect("cancel running attempt");
+        run.crash_fail("g").expect("crash dead running attempts");
+        let started = run
+            .append(
+                "g",
+                TaskId(4),
+                Some(AttemptId(4)),
+                TaskState::Ready,
+                Event::AttemptStarted,
+                None,
+            )
+            .expect("unrelated event");
+        assert_eq!(started.event, Event::AttemptStarted);
+        drop(run);
+
+        let cancelled = store.load_attempt(AttemptId(1)).unwrap().unwrap();
+        assert_closed(&cancelled, &occurred(&store, TaskId(1), Event::Cancel));
+        let timed_out = store.load_attempt(AttemptId(2)).unwrap().unwrap();
+        assert_closed(
+            &timed_out,
+            &occurred(&store, TaskId(2), Event::HarnessCrashedOrTimeout),
+        );
+        let kept = store.load_attempt(AttemptId(3)).unwrap().unwrap();
+        let crash_at = occurred(&store, TaskId(3), Event::HarnessCrashedOrTimeout);
+        assert_ne!(crash_at, "5");
+        assert_eq!(kept.ended_at.as_deref(), Some("5"));
+        let unrelated = store.load_attempt(AttemptId(4)).unwrap().unwrap();
+        assert!(unrelated.ended_at.is_none());
     }
 }

@@ -509,6 +509,20 @@ fn inspect_reports_real_attempt_timing_and_outcome() {
     let attempt = &parsed["data"]["attempts"][0];
     // Real runs must record when the worker exited, not only fixture rows.
     assert!(attempt["ended_at"].is_string(), "{parsed}");
+    let started_at: u64 = attempt["started_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("started_at missing: {parsed}"))
+        .parse()
+        .unwrap_or_else(|_| panic!("started_at not an integer: {parsed}"));
+    let ended_at: u64 = attempt["ended_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ended_at missing: {parsed}"))
+        .parse()
+        .unwrap_or_else(|_| panic!("ended_at not an integer: {parsed}"));
+    assert!(
+        ended_at >= started_at,
+        "ended_at {ended_at} is earlier than started_at {started_at}: {parsed}"
+    );
     assert!(attempt["duration_s"].is_u64(), "{parsed}");
     assert_eq!(attempt["outcome"], "DeterministicChecksPassed", "{parsed}");
     assert!(attempt["base_revision"].is_string(), "{parsed}");
