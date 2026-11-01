@@ -18,7 +18,7 @@ Once installed, Meshloop operations can be triggered via terminal slash commands
 | `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
 | `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |
 | `meshloop:watch` | — | — | `meshloop watch --graph <id>` | **Watch:** Polls a graph until it settles. Interval defaults to 5s; `--timeout 0` waits without a limit. |
-| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. |
+| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. Every node stops at `AwaitingReview` until `meshloop accept`; the tier selects the harness and model only. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
 | `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Merges verified worktree changes into the target branch. |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agents. |
@@ -261,7 +261,7 @@ call, or a missing `invoke_args_template`.
 
 When `doctor` passes, proceed to the **[Getting Started Guide](start.md)** to run the planning and execution loop:
 ```text
-/meshloop:plan → /meshloop:review-plan → /meshloop:run
+/meshloop:plan → /meshloop:review-plan → /meshloop:run → meshloop accept
 ```
 
 ---
@@ -271,4 +271,4 @@ When `doctor` passes, proceed to the **[Getting Started Guide](start.md)** to ru
 - **No background daemons:** Meshloop executes on demand and exits cleanly.
 - **No credential persistence:** No tokens or secrets are written to disk.
 - **Fail-closed isolation:** Worker attempts run in isolated Git worktrees. Your working branch remains untouched until explicit integration (`meshloop integrate --into`).
-- **Deterministic verification:** Compiler and linter exit codes govern acceptance.
+- **Deterministic verification:** Compiler and linter exit codes are the check. A passing check leaves every node in `AwaitingReview` until `meshloop accept`. The tier selects the harness and model; it does not select which nodes wait for `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not enforced. Dependent nodes do not start until the predecessor is accepted and integrated through `meshloop accept` and `meshloop integrate`.

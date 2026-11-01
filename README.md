@@ -198,6 +198,8 @@ meshloop review-plan --plan meshloop-plan.json --accept
 meshloop run
 ```
 
+`meshloop run` leaves every node in `AwaitingReview` when deterministic checks pass. Continue with `meshloop accept`, then `meshloop resume`. The tier selects the harness and model; it does not select which nodes wait for `meshloop accept`.
+
 ---
 
 ## 6. Unified Operator Surface (Parity across CLI, Slash, MCP)
@@ -214,7 +216,7 @@ Every capability is universally accessible across terminal CLI verbs, in-agent s
 | `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
 | `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |
 | `meshloop:watch` | — | — | `meshloop watch --graph <id>` | **Watch:** Polls a graph until it settles. Interval defaults to 5s; `--timeout 0` waits without a limit. |
-| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic compiler evidence and diff for a completed task. |
+| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic compiler evidence and diff for a completed task. Every node stops at `AwaitingReview` until `meshloop accept`; the tier selects the harness and model only. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
 | `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Safely merges verified worktree changes into the target branch. |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agent harnesses. |

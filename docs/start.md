@@ -17,7 +17,7 @@ Meshloop operations can be triggered through terminal slash commands, MCP tools,
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
 | `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
-| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. |
+| `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. Every node stops at `AwaitingReview` until `meshloop accept`; the tier selects the harness and model only. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
 | `meshloop:integrate` | — | `meshloop_integrate` | `meshloop integrate` | **Integration:** Merges verified worktree changes into the target branch. |
 | `meshloop:orchestrate` | `/meshloop:orchestrate` | `meshloop_orchestrate` | `meshloop orchestrate` | **Review:** Synthesizes cross-model feedback between two distinct agents. |
@@ -95,7 +95,7 @@ meshloop accept --task 1 --as your-name
 meshloop resume
 ```
 
-**R1 acceptance rule:** every node stops for `meshloop accept`; the tier selects the harness/model only (ADR 0007 requires human acceptance at Tier 3, and ADR 0016's R1 subset applies it to every node). `meshloop status` / `inspect` show why each node is blocked in `waiting_for` (`acceptance`, `dependency`, `plan_acceptance`, `retry_budget_exhausted`) and `blocked_by`.
+**R1 acceptance rule:** every node stops at `AwaitingReview` after deterministic checks pass and waits for `meshloop accept`; the tier selects the harness and model only. It does not select which nodes wait for `meshloop accept`. A sentence in a node description such as "HUMAN GATE" is not enforced. Dependent nodes do not start until the predecessor is accepted and integrated through `meshloop accept` and `meshloop integrate`. `meshloop status` / `inspect` show why each node is blocked in `waiting_for` (`acceptance`, `dependency`, `plan_acceptance`, `retry_budget_exhausted`) and `blocked_by`.
 
 ### 5. Integrate — Land Changes on Target Branch
 Only explicit integration merges verified commits into your active branch:
