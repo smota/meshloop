@@ -2,6 +2,7 @@
 //! subprocess, Herdr, or SQLite code belongs here; meshloop-adapters implements these.
 //! `ScriptedDecisionPort` is an in-memory test double with no I/O, not an adapter.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -325,6 +326,46 @@ pub trait QuotaStore {
     fn save_quota(&mut self, harness: &str, state: &QuotaState) -> Result<(), StoreError>;
 }
 
+/// Process-local oracle budget in integer micro-dollars. Not persisted and not a
+/// routing arm. A zero cost consults the oracle without changing `remaining`.
+#[derive(Debug)]
+pub struct SessionSpendLedger {
+    remaining: Cell<u64>,
+    cost: u64,
+}
+
+impl SessionSpendLedger {
+    pub fn new(budget_micro_dollars: u64, cost_micro_dollars: u64) -> Self {
+        Self {
+            remaining: Cell::new(budget_micro_dollars),
+            cost: cost_micro_dollars,
+        }
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.remaining.get()
+    }
+
+    pub fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    /// Subtracts `cost` when the budget covers it. Insufficient budget fails open:
+    /// `remaining` is left unchanged and the caller must not treat that as an error.
+    #[must_use]
+    pub fn try_charge(&self) -> bool {
+        if self.cost == 0 {
+            return true;
+        }
+        let remaining = self.remaining.get();
+        if remaining < self.cost {
+            return false;
+        }
+        self.remaining.set(remaining - self.cost);
+        true
+    }
+}
+
 pub trait RunStore:
     EvidenceStore + RoutingFeedbackStore + EventLog + QuotaStore + crate::workspace::RuntimeLedger
 {
@@ -397,6 +438,12 @@ pub trait RunStore:
     }
     fn event_count(&self) -> Result<usize, StoreError> {
         Ok(0)
+    }
+
+    /// In-process oracle spend, if this store keeps a ledger. Not a schema field.
+    /// Test doubles return `None` and therefore never charge.
+    fn session_spend(&self) -> Option<&SessionSpendLedger> {
+        None
     }
 }
 

@@ -591,6 +591,8 @@ impl<'a> RunLoop<'a> {
             preferred_harness: None,
             headroom: &HashMap::new(),
             feedback: feedback_store,
+            oracle: None,
+            spend: feedback_store.session_spend(),
         };
         let selected = self
             .router
@@ -1396,12 +1398,15 @@ impl<'a> RunLoop<'a> {
         let preferred = self.last_success_harness(graph_id);
         let penalty = CouplingPenalty(0);
         let selected: Vec<crate::router::Candidate> = {
+            let feedback_store = &*self.store;
             let ctx = RoutingContext {
                 task_tier: tier,
                 coupling_penalty: penalty,
                 preferred_harness: preferred.as_deref(),
                 headroom: &HashMap::new(),
-                feedback: &*self.store,
+                feedback: feedback_store,
+                oracle: None,
+                spend: feedback_store.session_spend(),
             };
             self.router
                 .select(
