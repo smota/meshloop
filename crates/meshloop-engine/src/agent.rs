@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::task_graph::{TaskGraph, TaskId, TaskNode, Tier};
+use meshloop_domain::task_graph::{AcceptanceGate, TaskGraph, TaskId, TaskNode, Tier};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
@@ -194,6 +194,7 @@ fn planning_output_contract() -> String {
             allowed_paths: vec!["crates/widgets/src/".into()],
             empty_diff_ok: false,
             deliverable: Some("issue-12".into()),
+            gate: AcceptanceGate::Human,
         }],
     };
     let example = serde_json::to_string_pretty(&example).unwrap_or_default();
@@ -214,6 +215,10 @@ fn planning_output_contract() -> String {
          - deliverable: optional string matching [A-Za-z0-9._-]+ naming what the node ships \
          with, e.g. \"issue-12\" when one graph delivers several issues. Nodes that share it \
          are integrated together. Omit it when the graph has one deliverable.\n\
+         - gate: \"human\" (default; omit it) or \"verify\". verify is valid only when tier is \
+         explicit Tier1 or Tier2; that node accepts after deterministic checks. Omit gate, or \
+         use human, and the node waits for meshloop accept. Tier3 and an omitted tier cannot \
+         use verify.\n\
          Example of a valid one-node graph:\n{example}\n\
          No other files unless required to produce that graph. Do not print prose."
     )
@@ -261,6 +266,7 @@ mod tests {
             allowed_paths: vec![],
             empty_diff_ok: false,
             deliverable: None,
+            gate: AcceptanceGate::Human,
         }
     }
 
@@ -369,6 +375,7 @@ mod tests {
         assert!(spec.prompt.contains("[A-Za-z0-9._-]+"));
         assert!(spec.prompt.contains("empty_diff_ok"));
         assert!(spec.prompt.contains("deliverable"));
+        assert!(spec.prompt.contains("- gate:"));
         assert!(spec.prompt.contains("\"graph_id\": \"example-graph\""));
     }
 

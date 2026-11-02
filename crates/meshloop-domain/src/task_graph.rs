@@ -14,6 +14,22 @@ pub enum Tier {
     Tier3,
 }
 
+/// Who may move a node from `AwaitingReview` to `Accepted` after checks pass.
+/// Omitted in plan JSON, which stays human and does not gain a serialized field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcceptanceGate {
+    #[default]
+    Human,
+    Verify,
+}
+
+impl AcceptanceGate {
+    fn is_human(&self) -> bool {
+        *self == Self::Human
+    }
+}
+
 impl Tier {
     /// Every variant, in declaration order. `name` matches exhaustively, so adding a
     /// variant fails to compile there until it is handled and listed here.
@@ -43,6 +59,10 @@ pub struct TaskNode {
     /// --deliverable <tag>` lands only that group. Same character set as `graph_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable: Option<String>,
+    /// `verify` accepts explicit Tier1 or Tier2 after deterministic checks.
+    /// Omitted and `human` still wait for `meshloop accept`.
+    #[serde(default, skip_serializing_if = "AcceptanceGate::is_human")]
+    pub gate: AcceptanceGate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,12 +74,24 @@ pub struct TaskGraph {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {
     Cycle(Vec<TaskId>),
-    DanglingDependency { node: TaskId, missing: TaskId },
+    DanglingDependency {
+        node: TaskId,
+        missing: TaskId,
+    },
     DuplicateId(TaskId),
     Empty,
     IllegalGraphId(String),
     ReservedTaskId(TaskId),
-    IllegalDeliverable { node: TaskId, tag: String },
+    IllegalDeliverable {
+        node: TaskId,
+        tag: String,
+    },
+    /// `gate = verify` requires `tier` to be explicit Tier1 or Tier2.
+    /// Omitted tier is not treated as Tier2; validation runs before `assign_tiers`.
+    IllegalVerifyGate {
+        node: TaskId,
+        tier: Option<Tier>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +163,14 @@ impl TaskGraph {
             }
             if node.id.0 == 0 {
                 return Err(GraphError::ReservedTaskId(node.id));
+            }
+            if node.gate == AcceptanceGate::Verify
+                && !matches!(node.tier, Some(Tier::Tier1 | Tier::Tier2))
+            {
+                return Err(GraphError::IllegalVerifyGate {
+                    node: node.id,
+                    tier: node.tier,
+                });
             }
             if !seen.insert(node.id) {
                 return Err(GraphError::DuplicateId(node.id));
@@ -303,6 +343,7 @@ mod tests {
             allowed_paths: vec![],
             empty_diff_ok: false,
             deliverable: None,
+            gate: AcceptanceGate::Human,
         }
     }
 
@@ -574,5 +615,83 @@ mod tests {
         ));
         // Verify graph was unchanged on error
         assert_eq!(g.nodes.len(), 2);
+    }
+
+    fn gated(tier: Option<Tier>, gate: AcceptanceGate) -> TaskNode {
+        let mut n = node(1, &[]);
+        n.tier = tier;
+        n.gate = gate;
+        n
+    }
+
+    #[test]
+    fn verify_gate_rejects_tier3_and_omitted_tier() {
+        let tier3 = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![gated(Some(Tier::Tier3), AcceptanceGate::Verify)],
+        };
+        assert_eq!(
+            tier3.validate(),
+            Err(GraphError::IllegalVerifyGate {
+                node: TaskId(1),
+                tier: Some(Tier::Tier3),
+            })
+        );
+        let omitted = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![gated(None, AcceptanceGate::Verify)],
+        };
+        assert_eq!(
+            omitted.validate(),
+            Err(GraphError::IllegalVerifyGate {
+                node: TaskId(1),
+                tier: None,
+            })
+        );
+    }
+
+    #[test]
+    fn verify_gate_accepts_explicit_tier1_and_tier2() {
+        for tier in [Tier::Tier1, Tier::Tier2] {
+            let g = TaskGraph {
+                graph_id: "g".into(),
+                nodes: vec![gated(Some(tier), AcceptanceGate::Verify)],
+            };
+            assert_eq!(g.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn omitted_gate_deserializes_as_human_and_validates() {
+        let raw = r#"{"graph_id":"g","nodes":[{"id":1,"description":"task 1","depends_on":[],"tier":"Tier1"}]}"#;
+        let g: TaskGraph = serde_json::from_str(raw).expect("plan without gate");
+        assert_eq!(g.nodes[0].gate, AcceptanceGate::Human);
+        assert_eq!(g.validate(), Ok(()));
+        let value = serde_json::to_value(&g).expect("serialize");
+        assert!(value["nodes"][0].get("gate").is_none());
+    }
+
+    #[test]
+    fn verify_gate_serializes_lowercase_and_mutation_rejects_tier3() {
+        let mut n = gated(Some(Tier::Tier1), AcceptanceGate::Verify);
+        let value = serde_json::to_value(&n).expect("serialize");
+        assert_eq!(value["gate"], "verify");
+        n.tier = Some(Tier::Tier3);
+        let mut g = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node(2, &[])],
+        };
+        let before = g.clone();
+        let mutation = GraphMutation::AppendFollowup {
+            source_task: TaskId(2),
+            new_tasks: vec![n],
+        };
+        assert!(matches!(
+            g.apply_mutation(&mutation),
+            Err(GraphMutationError::Graph(
+                GraphError::IllegalVerifyGate { .. }
+            ))
+        ));
+        assert_eq!(g, before);
     }
 }

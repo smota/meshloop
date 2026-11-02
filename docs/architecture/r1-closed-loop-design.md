@@ -3,6 +3,7 @@
 > **Do not implement from this file.** Historical design input only.
 > **Current product:** [Getting started](../start.md) · [ADR 0016](adr/0016-r1-closed-loop.md)
 > · [implementation status](../engineering/implementation-status.md).
+> [ADR 0037](adr/0037-node-verify-gate.md) later amends the every-node accept rule for an explicit verify gate on tier 1 or 2.
 >
 > The body below still describes a fixture-first lab and `--allow-live-harness`.
 > Those claims are **superseded**: live Herdr is the product path; fixture is CI;

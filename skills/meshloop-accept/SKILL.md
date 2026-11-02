@@ -5,7 +5,7 @@ description: Record human acceptance of a Meshloop node. Slash /meshloop:accept.
 
 # /meshloop:accept
 
-R1 rule: every node stops for `meshloop accept`; the tier selects harness/model only.
+R1 rule: a verify gate on tier 1 or 2 accepts after deterministic checks; every other node stops for `meshloop accept`; the tier selects harness/model only.
 `status`/`inspect` report `waiting_for: acceptance` for nodes awaiting this step.
 
 Only after the user agrees in this supervisor session:

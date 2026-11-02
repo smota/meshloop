@@ -15,7 +15,7 @@ use meshloop_domain::policy::CouplingPenalty;
 use meshloop_domain::state::{
     Event, PlanDecision, PlanState, TaskState, plan_transition, transition,
 };
-use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, Tier};
+use meshloop_domain::task_graph::{AcceptanceGate, GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
 use crate::converge::{RepairAction, RepairBudget, RepairSession};
@@ -172,7 +172,8 @@ pub struct RunLoop<'a> {
     pub pending_outcomes: HashMap<AttemptId, HarnessOutcome>,
 }
 
-/// Why a node is not progressing on its own (R1: every node stops for `meshloop accept`).
+/// Why a node is not progressing on its own.
+/// A verify gate on explicit tier 1 or 2 does not stop for `meshloop accept` (ADR 0037).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitingFor {
     Acceptance,
@@ -388,6 +389,20 @@ impl<'a> RunLoop<'a> {
         event: Event,
         reason: Option<String>,
     ) -> Result<TransitionRecord, OrchestratorError> {
+        self.append_as(graph_id, task, attempt, from, event, reason, "meshloop")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_as(
+        &mut self,
+        graph_id: &str,
+        task: TaskId,
+        attempt: Option<AttemptId>,
+        from: TaskState,
+        event: Event,
+        reason: Option<String>,
+        executor: &str,
+    ) -> Result<TransitionRecord, OrchestratorError> {
         let to = transition(from, event)
             .map_err(|_| OrchestratorError::Illegal(format!("{from:?} + {event:?} is illegal")))?;
         let rec = TransitionRecord {
@@ -398,7 +413,7 @@ impl<'a> RunLoop<'a> {
             to,
             event,
             reason,
-            executor: "meshloop".into(),
+            executor: executor.into(),
             occurred_at: stamp(),
         };
         self.store.append(rec.clone())?;
@@ -416,6 +431,93 @@ impl<'a> RunLoop<'a> {
             self.store.save_attempt(&row)?;
         }
         Ok(rec)
+    }
+
+    /// Explicit Tier1 or Tier2 only. Omitted tier is not Tier2, and Tier3 never auto-accepts.
+    fn verify_gate_eligible(node: &meshloop_domain::task_graph::TaskNode) -> bool {
+        node.gate == AcceptanceGate::Verify && matches!(node.tier, Some(Tier::Tier1 | Tier::Tier2))
+    }
+
+    /// Append `VerifyGatePassed` as `meshloop:verify-gate` when the node is already
+    /// `AwaitingReview` and the gate is eligible. `None` when the node is already
+    /// accepted, the gate does not apply, or checks did not leave it awaiting review.
+    fn append_verify_gate(
+        &mut self,
+        graph_id: &str,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt: AttemptId,
+    ) -> Result<Option<TransitionRecord>, OrchestratorError> {
+        let state = self
+            .tasks(graph_id)?
+            .get(&node.id)
+            .copied()
+            .unwrap_or(TaskState::Pending);
+        if matches!(state, TaskState::Accepted | TaskState::Integrated) {
+            return Ok(None);
+        }
+        if state != TaskState::AwaitingReview || !Self::verify_gate_eligible(node) {
+            return Ok(None);
+        }
+        self.append_as(
+            graph_id,
+            node.id,
+            Some(attempt),
+            TaskState::AwaitingReview,
+            Event::VerifyGatePassed,
+            None,
+            "meshloop:verify-gate",
+        )
+        .map(Some)
+    }
+
+    /// Deterministic check event, then the verify gate when that second append applies.
+    /// The returned record is the gate event when it is written. A failed check does
+    /// not append the gate. An already accepted node is not appended again.
+    fn append_deterministic_result(
+        &mut self,
+        graph_id: &str,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt: AttemptId,
+        passed: bool,
+        failure_reason: Option<String>,
+    ) -> Result<TransitionRecord, OrchestratorError> {
+        let state = self
+            .tasks(graph_id)?
+            .get(&node.id)
+            .copied()
+            .unwrap_or(TaskState::Pending);
+        if matches!(state, TaskState::Accepted | TaskState::Integrated) {
+            return Err(OrchestratorError::AlreadyAccepted(node.id));
+        }
+        if state == TaskState::AwaitingReview {
+            if !passed {
+                return Err(OrchestratorError::Illegal(
+                    "deterministic checks already passed".into(),
+                ));
+            }
+            return self
+                .append_verify_gate(graph_id, node, attempt)?
+                .ok_or_else(|| OrchestratorError::Illegal("verify gate is not eligible".into()));
+        }
+        let event = if passed {
+            Event::DeterministicChecksPassed
+        } else {
+            Event::DeterministicChecksFailed
+        };
+        let rec = self.append(
+            graph_id,
+            node.id,
+            Some(attempt),
+            TaskState::Verifying,
+            event,
+            if passed { None } else { failure_reason },
+        )?;
+        if !passed {
+            return Ok(rec);
+        }
+        Ok(self
+            .append_verify_gate(graph_id, node, attempt)?
+            .unwrap_or(rec))
     }
 
     fn tasks(&self, graph_id: &str) -> Result<HashMap<TaskId, TaskState>, OrchestratorError> {
@@ -787,6 +889,9 @@ impl<'a> RunLoop<'a> {
         }
 
         if let Some(tick) = self.promote_pending(&graph_id, &graph, &tasks)? {
+            return Ok(tick);
+        }
+        if let Some(tick) = self.resume_orphaned_verify_gate(&graph_id, &graph, &tasks)? {
             return Ok(tick);
         }
 
@@ -1851,16 +1956,9 @@ impl<'a> RunLoop<'a> {
             model_ref: candidate.model_ref.clone(),
             tier: crate::ports::TierKey::from(tier),
         };
+        let _ = self.store.record_outcome(&key, passed);
+        let rec = self.append_deterministic_result(graph_id, node, attempt_id, passed, None)?;
         if passed {
-            let _ = self.store.record_outcome(&key, true);
-            let rec = self.append(
-                graph_id,
-                node.id,
-                Some(attempt_id),
-                TaskState::Verifying,
-                Event::DeterministicChecksPassed,
-                None,
-            )?;
             Ok(Tick::Transition {
                 task: node.id,
                 attempt: Some(attempt_id),
@@ -1869,15 +1967,6 @@ impl<'a> RunLoop<'a> {
                 event: rec.event,
             })
         } else {
-            let _ = self.store.record_outcome(&key, false);
-            let rec = self.append(
-                graph_id,
-                node.id,
-                Some(attempt_id),
-                TaskState::Verifying,
-                Event::DeterministicChecksFailed,
-                None,
-            )?;
             self.maybe_fallback(graph_id, node.id, rec, &[])
         }
     }
@@ -2106,6 +2195,33 @@ impl<'a> RunLoop<'a> {
         node: &meshloop_domain::task_graph::TaskNode,
         attempt: Option<AttemptRow>,
     ) -> Result<Tick, OrchestratorError> {
+        let state = self
+            .tasks(graph_id)?
+            .get(&node.id)
+            .copied()
+            .unwrap_or(TaskState::Pending);
+        if matches!(state, TaskState::Accepted | TaskState::Integrated) {
+            return Err(OrchestratorError::AlreadyAccepted(node.id));
+        }
+        if state == TaskState::AwaitingReview {
+            let Some(row) = attempt else {
+                return Err(OrchestratorError::Illegal(
+                    "verify gate without attempt".into(),
+                ));
+            };
+            let Some(rec) = self.append_verify_gate(graph_id, node, row.attempt_id)? else {
+                return Err(OrchestratorError::Illegal(
+                    "verify gate is not eligible".into(),
+                ));
+            };
+            return Ok(Tick::Transition {
+                task: node.id,
+                attempt: rec.attempt_id,
+                from: rec.from,
+                to: rec.to,
+                event: rec.event,
+            });
+        }
         let Some(attempt) = attempt else {
             return self.fail_orphaned_verification(graph_id, node.id, None);
         };
@@ -2168,19 +2284,8 @@ impl<'a> RunLoop<'a> {
             },
             passed,
         );
-        let event = if passed {
-            Event::DeterministicChecksPassed
-        } else {
-            Event::DeterministicChecksFailed
-        };
-        let rec = self.append(
-            graph_id,
-            node.id,
-            Some(attempt.attempt_id),
-            TaskState::Verifying,
-            event,
-            None,
-        )?;
+        let rec =
+            self.append_deterministic_result(graph_id, node, attempt.attempt_id, passed, None)?;
         Ok(Tick::Transition {
             task: node.id,
             attempt: rec.attempt_id,
@@ -2188,6 +2293,28 @@ impl<'a> RunLoop<'a> {
             to: rec.to,
             event: rec.event,
         })
+    }
+
+    /// Checks already passed and the process died before `VerifyGatePassed`.
+    fn resume_orphaned_verify_gate(
+        &mut self,
+        graph_id: &str,
+        graph: &TaskGraph,
+        tasks: &HashMap<TaskId, TaskState>,
+    ) -> Result<Option<Tick>, OrchestratorError> {
+        for node in &graph.nodes {
+            if tasks.get(&node.id) != Some(&TaskState::AwaitingReview) {
+                continue;
+            }
+            if !Self::verify_gate_eligible(node) {
+                continue;
+            }
+            let attempt = self.store.latest_attempt_for_task(graph_id, node.id)?;
+            return Ok(Some(
+                self.finish_orphaned_verification(graph_id, node, attempt)?,
+            ));
+        }
+        Ok(None)
     }
 
     fn fail_orphaned_verification(
@@ -3892,8 +4019,10 @@ mod tests {
     }
 
     impl crate::ports::EvidenceStore for DispatchStore {
+        fn record(&mut self, _evidence: Evidence) -> Result<(), StoreError> {
+            Ok(())
+        }
         forbidden_port_calls! {
-            fn record(&mut self, evidence: Evidence) -> Result<(), StoreError>;
             fn evidence_for(&self, candidate: &CandidateRef) -> Result<Vec<Evidence>, StoreError>;
             fn evidence_for_attempt( &self, task_id: TaskId, attempt_id: AttemptId, ) -> Result<Vec<Evidence>, StoreError>;
         }
@@ -4115,6 +4244,7 @@ mod tests {
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             }],
         };
         let tick = run
@@ -4144,6 +4274,401 @@ mod tests {
                 .events
                 .iter()
                 .all(|event| event.event != Event::HarnessCrashedOrTimeout)
+        );
+    }
+
+    struct GateWorkspace {
+        files: Vec<String>,
+    }
+
+    impl WorkspacePort for GateWorkspace {
+        fn remove_file(&self, _worktree: &Path, _rel: &str) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        fn commit_all(&self, _worktree: &Path, _message: &str) -> Result<String, WorkspaceError> {
+            Ok("rev".into())
+        }
+        fn diff_against(
+            &self,
+            _worktree: &Path,
+            base: &str,
+        ) -> Result<DiffSummary, WorkspaceError> {
+            Ok(DiffSummary {
+                base: base.into(),
+                head: "rev".into(),
+                files: self.files.clone(),
+                stat_redacted: "stat".into(),
+            })
+        }
+        fn worktree_exists(&self, _path: &Path) -> bool {
+            true
+        }
+        fn head(&self, _worktree: &Path) -> Result<String, WorkspaceError> {
+            Ok("rev".into())
+        }
+        forbidden_port_calls! {
+            fn repo_root(&self) -> &Path;
+            fn add_worktree_from( &self, path: &Path, branch: &str, start_point: &str, ) -> Result<(), WorkspaceError>;
+            fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
+            fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
+            fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
+            fn prune(&self) -> Result<(), WorkspaceError>;
+            fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, WorkspaceError>;
+            fn checkout_ref(&self, git_ref: &str) -> Result<(), WorkspaceError>;
+            fn merge_ff_only(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn merge_no_ff(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn current_head(&self) -> Result<String, WorkspaceError>;
+            fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError>;
+            fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
+            fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
+            fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
+        }
+    }
+
+    fn gate_node(
+        tier: Option<Tier>,
+        gate: AcceptanceGate,
+    ) -> meshloop_domain::task_graph::TaskNode {
+        meshloop_domain::task_graph::TaskNode {
+            id: TaskId(1),
+            description: "worker".into(),
+            depends_on: vec![],
+            tier,
+            allowed_paths: vec![],
+            empty_diff_ok: false,
+            deliverable: None,
+            gate,
+        }
+    }
+
+    fn verify_tick(
+        node: &meshloop_domain::task_graph::TaskNode,
+        routed_tier: Tier,
+        files: Vec<String>,
+    ) -> (Tick, DispatchStore) {
+        let workspace = GateWorkspace { files };
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        let mut run = RunLoop {
+            harnesses: HashMap::new(),
+            candidates: vec![],
+            workspace: &workspace,
+            store: &mut store,
+            processes: &other,
+            checks: &other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command: vec![],
+            worktree_base: PathBuf::from("wt-base"),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node.clone()],
+        };
+        let tick = run
+            .verify_attempt(
+                "g",
+                &graph,
+                node,
+                AttemptId(1),
+                Path::new("wt"),
+                "base",
+                routed_tier,
+                &Candidate {
+                    harness: "fixture".into(),
+                    model_ref: "m".into(),
+                    model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+                },
+                &HarnessOutcome {
+                    exit_code: 0,
+                    output_redacted: String::new(),
+                    stderr_redacted: String::new(),
+                    worktree_changed: true,
+                },
+            )
+            .expect("verify");
+        drop(run);
+        (tick, store)
+    }
+
+    #[test]
+    fn tier1_verify_gate_accepts_as_verify_gate_executor() {
+        let node = gate_node(Some(Tier::Tier1), AcceptanceGate::Verify);
+        let (tick, store) = verify_tick(&node, Tier::Tier1, vec!["a.txt".into()]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::VerifyGatePassed,
+                    to: TaskState::Accepted,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        let checks = store
+            .events
+            .iter()
+            .find(|event| event.event == Event::DeterministicChecksPassed)
+            .expect("checks");
+        assert_eq!(checks.executor, "meshloop");
+        assert_eq!(checks.to, TaskState::AwaitingReview);
+        let gate = store
+            .events
+            .iter()
+            .find(|event| event.event == Event::VerifyGatePassed)
+            .expect("gate");
+        assert_eq!(gate.executor, "meshloop:verify-gate");
+        assert_eq!(gate.from, TaskState::AwaitingReview);
+        assert_eq!(gate.to, TaskState::Accepted);
+        assert_eq!(
+            replay_tasks(&store.events).expect("fold")[&TaskId(1)],
+            TaskState::Accepted
+        );
+    }
+
+    #[test]
+    fn tier2_verify_gate_accepts_as_verify_gate_executor() {
+        let node = gate_node(Some(Tier::Tier2), AcceptanceGate::Verify);
+        let (tick, store) = verify_tick(&node, Tier::Tier2, vec!["a.txt".into()]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::VerifyGatePassed,
+                    to: TaskState::Accepted,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert_eq!(
+            store.events.last().expect("gate").executor,
+            "meshloop:verify-gate"
+        );
+    }
+
+    #[test]
+    fn human_gate_stays_awaiting_review_after_deterministic_pass() {
+        let node = gate_node(Some(Tier::Tier1), AcceptanceGate::Human);
+        let (tick, store) = verify_tick(&node, Tier::Tier1, vec!["a.txt".into()]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::DeterministicChecksPassed,
+                    to: TaskState::AwaitingReview,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert!(
+            store
+                .events
+                .iter()
+                .all(|event| event.event != Event::VerifyGatePassed)
+        );
+        assert_eq!(store.events.last().expect("event").executor, "meshloop");
+    }
+
+    #[test]
+    fn tier3_verify_gate_bypassing_validation_stays_awaiting_review() {
+        let node = gate_node(Some(Tier::Tier3), AcceptanceGate::Verify);
+        let (tick, store) = verify_tick(&node, Tier::Tier3, vec!["a.txt".into()]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::DeterministicChecksPassed,
+                    to: TaskState::AwaitingReview,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert!(
+            store
+                .events
+                .iter()
+                .all(|event| event.event != Event::VerifyGatePassed)
+        );
+    }
+
+    #[test]
+    fn omitted_tier_verify_gate_does_not_use_the_routed_tier() {
+        let node = gate_node(None, AcceptanceGate::Verify);
+        let (tick, store) = verify_tick(&node, Tier::Tier2, vec!["a.txt".into()]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::DeterministicChecksPassed,
+                    to: TaskState::AwaitingReview,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert!(
+            store
+                .events
+                .iter()
+                .all(|event| event.event != Event::VerifyGatePassed)
+        );
+    }
+
+    #[test]
+    fn failed_checks_do_not_append_verify_gate() {
+        let node = gate_node(Some(Tier::Tier2), AcceptanceGate::Verify);
+        let (tick, store) = verify_tick(&node, Tier::Tier2, vec![]);
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::DeterministicChecksFailed,
+                    to: TaskState::Failed,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert!(
+            store
+                .events
+                .iter()
+                .all(|event| event.event != Event::VerifyGatePassed)
+        );
+    }
+
+    #[test]
+    fn orphaned_awaiting_review_appends_verify_gate_once() {
+        let workspace = GateWorkspace {
+            files: vec!["a.txt".into()],
+        };
+        let other = admission_ports(Ok(None));
+        let node = gate_node(Some(Tier::Tier1), AcceptanceGate::Verify);
+        let mut store = DispatchStore::new();
+        store.events.push(TransitionRecord {
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            attempt_id: Some(AttemptId(4)),
+            from: TaskState::Verifying,
+            to: TaskState::AwaitingReview,
+            event: Event::DeterministicChecksPassed,
+            reason: None,
+            executor: "meshloop".into(),
+            occurred_at: "1".into(),
+        });
+        store.attempts.push(AttemptRow {
+            attempt_id: AttemptId(4),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: Some("fixture".into()),
+            model_ref: Some("m".into()),
+            worktree_path: Some(PathBuf::from("wt")),
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: Some("1".into()),
+            ended_at: Some("1".into()),
+            outcome: Some("base:base".into()),
+        });
+        let attempt = store
+            .latest_attempt_for_task("g", TaskId(1))
+            .expect("attempt")
+            .expect("row");
+        let tick = {
+            let mut run = RunLoop {
+                harnesses: HashMap::new(),
+                candidates: vec![],
+                workspace: &workspace,
+                store: &mut store,
+                processes: &other,
+                checks: &other,
+                router: Router::default(),
+                limits: RunLimits {
+                    max_retries: 1,
+                    task_timeout: Duration::from_secs(1),
+                    max_concurrent_workers: 1,
+                },
+                fixture_only: true,
+                verify_command: vec![],
+                worktree_base: PathBuf::from("wt-base"),
+                active_graph: Some("g".into()),
+                planner: PlannerSelection::default(),
+                pending_outcomes: HashMap::new(),
+            };
+            run.finish_orphaned_verification("g", &node, Some(attempt))
+                .expect("orphan gate")
+        };
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::VerifyGatePassed,
+                    to: TaskState::Accepted,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+        assert_eq!(
+            store
+                .events
+                .iter()
+                .filter(|event| event.event == Event::VerifyGatePassed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            store.events.last().expect("gate").executor,
+            "meshloop:verify-gate"
+        );
+        let again = store
+            .latest_attempt_for_task("g", TaskId(1))
+            .expect("attempt");
+        let err = {
+            let mut run = RunLoop {
+                harnesses: HashMap::new(),
+                candidates: vec![],
+                workspace: &workspace,
+                store: &mut store,
+                processes: &other,
+                checks: &other,
+                router: Router::default(),
+                limits: RunLimits {
+                    max_retries: 1,
+                    task_timeout: Duration::from_secs(1),
+                    max_concurrent_workers: 1,
+                },
+                fixture_only: true,
+                verify_command: vec![],
+                worktree_base: PathBuf::from("wt-base"),
+                active_graph: Some("g".into()),
+                planner: PlannerSelection::default(),
+                pending_outcomes: HashMap::new(),
+            };
+            run.finish_orphaned_verification("g", &node, again)
+                .expect_err("already accepted")
+        };
+        assert!(matches!(err, OrchestratorError::AlreadyAccepted(_)));
+        assert_eq!(
+            store
+                .events
+                .iter()
+                .filter(|event| event.event == Event::VerifyGatePassed)
+                .count(),
+            1
         );
     }
 }

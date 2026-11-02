@@ -615,7 +615,7 @@ mod tests {
     use super::*;
     use crate::ports::HarnessHandle;
     use meshloop_domain::evidence::AttemptId;
-    use meshloop_domain::task_graph::TaskId;
+    use meshloop_domain::task_graph::{AcceptanceGate, TaskId};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -756,6 +756,7 @@ mod tests {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(2),
@@ -765,6 +766,7 @@ mod tests {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(3),
@@ -774,6 +776,7 @@ mod tests {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 },
             ],
         };
@@ -794,6 +797,7 @@ mod tests {
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             }],
         };
         assign_tiers(&mut graph, &DefaultTierAssigner);
