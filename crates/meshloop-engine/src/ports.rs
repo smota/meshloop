@@ -1,11 +1,14 @@
 //! Trait definitions only (Ports and Adapters — design-patterns.md). No concrete
 //! subprocess, Herdr, or SQLite code belongs here; meshloop-adapters implements these.
+//! `ScriptedDecisionPort` is an in-memory test double with no I/O, not an adapter.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use meshloop_domain::capability::{HarnessError, HarnessProfile, QuotaState};
+use meshloop_domain::decision::{Confidence, DecisionOutcome};
+use meshloop_domain::digest::ArtifactDigest;
 use meshloop_domain::evidence::{AttemptId, CandidateRef, DeterministicEvidence, Evidence};
 use meshloop_domain::state::{Event, PlanState, TaskState};
 use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
@@ -459,9 +462,177 @@ impl EvidenceStore for InMemoryEvidenceStore {
     }
 }
 
+/// Failure of a decision port. Not a domain `DecisionError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionPortError {
+    EmptyQuery,
+    BatchTooLarge { len: usize },
+    Unscripted { fingerprint: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceQuery {
+    pub prompt: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoulQuery {
+    pub proposition: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreQuery {
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchNoulQuery {
+    pub propositions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleQuery {
+    pub arm: String,
+    pub pulls: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OracleOutcome {
+    pub prior: Confidence,
+}
+
+/// System 1 choice, noul, score, and batched noul queries. No transport.
+pub trait DecisionPort {
+    fn evaluate_choice(&self, query: &ChoiceQuery) -> Result<DecisionOutcome, DecisionPortError>;
+    fn evaluate_noul(&self, query: &NoulQuery) -> Result<DecisionOutcome, DecisionPortError>;
+    fn evaluate_score(&self, query: &ScoreQuery) -> Result<DecisionOutcome, DecisionPortError>;
+    fn evaluate_batch_noul(
+        &self,
+        query: &BatchNoulQuery,
+    ) -> Result<Vec<DecisionOutcome>, DecisionPortError>;
+}
+
+/// Prior for a predictive-success arm. Not a routing arm.
+pub trait PredictiveSuccessOracle {
+    fn predict(&self, query: &OracleQuery) -> Result<OracleOutcome, DecisionPortError>;
+}
+
+const MAX_BATCH_PROPOSITIONS: usize = 24;
+
+/// SHA-256 hex of `label`, then `\n` and each part, with no trailing newline.
+pub fn decision_fingerprint(label: &str, parts: &[&str]) -> String {
+    let mut bytes =
+        Vec::with_capacity(label.len() + parts.iter().map(|part| 1 + part.len()).sum::<usize>());
+    bytes.extend_from_slice(label.as_bytes());
+    for part in parts {
+        bytes.push(b'\n');
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    ArtifactDigest::sha256(&bytes).digest
+}
+
+/// In-memory test double for [`DecisionPort`] and [`PredictiveSuccessOracle`].
+/// No file, network, clock, or process I/O. Not an adapter.
+#[derive(Debug, Default)]
+pub struct ScriptedDecisionPort {
+    outcomes: HashMap<String, DecisionOutcome>,
+    oracles: HashMap<String, OracleOutcome>,
+}
+
+impl ScriptedDecisionPort {
+    pub fn insert(&mut self, fingerprint: String, outcome: DecisionOutcome) {
+        self.outcomes.insert(fingerprint, outcome);
+    }
+
+    pub fn insert_oracle(&mut self, fingerprint: String, outcome: OracleOutcome) {
+        self.oracles.insert(fingerprint, outcome);
+    }
+
+    fn scripted(&self, fingerprint: String) -> Result<DecisionOutcome, DecisionPortError> {
+        self.outcomes
+            .get(&fingerprint)
+            .cloned()
+            .ok_or(DecisionPortError::Unscripted { fingerprint })
+    }
+}
+
+impl DecisionPort for ScriptedDecisionPort {
+    fn evaluate_choice(&self, query: &ChoiceQuery) -> Result<DecisionOutcome, DecisionPortError> {
+        if query.prompt.is_empty()
+            || query.options.is_empty()
+            || query.options.iter().any(String::is_empty)
+        {
+            return Err(DecisionPortError::EmptyQuery);
+        }
+        let mut parts = Vec::with_capacity(1 + query.options.len());
+        parts.push(query.prompt.as_str());
+        parts.extend(query.options.iter().map(String::as_str));
+        self.scripted(decision_fingerprint("choice", &parts))
+    }
+
+    fn evaluate_noul(&self, query: &NoulQuery) -> Result<DecisionOutcome, DecisionPortError> {
+        if query.proposition.is_empty() {
+            return Err(DecisionPortError::EmptyQuery);
+        }
+        self.scripted(decision_fingerprint("noul", &[query.proposition.as_str()]))
+    }
+
+    fn evaluate_score(&self, query: &ScoreQuery) -> Result<DecisionOutcome, DecisionPortError> {
+        if query.subject.is_empty() {
+            return Err(DecisionPortError::EmptyQuery);
+        }
+        self.scripted(decision_fingerprint("score", &[query.subject.as_str()]))
+    }
+
+    fn evaluate_batch_noul(
+        &self,
+        query: &BatchNoulQuery,
+    ) -> Result<Vec<DecisionOutcome>, DecisionPortError> {
+        if query.propositions.is_empty() || query.propositions.iter().any(String::is_empty) {
+            return Err(DecisionPortError::EmptyQuery);
+        }
+        if query.propositions.len() > MAX_BATCH_PROPOSITIONS {
+            return Err(DecisionPortError::BatchTooLarge {
+                len: query.propositions.len(),
+            });
+        }
+        let parts: Vec<&str> = query.propositions.iter().map(String::as_str).collect();
+        let outcome = self.scripted(decision_fingerprint("batch-noul", &parts))?;
+        // The map stores one outcome per fingerprint. Apply it to every proposition.
+        Ok(vec![outcome; query.propositions.len()])
+    }
+}
+
+impl PredictiveSuccessOracle for ScriptedDecisionPort {
+    fn predict(&self, query: &OracleQuery) -> Result<OracleOutcome, DecisionPortError> {
+        if query.arm.is_empty() {
+            return Err(DecisionPortError::EmptyQuery);
+        }
+        let pulls = query.pulls.to_string();
+        let fingerprint = decision_fingerprint("oracle", &[query.arm.as_str(), pulls.as_str()]);
+        self.oracles
+            .get(&fingerprint)
+            .copied()
+            .ok_or(DecisionPortError::Unscripted { fingerprint })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use meshloop_domain::decision::SanitizedReason;
+    use meshloop_domain::digest::ArtifactDigest;
+
     use super::*;
+
+    fn spec_digest(label: &str, parts: &[&str]) -> String {
+        let mut bytes = label.as_bytes().to_vec();
+        for part in parts {
+            bytes.push(b'\n');
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        ArtifactDigest::sha256(&bytes).digest
+    }
 
     #[test]
     fn in_memory_feedback_store_accumulates_counters() {
@@ -480,6 +651,247 @@ mod tests {
                 success: 1,
                 failure: 1
             }
+        );
+    }
+
+    #[test]
+    fn decision_port_rejects_empty_queries_without_inserting() {
+        let port = ScriptedDecisionPort::default();
+
+        assert_eq!(
+            port.evaluate_choice(&ChoiceQuery {
+                prompt: String::new(),
+                options: vec!["keep".into()],
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_choice(&ChoiceQuery {
+                prompt: "pick".into(),
+                options: Vec::new(),
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_choice(&ChoiceQuery {
+                prompt: "pick".into(),
+                options: vec!["keep".into(), String::new()],
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_noul(&NoulQuery {
+                proposition: String::new(),
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_score(&ScoreQuery {
+                subject: String::new(),
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_batch_noul(&BatchNoulQuery {
+                propositions: Vec::new(),
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+        assert_eq!(
+            port.evaluate_batch_noul(&BatchNoulQuery {
+                propositions: vec!["ok".into(), String::new()],
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+
+        assert_eq!(MAX_BATCH_PROPOSITIONS, 24);
+        let too_many: Vec<String> = (0..=MAX_BATCH_PROPOSITIONS)
+            .map(|i| format!("p{i}"))
+            .collect();
+        assert_eq!(too_many.len(), 25);
+        assert_eq!(
+            port.evaluate_batch_noul(&BatchNoulQuery {
+                propositions: too_many,
+            }),
+            Err(DecisionPortError::BatchTooLarge { len: 25 })
+        );
+
+        let at_limit: Vec<String> = (0..MAX_BATCH_PROPOSITIONS)
+            .map(|i| format!("p{i}"))
+            .collect();
+        let limit_parts: Vec<&str> = at_limit.iter().map(String::as_str).collect();
+        let limit_fp = decision_fingerprint("batch-noul", &limit_parts);
+        assert_eq!(
+            port.evaluate_batch_noul(&BatchNoulQuery {
+                propositions: at_limit,
+            }),
+            Err(DecisionPortError::Unscripted {
+                fingerprint: limit_fp,
+            })
+        );
+
+        assert_eq!(
+            port.predict(&OracleQuery {
+                arm: String::new(),
+                pulls: 1,
+            }),
+            Err(DecisionPortError::EmptyQuery)
+        );
+
+        assert!(port.outcomes.is_empty());
+        assert!(port.oracles.is_empty());
+    }
+
+    #[test]
+    fn decision_port_choice_fingerprint_returns_only_scripted_outcome() {
+        let query = ChoiceQuery {
+            prompt: "pick".into(),
+            options: vec!["keep".into(), "drop".into()],
+        };
+        let same = ChoiceQuery {
+            prompt: "pick".into(),
+            options: vec!["keep".into(), "drop".into()],
+        };
+        let parts = ["pick", "keep", "drop"];
+        let fingerprint = decision_fingerprint("choice", &parts);
+        assert_eq!(fingerprint, decision_fingerprint("choice", &parts));
+        assert_eq!(fingerprint, spec_digest("choice", &parts));
+        assert_eq!(fingerprint.len(), 64);
+        assert!(
+            fingerprint
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert_ne!(
+            fingerprint,
+            ArtifactDigest::sha256(b"choice\npick\nkeep\ndrop\n").digest
+        );
+
+        let outcome = DecisionOutcome::try_selected("keep").unwrap();
+        let mut port = ScriptedDecisionPort::default();
+        port.insert(fingerprint.clone(), outcome.clone());
+        assert_eq!(port.evaluate_choice(&query).unwrap(), outcome);
+        assert_eq!(port.evaluate_choice(&same).unwrap(), outcome);
+
+        let other = ChoiceQuery {
+            prompt: "pick".into(),
+            options: vec!["drop".into(), "keep".into()],
+        };
+        let other_fp = decision_fingerprint("choice", &["pick", "drop", "keep"]);
+        assert_ne!(other_fp, fingerprint);
+        assert_eq!(
+            port.evaluate_choice(&other),
+            Err(DecisionPortError::Unscripted {
+                fingerprint: other_fp,
+            })
+        );
+    }
+
+    #[test]
+    fn decision_port_choice_prompt_change_is_unscripted() {
+        let fingerprint = decision_fingerprint("choice", &["pick", "keep"]);
+        let mut port = ScriptedDecisionPort::default();
+        port.insert(fingerprint, DecisionOutcome::Boolean(true));
+        let changed_fp = decision_fingerprint("choice", &["rick", "keep"]);
+        assert_ne!(
+            changed_fp,
+            decision_fingerprint("choice", &["pick", "keep"])
+        );
+        assert_eq!(
+            port.evaluate_choice(&ChoiceQuery {
+                prompt: "rick".into(),
+                options: vec!["keep".into()],
+            }),
+            Err(DecisionPortError::Unscripted {
+                fingerprint: changed_fp,
+            })
+        );
+    }
+
+    #[test]
+    fn decision_port_choice_returns_scripted_abstain() {
+        let reason = SanitizedReason::try_new("needs a human").unwrap();
+        let outcome = DecisionOutcome::abstain(reason.clone());
+        let fingerprint = decision_fingerprint("choice", &["pick", "keep"]);
+        let mut port = ScriptedDecisionPort::default();
+        port.insert(fingerprint, outcome);
+        match port
+            .evaluate_choice(&ChoiceQuery {
+                prompt: "pick".into(),
+                options: vec!["keep".into()],
+            })
+            .unwrap()
+        {
+            DecisionOutcome::Abstain(got) => assert_eq!(got.as_str(), reason.as_str()),
+            other => panic!("expected Abstain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decision_port_predict_matches_arm_and_pulls() {
+        let fingerprint = decision_fingerprint("oracle", &["repair", "10"]);
+        assert_eq!(fingerprint, spec_digest("oracle", &["repair", "10"]));
+        let prior = Confidence::try_new(0.5).unwrap();
+        let mut port = ScriptedDecisionPort::default();
+        port.insert_oracle(fingerprint, OracleOutcome { prior });
+        assert_eq!(
+            port.predict(&OracleQuery {
+                arm: "repair".into(),
+                pulls: 10,
+            })
+            .unwrap()
+            .prior,
+            prior
+        );
+        let changed_fp = decision_fingerprint("oracle", &["repair", "11"]);
+        assert_eq!(
+            port.predict(&OracleQuery {
+                arm: "repair".into(),
+                pulls: 11,
+            }),
+            Err(DecisionPortError::Unscripted {
+                fingerprint: changed_fp,
+            })
+        );
+    }
+
+    #[test]
+    fn decision_port_noul_score_and_batch_use_fingerprints() {
+        let yes = DecisionOutcome::Boolean(true);
+        let scored = DecisionOutcome::try_score(1.5).unwrap();
+        let mut port = ScriptedDecisionPort::default();
+        port.insert(decision_fingerprint("noul", &["safe"]), yes.clone());
+        port.insert(decision_fingerprint("score", &["diff"]), scored.clone());
+        port.insert(decision_fingerprint("batch-noul", &["a", "b"]), yes.clone());
+
+        assert_eq!(
+            port.evaluate_noul(&NoulQuery {
+                proposition: "safe".into(),
+            })
+            .unwrap(),
+            yes
+        );
+        assert_eq!(
+            port.evaluate_score(&ScoreQuery {
+                subject: "diff".into(),
+            })
+            .unwrap(),
+            scored
+        );
+        assert_eq!(
+            port.evaluate_batch_noul(&BatchNoulQuery {
+                propositions: vec!["a".into(), "b".into()],
+            })
+            .unwrap(),
+            vec![yes.clone(), yes]
+        );
+        assert_eq!(
+            port.evaluate_noul(&NoulQuery {
+                proposition: "safer".into(),
+            }),
+            Err(DecisionPortError::Unscripted {
+                fingerprint: decision_fingerprint("noul", &["safer"]),
+            })
         );
     }
 }
