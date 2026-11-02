@@ -232,4 +232,46 @@ mod tests {
             &evidence
         ));
     }
+
+    // Externally tagged payloads of today's shapes. A new required field fails `from_str`.
+    #[test]
+    fn handwritten_model_review_and_deterministic_payloads_round_trip() {
+        let model_review = r#"{
+            "ModelReview": {
+                "candidate": {"task_id": 1, "attempt_id": 1, "revision": "deadbeef"},
+                "harness": "noul",
+                "model_ref": "scripted",
+                "verdict": "Pass",
+                "rationale_redacted": "p=0.95"
+            }
+        }"#;
+        let deterministic_payload = r#"{
+            "Deterministic": {
+                "candidate": {"task_id": 1, "attempt_id": 1, "revision": "deadbeef"},
+                "tool": "cargo test",
+                "tool_version": "1.98.0",
+                "exit_code": 0,
+                "output_redacted": "ok"
+            }
+        }"#;
+        assert_eq!(
+            round_trip_payload(model_review),
+            Evidence::ModelReview(ModelReviewEvidence {
+                candidate: candidate(),
+                harness: "noul".into(),
+                model_ref: "scripted".into(),
+                verdict: ReviewVerdict::Pass,
+                rationale_redacted: "p=0.95".into(),
+            })
+        );
+        assert_eq!(round_trip_payload(deterministic_payload), deterministic());
+    }
+
+    fn round_trip_payload(payload: &str) -> Evidence {
+        let parsed: Evidence = serde_json::from_str(payload).expect("handwritten payload");
+        let encoded = serde_json::to_string(&parsed).expect("serialize");
+        let again: Evidence = serde_json::from_str(&encoded).expect("round trip");
+        assert_eq!(parsed, again);
+        parsed
+    }
 }
