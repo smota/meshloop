@@ -48,6 +48,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0029 | Deterministic loop algorithms and quantized signature retrieval | Proposed |
 | 0030 | Internalized petgraph DAG engine, parametric manifests, and scheduling latency gates | Accepted |
 | 0031 | Deterministic Markdown AST context engineering and document skeleton extraction | Accepted |
+| 0032 | [System 1 decision port](0032-system1-decision-port.md) | Accepted |
 | 0033 | Workspace lifecycle and durable history | Accepted |
 | 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Accepted |
 | 0035 | [Atomic Windows process assignment to owned jobs](0035-atomic-process-job-assignment.md) | Accepted |
