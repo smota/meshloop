@@ -439,8 +439,43 @@ fn registered(
     Ok(bytes.split(|b| *b == 0).any(|record| {
         record
             .strip_prefix(b"worktree ")
-            .is_some_and(|p| std::ffi::OsStr::new(path).as_encoded_bytes() == p)
+            .is_some_and(|listed| same_worktree(listed, path))
     }))
+}
+
+/// Git for Windows prints worktree paths with `/`. Compare the filesystem
+/// identity when both paths exist, and the separator-normalized text otherwise.
+fn same_worktree(listed: &[u8], path: &Path) -> bool {
+    let Ok(text) = std::str::from_utf8(listed) else {
+        return false;
+    };
+    let text = text.trim_end_matches(['\r', '\n']);
+    if text.is_empty() {
+        return false;
+    }
+    let listed = PathBuf::from(text);
+    if same_path_text(&listed, path) {
+        return true;
+    }
+    match (std::fs::canonicalize(&listed), std::fs::canonicalize(path)) {
+        (Ok(left), Ok(right)) => same_path_text(&left, &right),
+        _ => false,
+    }
+}
+
+fn same_path_text(left: &Path, right: &Path) -> bool {
+    fn fold(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        #[cfg(windows)]
+        {
+            text.replace('/', "\\").to_ascii_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            text.into_owned()
+        }
+    }
+    fold(left) == fold(right)
 }
 
 /// Apply only a digest-bound preview, journaling each non-forced git removal.
