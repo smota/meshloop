@@ -77,7 +77,23 @@ mod tests {
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut output = run_git(repo, args);
+        // Git for Windows can fail `init` while copying hook templates (`File exists`).
+        // Drop the partial `.git` and try once more. The assertion still stands.
+        if args.first() == Some(&"init") && template_copy_race(&output) {
+            fs::remove_dir_all(repo.join(".git")).ok();
+            output = run_git(repo, args);
+        }
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
             .current_dir(repo)
             .args(args)
             .env("GIT_AUTHOR_NAME", "meshloop")
@@ -87,13 +103,15 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .guarded_output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+            .unwrap()
+    }
+
+    fn template_copy_race(output: &std::process::Output) -> bool {
+        if output.status.success() {
+            return false;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        stderr.contains("cannot copy") && stderr.contains("File exists")
     }
 
     fn fixture() -> Fixture {
