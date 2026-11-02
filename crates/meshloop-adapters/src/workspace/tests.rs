@@ -2489,7 +2489,7 @@ fn cleanup_recovery_crash_points_and_disagreement() {
             )
             .digest;
             let interrupted = apply_cleanup(scope(), &digest, Some(fault)).unwrap();
-            assert_eq!(interrupted.status, "interrupted");
+            assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
             assert!(!interrupted.apply);
             assert_eq!(path.exists(), fault == CleanupFault::AfterIntent);
             if disagree {
@@ -2620,12 +2620,9 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
                 .unwrap();
             assert_eq!(steps, ["blocked", "intent"]);
         } else {
-            assert_eq!(
-                apply_cleanup(scope(), &digest, Some(CleanupFault::AfterIntent))
-                    .unwrap()
-                    .status,
-                "interrupted"
-            );
+            let interrupted =
+                apply_cleanup(scope(), &digest, Some(CleanupFault::AfterIntent)).unwrap();
+            assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
             std::fs::write(paths[0].join("protected.txt"), "dirty").unwrap();
             let result = apply_cleanup(scope(), &digest, None).unwrap();
             assert!(!result.apply);

@@ -16,12 +16,24 @@ use super::{InventoryScope, RegistryView};
 
 /// Observe `inventory` entries. Paths outside the checkout are flagged and not walked.
 pub fn observe_cleanup(scope: InventoryScope<'_>, entries: &[InventoryEntry]) -> ObservedCleanup {
+    observe_cleanup_with(scope, entries, None)
+}
+
+fn observe_cleanup_with(
+    scope: InventoryScope<'_>,
+    entries: &[InventoryEntry],
+    held: Option<&RegistryView>,
+) -> ObservedCleanup {
     let common = common_dir(scope.checkout);
-    let registry = common.as_ref().and_then(|dir| {
-        super::read_registry(&dir.join("meshloop-workspace-registry.json")).unwrap_or_default()
-    });
+    let owned = if let Some(view) = held {
+        Some(view.clone())
+    } else {
+        common.as_ref().and_then(|dir| {
+            super::read_registry(&dir.join("meshloop-workspace-registry.json")).unwrap_or_default()
+        })
+    };
+    let registry = owned.as_ref();
     let repository_id = registry
-        .as_ref()
         .map(|view| view.repository.id.clone())
         .unwrap_or_else(unbound_repository);
     let retained_ref = read_retained_ref(scope.checkout);
@@ -34,7 +46,7 @@ pub fn observe_cleanup(scope: InventoryScope<'_>, entries: &[InventoryEntry]) ->
                 entry,
                 scope.checkout,
                 scope.configured_root,
-                registry.as_ref(),
+                registry,
                 checkout_canon.as_deref(),
                 retained_commit.as_ref(),
             )
@@ -391,10 +403,17 @@ fn copy_scope<'a>(scope: &InventoryScope<'a>) -> InventoryScope<'a> {
 }
 
 fn preview(scope: &InventoryScope<'_>) -> (Vec<InventoryEntry>, ObservedCleanup) {
-    let inventory = meshloop_engine::workspace::inventory::classify(&super::discover_inventory(
-        copy_scope(scope),
-    ));
-    let observed = observe_cleanup(copy_scope(scope), &inventory.entries);
+    preview_with(scope, None)
+}
+
+fn preview_with(
+    scope: &InventoryScope<'_>,
+    held: Option<&RegistryView>,
+) -> (Vec<InventoryEntry>, ObservedCleanup) {
+    let inventory = meshloop_engine::workspace::inventory::classify(
+        &super::inventory::discover_inventory_with(copy_scope(scope), held),
+    );
+    let observed = observe_cleanup_with(copy_scope(scope), &inventory.entries, held);
     (inventory.entries, observed)
 }
 
@@ -412,16 +431,24 @@ fn verdict(
     )
 }
 
-fn candidate_path(scope: &InventoryScope<'_>, entry: &InventoryEntry) -> Option<PathBuf> {
-    let common = common_dir(scope.checkout)?;
-    let registry =
-        super::read_registry(&common.join("meshloop-workspace-registry.json")).ok()??;
+fn candidate_path(
+    scope: &InventoryScope<'_>,
+    entry: &InventoryEntry,
+    held: Option<&RegistryView>,
+) -> Option<PathBuf> {
+    let owned = if let Some(view) = held {
+        Some(view.clone())
+    } else {
+        let common = common_dir(scope.checkout)?;
+        super::read_registry(&common.join("meshloop-workspace-registry.json")).ok()?
+    };
+    let registry = owned.as_ref()?;
     let location = entry.location.as_ref()?;
     let root = location_root(
         location,
         scope.checkout,
         scope.configured_root,
-        Some(&registry),
+        Some(registry),
     )?;
     Some(join_relative(&root, &location.relative_path))
 }
@@ -465,17 +492,39 @@ fn same_worktree(listed: &[u8], path: &Path) -> bool {
 
 fn same_path_text(left: &Path, right: &Path) -> bool {
     fn fold(path: &Path) -> String {
-        let text = path.to_string_lossy();
         #[cfg(windows)]
         {
-            text.replace('/', "\\").to_ascii_lowercase()
+            let mut text = path.to_string_lossy().replace('/', "\\");
+            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                text = format!(r"\\{rest}");
+            } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+                text = rest.to_string();
+            }
+            text.make_ascii_lowercase();
+            text
         }
         #[cfg(not(windows))]
         {
-            text.into_owned()
+            path.to_string_lossy().into_owned()
         }
     }
     fold(left) == fold(right)
+}
+
+/// Git for Windows rejects `\\?\` paths in `worktree remove`. The registry
+/// stores canonical paths, which carry that prefix on Windows.
+fn git_worktree_arg(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    PathBuf::from(text.as_ref())
 }
 
 /// Apply only a digest-bound preview, journaling each non-forced git removal.
@@ -530,7 +579,7 @@ pub fn apply_cleanup(
     for (key, step, token) in &journal {
         let saved: BeforeToken = serde_json::from_str(token).map_err(cleanup_error)?;
         let before = &saved.candidate;
-        let Some(path) = candidate_path(&scope, &before.0) else {
+        let Some(path) = candidate_path(&scope, &before.0, None) else {
             report.status = "recovery-required";
             return Ok(report);
         };
@@ -621,7 +670,8 @@ pub fn apply_cleanup(
         report.status = "recovery-required";
         return Ok(report);
     }
-    let _fence = super::GitRepositoryIdentity::new("git").acquire(scope.checkout, scope.ledger)?;
+    let fence = super::GitRepositoryIdentity::new("git").acquire(scope.checkout, scope.ledger)?;
+    let held = fence.registry_view();
     let conn = Connection::open(scope.ledger).map_err(cleanup_error)?;
     super::schema::migrate(&conn)?;
     let write = |key: &str,
@@ -632,11 +682,11 @@ pub fn apply_cleanup(
         Ok(())
     };
     for before in eligible {
-        let path = candidate_path(&scope, &before.0);
+        let path = candidate_path(&scope, &before.0, Some(&held));
         let aliases = entries
             .iter()
             .zip(&observed.observations)
-            .filter(|(entry, _)| **entry != before.0 && candidate_path(&scope, entry) == path)
+            .filter(|(entry, _)| **entry != before.0 && candidate_path(&scope, entry, Some(&held)) == path)
             .map(|(entry, observation)| (entry.clone(), observation.clone()))
             .collect();
         let token = serde_json::to_string(&BeforeToken {
@@ -649,7 +699,7 @@ pub fn apply_cleanup(
             write(&key, "completed", &token)?;
             continue;
         }
-        let (now_entries, now_observed) = preview(&scope);
+        let (now_entries, now_observed) = preview_with(&scope, Some(&held));
         let now = verdict(&now_entries, &now_observed);
         let valid = now_entries
             .iter()
@@ -661,14 +711,25 @@ pub fn apply_cleanup(
                     && c.location == before.0.location
                     && c.status == CleanupEligibility::Eligible
             });
-        let Some(path) = candidate_path(&scope, &before.0) else {
+        let Some(path) = candidate_path(&scope, &before.0, Some(&held)) else {
+            report.reasons.push("candidate-path");
             report.status = "recovery-required";
             return Ok(report);
         };
         let safe = path != scope.checkout
             && !scope.ledger.starts_with(&path)
             && common_dir(scope.checkout).is_some_and(|p| !p.starts_with(&path));
-        if !valid || !safe || !registered(&scope, &path)? {
+        let listed = registered(&scope, &path)?;
+        if !valid || !safe || !listed {
+            if !valid {
+                report.reasons.push("revalidation");
+            }
+            if !safe {
+                report.reasons.push("unsafe-path");
+            }
+            if !listed {
+                report.reasons.push("unregistered");
+            }
             write(&key, "blocked", &token)?;
             report.status = "recovery-required";
             return Ok(report);
@@ -682,7 +743,7 @@ pub fn apply_cleanup(
         command
             .current_dir(scope.checkout)
             .args(["worktree", "remove"])
-            .arg(&path);
+            .arg(git_worktree_arg(&path));
         if let Err(error) = super::bounded_stdout(command, Duration::from_secs(10)) {
             write(&key, "blocked", &token)?;
             return Err(error);

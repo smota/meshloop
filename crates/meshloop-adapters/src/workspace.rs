@@ -195,10 +195,12 @@ impl RepositoryIdentity for GitRepositoryIdentity {
         self.acquire_with(checkout, ledger, &native_identity)
     }
 }
+#[derive(Clone)]
 pub(crate) struct RegistryRoot {
     pub path: PathBuf,
     pub identity: NativeIdentity,
 }
+#[derive(Clone)]
 pub(crate) struct RegistryView {
     pub repository: RepositoryRecord,
     pub common_identity: NativeIdentity,
@@ -269,6 +271,31 @@ pub struct RepositoryLease {
     manifest: Manifest,
 }
 impl RepositoryLease {
+    /// Registry snapshot captured while this lease holds the file.
+    ///
+    /// Windows `LockFileEx` is mandatory: another handle in this process cannot
+    /// read the locked registry. Callers revalidate from this snapshot.
+    pub(crate) fn registry_view(&self) -> RegistryView {
+        RegistryView {
+            repository: self.manifest.repository.clone(),
+            common_identity: self.manifest.common.native_identity.clone(),
+            ledger_identity: self.manifest.ledger.native_identity.clone(),
+            roots: self
+                .manifest
+                .roots
+                .iter()
+                .map(|(alias, root)| {
+                    (
+                        alias.clone(),
+                        RegistryRoot {
+                            path: root.canonical_path.clone(),
+                            identity: root.native_identity.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
     pub fn register_root(
         &mut self,
         alias: RootAlias,
