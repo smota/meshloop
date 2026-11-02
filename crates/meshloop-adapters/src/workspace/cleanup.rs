@@ -387,6 +387,12 @@ struct BeforeToken {
     // Inventory may represent the same worktree both as ledger-owned and git-registered.
     aliases: Vec<Before>,
 }
+struct Reconciled {
+    key: String,
+    token: String,
+    candidate: Before,
+    aliases: Vec<Before>,
+}
 
 fn cleanup_error(error: impl std::fmt::Display) -> meshloop_engine::ports::StoreError {
     // Do not expose native locations or git stderr.
@@ -625,7 +631,12 @@ pub fn apply_cleanup(
                     observed.observations.push(row.1.clone());
                 }
             }
-            reconciled.push(key.clone());
+            reconciled.push(Reconciled {
+                key: key.clone(),
+                token: token.clone(),
+                candidate: before.clone(),
+                aliases: saved.aliases.clone(),
+            });
         } else {
             let current = entries.iter().position(|e| e == &before.0);
             if !current.is_some_and(|i| observed.observations[i] == before.1) {
@@ -706,8 +717,16 @@ pub fn apply_cleanup(
         })
         .map_err(cleanup_error)?;
         let key = meshloop_domain::digest::sha256_hex(token.as_bytes());
-        if reconciled.contains(&key) {
-            write(&key, "completed", &token)?;
+        // A removed worktree can no longer be canonicalized, so rebuilding the
+        // alias set on Windows changes the hash. Complete the stored row.
+        if let Some(saved) = reconciled.iter().find(|saved| saved.candidate == before) {
+            write(&saved.key, "completed", &saved.token)?;
+            continue;
+        }
+        if reconciled
+            .iter()
+            .any(|saved| saved.aliases.iter().any(|alias| alias == &before))
+        {
             continue;
         }
         let (now_entries, now_observed) = preview_with(&scope, Some(&held));
