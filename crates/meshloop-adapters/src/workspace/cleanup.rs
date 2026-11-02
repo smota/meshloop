@@ -686,7 +686,9 @@ pub fn apply_cleanup(
         let aliases = entries
             .iter()
             .zip(&observed.observations)
-            .filter(|(entry, _)| **entry != before.0 && candidate_path(&scope, entry, Some(&held)) == path)
+            .filter(|(entry, _)| {
+                **entry != before.0 && candidate_path(&scope, entry, Some(&held)) == path
+            })
             .map(|(entry, observation)| (entry.clone(), observation.clone()))
             .collect();
         let token = serde_json::to_string(&BeforeToken {
