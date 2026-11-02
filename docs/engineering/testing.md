@@ -82,6 +82,7 @@ Validates the complete product lifecycle (`doctor` $\to$ `review-plan` $\to$ `ru
 ```bash
 cargo run -p xtask -- smoke
 ```
+The same command then runs the workspace lifecycle scenario on a separate disposable repository: inventory, cleanup preview, adoption preview, a stale digest, verified adoption, and maintenance preview, including a protected-data file that must remain. That scenario is outside the product-phase sum compared with `smoke.wall_clock_s`. The 5 second threshold is unchanged.
 
 ### 2.6 Packaging & Crate Isolation Check (`xtask publish-dry`)
 Packages all five publishable crates (`meshloop-domain`, `meshloop-context`, `meshloop-engine`, `meshloop-adapters`, `meshloop-cli`) in strict offline isolation:

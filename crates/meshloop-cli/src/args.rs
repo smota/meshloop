@@ -771,6 +771,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
      \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\

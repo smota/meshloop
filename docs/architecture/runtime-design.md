@@ -71,7 +71,8 @@ Fresh schema7 unmarked, unbound runs keep the existing legacy path.
 This is a snapshot admission check, not a cross-process fence or complete exclusion
 of ownership changes after the check. It does not activate generations, implement
 successful bound producers, or complete S3. Digest-bound cleanup and verified
-adoption are separate workspace commands.
+adoption are separate workspace commands. Operator steps, blockers, recovery,
+retention, and rollback limits are in [the workspace lifecycle runbook](../workspace-lifecycle.md).
 
 ### Bounded provisional planner producer (issue #74)
 

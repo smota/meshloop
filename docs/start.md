@@ -24,6 +24,7 @@ Meshloop operations can be triggered through terminal slash commands, MCP tools,
 | `meshloop:roles` | `/meshloop:roles` | `meshloop_roles` | `meshloop roles` | **Catalog:** Lists bundled agent roles and capabilities. |
 | `meshloop:mcp` | — | — | `meshloop mcp` | **Server:** Starts the local stdio JSON-RPC Model Context Protocol server. |
 | `meshloop:bundle` | — | — | `meshloop bundle` | **Packager:** Exports bundled skills and MCP catalog to target repository. |
+| `meshloop:workspace` | — | — | `meshloop workspace inventory\|preview\|apply\|adopt\|maintain` | **Lifecycle:** Read-only preview, digest-bound adoption, and opt-in cleanup. See [Workspace lifecycle](workspace-lifecycle.md). |
 
 ---
 
