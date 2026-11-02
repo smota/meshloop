@@ -481,10 +481,14 @@ fn same_worktree(listed: &[u8], path: &Path) -> bool {
         return false;
     }
     let listed = PathBuf::from(text);
-    if same_path_text(&listed, path) {
+    same_path(&listed, path)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if same_path_text(left, right) {
         return true;
     }
-    match (std::fs::canonicalize(&listed), std::fs::canonicalize(path)) {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => same_path_text(&left, &right),
         _ => false,
     }
@@ -687,7 +691,12 @@ pub fn apply_cleanup(
             .iter()
             .zip(&observed.observations)
             .filter(|(entry, _)| {
-                **entry != before.0 && candidate_path(&scope, entry, Some(&held)) == path
+                **entry != before.0
+                    && match (candidate_path(&scope, entry, Some(&held)), path.as_deref()) {
+                        (Some(left), Some(right)) => same_path(&left, right),
+                        (None, None) => true,
+                        _ => false,
+                    }
             })
             .map(|(entry, observation)| (entry.clone(), observation.clone()))
             .collect();
