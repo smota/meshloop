@@ -1462,6 +1462,8 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1489,6 +1491,8 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1562,6 +1566,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             },
             TaskNode {
                 id: TaskId(2),
@@ -1572,6 +1578,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             },
         ],
     };
@@ -1679,6 +1687,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 }],
             },
         ),
@@ -1696,6 +1706,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 }],
             },
         ),
@@ -1713,6 +1725,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 }],
             },
         ),
@@ -1730,6 +1744,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 }],
             },
         ),
@@ -1747,6 +1763,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 }],
             },
         ),
@@ -1804,6 +1822,8 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
             empty_diff_ok: false,
             deliverable: None,
             gate: AcceptanceGate::Human,
+            risk_q: None,
+            risk_prompt_hash: None,
         }],
     };
     let res = saga.mutate_plan(graph_id, active_mutation, false);

@@ -195,6 +195,8 @@ fn planning_output_contract() -> String {
             empty_diff_ok: false,
             deliverable: Some("issue-12".into()),
             gate: AcceptanceGate::Human,
+            risk_q: None,
+            risk_prompt_hash: None,
         }],
     };
     let example = serde_json::to_string_pretty(&example).unwrap_or_default();
@@ -267,6 +269,8 @@ mod tests {
             empty_diff_ok: false,
             deliverable: None,
             gate: AcceptanceGate::Human,
+            risk_q: None,
+            risk_prompt_hash: None,
         }
     }
 

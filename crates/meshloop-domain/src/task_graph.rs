@@ -45,7 +45,8 @@ impl Tier {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// No `Eq`: `risk_q` is `f64`, which is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskNode {
     pub id: TaskId,
     pub description: String,
@@ -63,9 +64,15 @@ pub struct TaskNode {
     /// Omitted and `human` still wait for `meshloop accept`.
     #[serde(default, skip_serializing_if = "AcceptanceGate::is_human")]
     pub gate: AcceptanceGate,
+    /// Accepted unit-interval risk score for this description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_q: Option<f64>,
+    /// Fingerprint of the risk subject that produced `risk_q`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_prompt_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskGraph {
     pub graph_id: String,
     pub nodes: Vec<TaskNode>,
@@ -94,7 +101,7 @@ pub enum GraphError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GraphMutation {
     InsertPrerequisite {
@@ -344,6 +351,8 @@ mod tests {
             empty_diff_ok: false,
             deliverable: None,
             gate: AcceptanceGate::Human,
+            risk_q: None,
+            risk_prompt_hash: None,
         }
     }
 

@@ -6,11 +6,15 @@
 use std::path::PathBuf;
 
 use meshloop_domain::capability::HarnessError;
+use meshloop_domain::decision::{Confidence, DecisionOutcome, RiskFloor};
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::task_graph::{GraphError, TaskGraph, Tier};
+use meshloop_domain::task_graph::{GraphError, TaskGraph, TaskId, TaskNode, Tier};
 
 use crate::agent::AgentSpec;
-use crate::ports::{HarnessCapabilities, HarnessOutcome, RunStore, StoreError, WorkspacePort};
+use crate::ports::{
+    DecisionPort, DecisionPortError, HarnessCapabilities, HarnessOutcome, RunStore, ScoreQuery,
+    StoreError, WorkspacePort, decision_fingerprint,
+};
 use crate::workspace::LifecycleAccess;
 use meshloop_domain::workspace::*;
 
@@ -598,6 +602,65 @@ impl TierAssigner for DefaultTierAssigner {
     }
 }
 
+/// Raise-only risk ratchet. The base tier is the declared tier, or
+/// [`DefaultTierAssigner`] when the node omits one. A stored unit-interval
+/// `q >= 0.90` lifts that base to [`Tier::Tier3`] and never lowers it.
+/// Does not call a port; [`apply_risk_ratchet`] loads and stores the score.
+pub struct JevTierAssigner;
+
+const RISK_TIER3_AT: f64 = 0.90;
+
+fn risk_subject(description: &str) -> String {
+    format!("risk\n{description}")
+}
+
+fn risk_prompt_hash(subject: &str) -> String {
+    decision_fingerprint("risk", &[subject])
+}
+
+fn stored_risk_q(node: &TaskNode, prompt_hash: &str) -> Option<f64> {
+    if node.risk_prompt_hash.as_deref() != Some(prompt_hash) {
+        return None;
+    }
+    let q = node.risk_q?;
+    Confidence::try_new(q).ok().map(Confidence::get)
+}
+
+fn base_tier(graph: &TaskGraph, node_id: TaskId, declared: Option<Tier>) -> Tier {
+    match declared {
+        Some(tier) => tier,
+        None => DefaultTierAssigner.assign_tier(graph, node_id),
+    }
+}
+
+fn raised_tier(base: Tier, q: Option<f64>) -> Tier {
+    match q {
+        Some(q) if Confidence::try_new(q).is_ok() && q >= RISK_TIER3_AT => {
+            RiskFloor::new(Tier::Tier3).apply(base)
+        }
+        _ => base,
+    }
+}
+
+enum RiskSample {
+    Reused(f64),
+    Accepted(f64),
+    Ignored,
+}
+
+impl TierAssigner for JevTierAssigner {
+    fn assign_tier(&self, graph: &TaskGraph, node_id: TaskId) -> Tier {
+        let Some(node) = graph.nodes.iter().find(|node| node.id == node_id) else {
+            return base_tier(graph, node_id, None);
+        };
+        let subject = risk_subject(&node.description);
+        let prompt_hash = risk_prompt_hash(&subject);
+        let q = stored_risk_q(node, &prompt_hash);
+        let base = base_tier(graph, node_id, node.tier);
+        raised_tier(base, q)
+    }
+}
+
 pub fn assign_tiers(graph: &mut TaskGraph, assigner: &dyn TierAssigner) {
     let ids: Vec<_> = graph.nodes.iter().map(|n| n.id).collect();
     for id in ids {
@@ -610,12 +673,65 @@ pub fn assign_tiers(graph: &mut TaskGraph, assigner: &dyn TierAssigner) {
     }
 }
 
+/// Score each node once, unless it already stores this description's sample.
+/// `q >= 0.90` in `0.0..=1.0` raises the tier to Tier3. Abstain, a non-score
+/// outcome, or a score outside that interval does not raise and does not store
+/// a sample. Returns the first [`DecisionPortError`] and does not panic.
+pub fn apply_risk_ratchet(
+    graph: &mut TaskGraph,
+    port: &dyn DecisionPort,
+) -> Result<(), DecisionPortError> {
+    let ids: Vec<_> = graph.nodes.iter().map(|node| node.id).collect();
+    for id in ids {
+        let Some((subject, prompt_hash, declared, reused)) =
+            graph.nodes.iter().find(|node| node.id == id).map(|node| {
+                let subject = risk_subject(&node.description);
+                let prompt_hash = risk_prompt_hash(&subject);
+                let reused = stored_risk_q(node, &prompt_hash);
+                (subject, prompt_hash, node.tier, reused)
+            })
+        else {
+            continue;
+        };
+        let sample = if let Some(q) = reused {
+            RiskSample::Reused(q)
+        } else {
+            match port.evaluate_score(&ScoreQuery { subject })? {
+                DecisionOutcome::Score(score) => match Confidence::try_new(score.get()) {
+                    Ok(confidence) => RiskSample::Accepted(confidence.get()),
+                    Err(_) => RiskSample::Ignored,
+                },
+                DecisionOutcome::Boolean(_)
+                | DecisionOutcome::Selected(_)
+                | DecisionOutcome::Abstain(_) => RiskSample::Ignored,
+            }
+        };
+        let q = match sample {
+            RiskSample::Reused(q) | RiskSample::Accepted(q) => Some(q),
+            RiskSample::Ignored => None,
+        };
+        let tier = raised_tier(base_tier(graph, id, declared), q);
+        if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == id) {
+            if let RiskSample::Accepted(q) = sample {
+                node.risk_q = Some(q);
+                node.risk_prompt_hash = Some(prompt_hash);
+            }
+            node.tier = Some(tier);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::HarnessHandle;
+    use crate::ports::{
+        BatchNoulQuery, ChoiceQuery, DecisionPort, HarnessHandle, NoulQuery, ScriptedDecisionPort,
+    };
+    use meshloop_domain::decision::DecisionOutcome;
     use meshloop_domain::evidence::AttemptId;
-    use meshloop_domain::task_graph::{AcceptanceGate, TaskId};
+    use meshloop_domain::task_graph::{AcceptanceGate, TaskId, TaskNode};
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -757,6 +873,8 @@ mod tests {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(2),
@@ -767,6 +885,8 @@ mod tests {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 },
                 meshloop_domain::task_graph::TaskNode {
                     id: TaskId(3),
@@ -777,6 +897,8 @@ mod tests {
                     empty_diff_ok: false,
                     deliverable: None,
                     gate: AcceptanceGate::Human,
+                    risk_q: None,
+                    risk_prompt_hash: None,
                 },
             ],
         };
@@ -798,9 +920,183 @@ mod tests {
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             }],
         };
         assign_tiers(&mut graph, &DefaultTierAssigner);
         assert_eq!(graph.nodes[0].tier, Some(Tier::Tier3));
+    }
+
+    fn risk_node(id: u32, description: &str, deps: &[u32], tier: Option<Tier>) -> TaskNode {
+        TaskNode {
+            id: TaskId(id),
+            description: description.into(),
+            depends_on: deps.iter().copied().map(TaskId).collect(),
+            tier,
+            allowed_paths: vec![],
+            empty_diff_ok: false,
+            deliverable: None,
+            gate: AcceptanceGate::Human,
+            risk_q: None,
+            risk_prompt_hash: None,
+        }
+    }
+
+    fn risk_graph(nodes: Vec<TaskNode>) -> TaskGraph {
+        TaskGraph {
+            graph_id: "g".into(),
+            nodes,
+        }
+    }
+
+    fn script_score(description: &str, score: f64) -> ScriptedDecisionPort {
+        let subject = format!("risk\n{description}");
+        let mut port = ScriptedDecisionPort::default();
+        port.insert(
+            decision_fingerprint("score", &[subject.as_str()]),
+            DecisionOutcome::try_score(score).expect("finite test score"),
+        );
+        port
+    }
+
+    fn script_scores(scores: &[(&str, f64)]) -> ScriptedDecisionPort {
+        let mut port = ScriptedDecisionPort::default();
+        for (description, score) in scores {
+            let subject = format!("risk\n{description}");
+            port.insert(
+                decision_fingerprint("score", &[subject.as_str()]),
+                DecisionOutcome::try_score(*score).expect("finite test score"),
+            );
+        }
+        port
+    }
+
+    /// Counts `evaluate_score` and returns `Unscripted` after the first call.
+    struct OnceScore {
+        score: f64,
+        calls: Cell<usize>,
+    }
+
+    impl DecisionPort for OnceScore {
+        fn evaluate_choice(
+            &self,
+            _query: &ChoiceQuery,
+        ) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_noul(&self, _query: &NoulQuery) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_score(&self, query: &ScoreQuery) -> Result<DecisionOutcome, DecisionPortError> {
+            let seen = self.calls.get();
+            self.calls.set(seen + 1);
+            if seen > 0 {
+                return Err(DecisionPortError::Unscripted {
+                    fingerprint: query.subject.clone(),
+                });
+            }
+            Ok(DecisionOutcome::try_score(self.score).expect("finite test score"))
+        }
+
+        fn evaluate_batch_noul(
+            &self,
+            _query: &BatchNoulQuery,
+        ) -> Result<Vec<DecisionOutcome>, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+    }
+
+    #[test]
+    fn risk_ratchet_low_score_leaf_stays_tier1() {
+        let mut graph = risk_graph(vec![risk_node(1, "leaf", &[], None)]);
+        let port = script_score("leaf", 0.10);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier1));
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(1)), Tier::Tier1);
+    }
+
+    #[test]
+    fn risk_ratchet_low_score_with_dependent_stays_tier2() {
+        let mut graph = risk_graph(vec![
+            risk_node(1, "parent", &[], None),
+            risk_node(2, "child", &[1], None),
+        ]);
+        let port = script_scores(&[("parent", 0.10), ("child", 0.10)]);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier2));
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(1)), Tier::Tier2);
+    }
+
+    #[test]
+    fn risk_ratchet_high_score_leaf_becomes_tier3() {
+        let mut graph = risk_graph(vec![risk_node(1, "leaf", &[], None)]);
+        let port = script_score("leaf", 0.90);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier3));
+        assert_eq!(graph.nodes[0].risk_q, Some(0.90));
+        let subject = "risk\nleaf";
+        let expected = decision_fingerprint("risk", &[subject]);
+        assert_eq!(
+            graph.nodes[0].risk_prompt_hash.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(1)), Tier::Tier3);
+    }
+
+    #[test]
+    fn risk_ratchet_low_score_two_dependencies_stays_tier3() {
+        let mut graph = risk_graph(vec![
+            risk_node(1, "left", &[], None),
+            risk_node(2, "right", &[], None),
+            risk_node(3, "join", &[1, 2], None),
+        ]);
+        let port = script_scores(&[("left", 0.0), ("right", 0.0), ("join", 0.0)]);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[2].tier, Some(Tier::Tier3));
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(3)), Tier::Tier3);
+    }
+
+    #[test]
+    fn risk_ratchet_declared_tier1_rises_to_tier3() {
+        let mut graph = risk_graph(vec![risk_node(1, "leaf", &[], Some(Tier::Tier1))]);
+        let port = script_score("leaf", 0.90);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier3));
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(1)), Tier::Tier3);
+    }
+
+    #[test]
+    fn risk_ratchet_declared_tier1_stays_tier1() {
+        let mut graph = risk_graph(vec![
+            risk_node(1, "left", &[], None),
+            risk_node(2, "right", &[], None),
+            risk_node(3, "declared", &[1, 2], Some(Tier::Tier1)),
+        ]);
+        let port = script_scores(&[("left", 0.10), ("right", 0.10), ("declared", 0.10)]);
+        apply_risk_ratchet(&mut graph, &port).expect("score");
+        assert_eq!(graph.nodes[2].tier, Some(Tier::Tier1));
+        assert_eq!(JevTierAssigner.assign_tier(&graph, TaskId(3)), Tier::Tier1);
+    }
+
+    #[test]
+    fn risk_ratchet_second_apply_does_not_call_port() {
+        let mut graph = risk_graph(vec![risk_node(1, "leaf", &[], None)]);
+        let port = OnceScore {
+            score: 0.90,
+            calls: Cell::new(0),
+        };
+        apply_risk_ratchet(&mut graph, &port).expect("first score");
+        assert_eq!(port.calls.get(), 1);
+        assert_eq!(graph.nodes[0].tier, Some(Tier::Tier3));
+        assert_eq!(graph.nodes[0].risk_q, Some(0.90));
+        let stored_q = graph.nodes[0].risk_q;
+        let tier = graph.nodes[0].tier;
+        apply_risk_ratchet(&mut graph, &port).expect("reused score");
+        assert_eq!(port.calls.get(), 1);
+        assert_eq!(graph.nodes[0].tier, tier);
+        assert_eq!(graph.nodes[0].risk_q, stored_q);
     }
 }
