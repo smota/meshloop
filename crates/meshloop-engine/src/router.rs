@@ -364,6 +364,76 @@ mod tests {
     }
 
     #[test]
+    fn absent_quota_record_stays_selectable() {
+        let configured = vec![
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "grok".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        profiles.insert("grok".into(), profile(true, true));
+        let mut quotas = HashMap::new();
+        let mut cooled = QuotaState::default();
+        cooled.on_capacity_exhausted(SystemTime::now(), std::time::Duration::from_secs(3600));
+        quotas.insert("codex".into(), cooled);
+        let headroom = HashMap::new();
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let router = Router::default();
+        let now = SystemTime::now();
+        let selected = router.select(
+            &configured,
+            &profiles,
+            &quotas,
+            now,
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].harness, "grok");
+        let rejected = Router::rejections(&configured, &profiles, &quotas, now, Tier::Tier1);
+        assert!(rejected.iter().any(|r| r.harness == "codex"));
+        assert!(rejected.iter().all(|r| r.harness != "grok"));
+    }
+
+    #[test]
+    fn elapsed_open_quota_window_is_selectable() {
+        let configured = vec![Candidate {
+            harness: "codex".into(),
+            model_ref: "m".into(),
+            model_tier: ModelCapabilityTier::TopTier,
+        }];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        let opened = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let now = opened + std::time::Duration::from_secs(30);
+        let mut stale = QuotaState::default();
+        stale.on_capacity_exhausted(opened, std::time::Duration::from_secs(1));
+        let mut quotas = HashMap::new();
+        quotas.insert("codex".into(), stale);
+        let headroom = HashMap::new();
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let router = Router::default();
+        let selected = router.select(
+            &configured,
+            &profiles,
+            &quotas,
+            now,
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].harness, "codex");
+        let rejected = Router::rejections(&configured, &profiles, &quotas, now, Tier::Tier1);
+        assert!(rejected.is_empty());
+    }
+
+    #[test]
     fn all_candidates_cooled_down_yields_empty_not_a_panic() {
         let configured = vec![
             Candidate {
