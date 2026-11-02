@@ -34,6 +34,7 @@ pub struct PromptCacheBuilder {
     system_rules: Vec<String>,
     contracts: Vec<String>,
     ast_skeletons: Vec<(String, String)>, // (file_path, skeleton_content)
+    preserve_skeleton_order: bool,
 }
 
 impl PromptCacheBuilder {
@@ -42,6 +43,7 @@ impl PromptCacheBuilder {
             system_rules: Vec::new(),
             contracts: Vec::new(),
             ast_skeletons: Vec::new(),
+            preserve_skeleton_order: false,
         }
     }
 
@@ -67,10 +69,19 @@ impl PromptCacheBuilder {
         self
     }
 
+    /// Keep insertion order. The default sorts by path so a permutation of the
+    /// same skeletons shares one cache prefix. Noul rerank opts out.
+    pub fn preserve_skeleton_order(mut self) -> Self {
+        self.preserve_skeleton_order = true;
+        self
+    }
+
     /// Compiles into a cache-optimized prompt envelope.
     pub fn build(mut self, task_description: &str, task_question: &str) -> CacheOptimizedPrompt {
-        // Sort skeletons deterministically by file path to prevent cache busting
-        self.ast_skeletons.sort_by(|a, b| a.0.cmp(&b.0));
+        if !self.preserve_skeleton_order {
+            // Sort skeletons deterministically by file path to prevent cache busting
+            self.ast_skeletons.sort_by(|a, b| a.0.cmp(&b.0));
+        }
 
         let mut static_parts = Vec::new();
 
