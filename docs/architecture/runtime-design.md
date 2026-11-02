@@ -177,9 +177,12 @@ stable Rust API. No installer, no service registration, no global
 configuration writes. Versioned by the workspace `Cargo.toml` version. Further
 crates.io versions and git tags `v<version>` are human-gated.
 
-Prebuilt binaries (`meshloop-windows-x86_64.exe`, `meshloop-linux-x86_64`)
-remain deferred (Phase 9). A WSL user would run a Linux binary inside their
-WSL distribution, never the Windows `.exe` reaching across the boundary.
+A manual workflow, Release binary dry-run, builds `meshloop-linux-x86_64` and
+`meshloop-windows-x86_64.exe` with `--locked` and records SHA-256 digests as
+workflow artifacts. It does not create a GitHub Release and does not publish
+crates. Attaching those binaries to a Release stays a separate maintainer
+action (ADR 0018). A WSL user would run a Linux binary inside their WSL
+distribution, never the Windows `.exe` reaching across the boundary.
 Tier B (macOS) packaging is decided when Tier B moves toward support.
 
 **Operating surface (ADR 0001, Accepted).** The compiled `meshloop` binary is the
