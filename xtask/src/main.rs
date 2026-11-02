@@ -82,16 +82,9 @@ fn check(root: &Path) -> ExitCode {
             "--locked",
             "--offline",
         ],
-        &[
-            "test",
-            "-p",
-            "xtask",
-            "--test",
-            "scaffold_cli",
-            "--locked",
-            "--offline",
-        ],
     ];
+    // scaffold_cli is a separate CI step. Running it here relinks xtask.exe
+    // while this process is xtask.exe, which Windows rejects.
     for args in checks {
         if !cargo(root, args) {
             return ExitCode::FAILURE;

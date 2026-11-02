@@ -5,6 +5,7 @@ pub mod check;
 pub mod delivery;
 pub mod git;
 pub mod harness;
+pub mod jev;
 pub mod process;
 pub mod redact;
 pub mod store;

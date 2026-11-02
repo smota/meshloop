@@ -29,6 +29,10 @@ sha2 = { workspace = true }
 # Safe handle-to-path identity comparison for the actually locked registry file.
 same-file = "1.0.6"
 rusqlite = { version = "0.31", features = ["bundled"] }
+# ureq 2 with rustls only, default features off, for the opt-in Jev client.
+# Offline tests use the fake and do not open a socket. The 500 ms budget and
+# 64 KB cap are enforced in our code.
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", default-features = false, features = [
