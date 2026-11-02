@@ -6,6 +6,7 @@
 
 pub mod capability;
 pub mod cleanup;
+pub mod decision;
 pub mod diagnostic;
 pub mod digest;
 pub mod evidence;
