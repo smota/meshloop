@@ -30,6 +30,12 @@ probe_timeout_seconds = 15
 # Optional structured argv run in the attempt worktree after git-diff. Empty = git-diff only.
 verify_command = []
 
+# Optional worktree root for new runs. Relative paths resolve from the repository.
+# Absolute paths are allowed. Omit this table to use `<repo>/.meshloop/worktrees`
+# after a fail-closed Git layout probe. Existing runs stay on their registered roots.
+# [workspace]
+# root = "shorter-root"
+
 # Optional. The planner is routed as a Tier3 task, which only model_tier = "top" fits.
 # Name a harness to plan with whatever its tier, or lower the routing tier; not both.
 # [planner]

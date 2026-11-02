@@ -13,7 +13,7 @@ Once installed, Meshloop operations can be triggered via terminal slash commands
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan --objective "<text>"` | **Planning:** Decomposes an objective into a validated DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan --plan <path> (exactly one of --accept, --decline, --adjust)` | **Human Gate:** Requires exactly one of `--accept`, `--decline`, or `--adjust`. |
-| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
+| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** New runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
 | `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
 | `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |
@@ -145,7 +145,7 @@ They were copied from each CLI's own help and are not a claim that live dispatch
   `.gitignore`; it reports `gitignore: missing` and prints the line to add. On first store
   creation `plan`/`run` also write `.meshloop/.gitignore` (`*`) so the store never shows as
   untracked. `meshloop doctor --json` reports `store_ignored`.
-- **Workspaces:** Isolated task executions occur in `.meshloop-worktrees/<task-id>`.
+- **Workspaces:** New runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`.
 
 ---
 

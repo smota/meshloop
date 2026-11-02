@@ -21,6 +21,47 @@ pub struct InventoryScope<'a> {
     pub configured_root: &'a Path,
 }
 
+/// Read-only task outcome for one graph. Age is not read here.
+#[derive(Debug, Clone, Default)]
+pub struct GraphOutcome {
+    pub known: bool,
+    pub failed: bool,
+    pub cancelled: bool,
+    pub landed: bool,
+}
+
+/// Read task states without creating or migrating a ledger.
+/// A missing file or unreadable table returns an empty map.
+pub fn graph_outcomes(ledger: &Path) -> BTreeMap<String, GraphOutcome> {
+    let mut outcomes = BTreeMap::new();
+    if !ledger.is_file() {
+        return outcomes;
+    }
+    let Ok(connection) =
+        Connection::open_with_flags(ledger, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return outcomes;
+    };
+    let Ok(mut statement) =
+        connection.prepare("SELECT graph_id, to_state FROM events ORDER BY graph_id, event_id")
+    else {
+        return outcomes;
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return outcomes;
+    };
+    for row in rows.flatten() {
+        let outcome = outcomes.entry(row.0).or_default();
+        outcome.known = true;
+        outcome.failed |= row.1 == "Failed";
+        outcome.cancelled |= row.1 == "Cancelled";
+        outcome.landed |= row.1 == "Integrated" || row.1 == "Accepted";
+    }
+    outcomes
+}
+
 struct AttemptSeen {
     id: String,
     graph_id: String,

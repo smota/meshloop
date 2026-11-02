@@ -72,7 +72,7 @@ flowchart LR
 1. **Daemonless Direct-CLI Execution:**  
    Execution model where Meshloop manages agent lifecycles via direct OS subprocesses, eliminating permanent background services, hidden daemons, or terminal multiplexer sockets ([ADR 0022](adr/0022-daemonless-context-engineering.md)).
 2. **Git Worktree Isolation:**  
-   Isolation mechanism where every execution attempt runs in a dedicated ephemeral worktree (`.meshloop-worktrees/<task-id>`), leaving the active development branch unmodified until explicit human approval ([ADR 0005](adr/0005-execution-recovery.md)).
+   Isolation mechanism where new runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. The active development branch stays unmodified until explicit human approval ([ADR 0005](adr/0005-execution-recovery.md)).
 3. **AST Skeleton Pruning & Markdown Document Skeletons:**  
    Deterministic context engineering technique in `meshloop-context` that parses source code in 7 programming languages plus Markdown technical documentation (.md). For code, it strips method bodies; for documentation, it preserves the heading spine, metadata, and tables while pruning narrative prose to stable sentinels (`<!-- meshloop:pruned -->`). Reduces token consumption by **60% to 90%** ([ADR 0022](adr/0022-daemonless-context-engineering.md), [ADR 0031](adr/0031-markdown-doc-ast-context-engineering.md)).
 4. **Prompt Cache Normalization:**  

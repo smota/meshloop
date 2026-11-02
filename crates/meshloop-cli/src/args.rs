@@ -146,6 +146,7 @@ pub enum Command {
     Workspace {
         report: WorkspaceReport,
         cleanup: bool,
+        apply: bool,
         digest: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
@@ -158,6 +159,8 @@ pub enum WorkspaceReport {
     Inventory,
     Preview,
     Apply,
+    Adopt,
+    Maintain,
 }
 
 pub fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -333,6 +336,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
         ],
         "workspace" => &[
             (false, "--cleanup"),
+            (false, "--apply"),
             (true, "--digest"),
             (true, "--config"),
             (true, "--db"),
@@ -680,40 +684,55 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 ["inventory"] => WorkspaceReport::Inventory,
                 ["preview"] => WorkspaceReport::Preview,
                 ["apply"] => WorkspaceReport::Apply,
+                ["adopt"] => WorkspaceReport::Adopt,
+                ["maintain"] => WorkspaceReport::Maintain,
                 _ => {
                     return Err(
-                        "meshloop:workspace requires inventory, preview, or apply --cleanup --digest <hex>"
+                        "meshloop:workspace requires inventory, preview, apply, adopt, or maintain"
                             .into(),
                     );
                 }
             };
             let cleanup = has_flag(rest, "--cleanup");
-            if cleanup && matches!(report, WorkspaceReport::Inventory) {
+            let apply = has_flag(rest, "--apply");
+            if cleanup && !matches!(report, WorkspaceReport::Preview | WorkspaceReport::Apply) {
                 return Err("meshloop:workspace --cleanup requires preview or apply".into());
             }
-            if has_flag(rest, "--digest") && !cleanup {
-                return Err("meshloop:workspace --digest requires --cleanup".into());
+            if apply && !matches!(report, WorkspaceReport::Adopt | WorkspaceReport::Maintain) {
+                return Err("meshloop:workspace --apply requires adopt or maintain".into());
+            }
+            if has_flag(rest, "--digest") && !(cleanup || apply) {
+                return Err("meshloop:workspace --digest requires --cleanup or --apply".into());
             }
             let digest = flag_value(rest, "--digest");
             if has_flag(rest, "--digest") && digest.is_none() {
                 return Err("meshloop:workspace --digest requires a value".into());
             }
-            if report == WorkspaceReport::Apply
-                && (!cleanup
-                    || !digest.as_deref().is_some_and(|d| {
-                        d.len() == 64
-                            && d.bytes()
-                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    }))
-            {
+            let digest_ok = digest.as_deref().is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+            if report == WorkspaceReport::Apply && (!cleanup || !digest_ok) {
                 return Err(
                     "meshloop:workspace apply requires --cleanup --digest <64 lowercase hex>"
+                        .into(),
+                );
+            }
+            if matches!(report, WorkspaceReport::Adopt | WorkspaceReport::Maintain)
+                && apply
+                && !digest_ok
+            {
+                return Err(
+                    "meshloop:workspace adopt/maintain --apply requires --digest <64 lowercase hex>"
                         .into(),
                 );
             }
             Ok(Command::Workspace {
                 report,
                 cleanup,
+                apply,
                 digest,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
@@ -751,7 +770,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
-     \x20 meshloop workspace inventory|preview|apply [--cleanup] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
@@ -830,6 +849,9 @@ mod tests {
         "workspace inventory --config c --db d --worktree-base w",
         "workspace preview --config c --db d --worktree-base w",
         "workspace preview --cleanup --digest d --config c --db d --worktree-base w",
+        "workspace adopt --config c --db d --worktree-base w",
+        "workspace adopt --apply --digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --config c --db d --worktree-base w",
+        "workspace maintain --config c --db d --worktree-base w",
         "mcp",
         "roles",
     ];

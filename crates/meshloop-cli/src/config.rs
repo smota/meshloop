@@ -30,6 +30,9 @@ pub struct Config {
     pub verify: VerifyConfig,
     #[serde(default)]
     pub planner: PlannerConfig,
+    /// Optional `[workspace] root`. Missing tables keep the nested default.
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
     /// When true, Meshloop runs standalone without Herdr daemon, dispatching direct CLI harnesses into Git worktrees.
     #[serde(default)]
     #[allow(dead_code)]
@@ -59,6 +62,14 @@ fn default_probe_timeout_seconds() -> u64 {
 pub struct VerifyConfig {
     #[serde(default)]
     pub verify_command: Vec<String>,
+}
+
+/// `[workspace]`. `root` is optional. A relative root is resolved from the repository.
+/// An absolute root is used as given. Absent means `<repo>/.meshloop/worktrees`.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct WorkspaceConfig {
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 /// `[planner]`: which harness runs `meshloop:planner`. Without either key, planning is

@@ -3607,6 +3607,11 @@ fn owned_plan_path(dir: &Path, owner: &serde_json::Value) -> PathBuf {
         .join(dir.file_name().unwrap())
         .join(owner["location"]["relative_path"].as_str().unwrap())
 }
+fn cli_worktree_path(dir: &Path, owner: &serde_json::Value) -> PathBuf {
+    dir.join(".meshloop")
+        .join("worktrees")
+        .join(owner["location"]["relative_path"].as_str().unwrap())
+}
 fn invoke_owned_plan(dir: &Path, config: &Path) -> std::process::Output {
     meshloop()
         .current_dir(dir)
@@ -3629,7 +3634,7 @@ fn provisional_planning_preserves_each_invocation_and_metadata_privacy() {
     assert!(invoke_owned_plan(&dir, &config).status.success());
     let first = planning_owners(&dir);
     assert_eq!(first.len(), 2);
-    let first_path = owned_plan_path(&dir, &first[1]);
+    let first_path = cli_worktree_path(&dir, &first[1]);
     let original = fs::read(&first_path).unwrap();
     fs::write(
         first_path.parent().unwrap().join("preserved.txt"),
@@ -3679,7 +3684,7 @@ fn provisional_planning_retries_rejected_stdout_in_separate_preserved_worktrees(
     );
     assert_ne!(owners[0]["location"], owners[2]["location"]);
     for owner in [&owners[1], &owners[3]] {
-        assert_eq!(fs::read(owned_plan_path(&dir, owner)).unwrap(), b"");
+        assert_eq!(fs::read(cli_worktree_path(&dir, owner)).unwrap(), b"");
     }
     let db = rusqlite::Connection::open(dir.join(".meshloop/state.sqlite")).unwrap();
     assert_eq!(db.query_row::<u32,_,_>("SELECT COUNT(*) FROM workspace_operation_steps WHERE json_extract(payload_json,'$.state')='Blocked'", [], |r|r.get(0)).unwrap(), 2);
@@ -3692,7 +3697,7 @@ fn provisional_planning_retries_rejected_stdout_in_separate_preserved_worktrees(
     // Operator diagnostics use portable aliases, not the external root.
     assert!(
         !String::from_utf8_lossy(&result.stderr)
-            .contains(&owned_plan_path(&dir, &owners[0]).display().to_string())
+            .contains(&cli_worktree_path(&dir, &owners[0]).display().to_string())
     );
 }
 #[test]
@@ -3756,7 +3761,7 @@ fn provisional_planning_refuses_stale_tracked_output_without_reuse() {
     let owners = planning_owners(&dir);
     assert_eq!(owners.len(), 2);
     assert_eq!(
-        fs::read_to_string(owned_plan_path(&dir, &owners[1])).unwrap(),
+        fs::read_to_string(cli_worktree_path(&dir, &owners[1])).unwrap(),
         stale
     );
     assert!(!dir.join("result.json").exists());
@@ -4149,7 +4154,7 @@ fn provisional_planning_large_simultaneous_output_completes_and_retains_owned_pl
     assert_eq!(graph["graph_id"], "large-planner");
     let owners = planning_owners(&dir);
     assert_eq!(owners.len(), 2);
-    let raw = fs::read(owned_plan_path(&dir, &owners[1])).unwrap();
+    let raw = fs::read(cli_worktree_path(&dir, &owners[1])).unwrap();
     assert!(raw.len() > 128 * 1024);
     let retained: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(retained["graph_id"], "large-planner");

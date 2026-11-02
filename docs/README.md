@@ -74,7 +74,7 @@ All operations are universally accessible via terminal slash commands, stdio Mod
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Validates environment, worktree isolation, and configured harnesses. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan --objective "<text>"` | **Planning:** Decomposes an objective into a validated task DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan --plan <path> (exactly one of --accept, --decline, --adjust)` | **Human Gate:** Requires exactly one of `--accept`, `--decline`, or `--adjust`. |
-| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
+| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** New runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
 | `meshloop:cancel` | — | `meshloop_cancel` | `meshloop cancel --driver <id>` | **Cancellation:** Stops a driver without merging. |
 | `meshloop:inspect` | — | `meshloop_inspect` | `meshloop inspect --driver <id>` | **Inspection:** Shows one driver's attempts, evidence, and worktree. |

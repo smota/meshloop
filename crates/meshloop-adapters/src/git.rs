@@ -1,6 +1,7 @@
 //! Worktree-per-writer isolation (ADR 0005 / runtime-design.md §3). Real `git worktree`
 //! subprocess calls with structured arguments — never shell-string interpolation.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,10 +26,13 @@ impl From<GitError> for WorkspaceError {
     }
 }
 
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 static GIT_ADMIN_LOCK: Mutex<()> = Mutex::new(());
+static LAYOUT_PROBES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+const LAYOUT_HINT: &str = "set --worktree-base or [workspace] root";
 
 pub struct GitWorktreeAdapter {
     repo_root: PathBuf,
@@ -206,6 +210,66 @@ impl GitWorktreeAdapter {
         self.run_in(worktree, &["status", "--porcelain"])
             .map(|porcelain| !porcelain.is_empty())
     }
+
+    /// Fail closed before the real worktree is created. A successful probe is remembered
+    /// for this process. An existing probe path is left untouched.
+    fn prove_layout(&self, parent: &Path) -> Result<(), GitError> {
+        let mut proven = LAYOUT_PROBES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let key = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        if proven.contains(&key) {
+            return Ok(());
+        }
+        if !parent.is_dir() {
+            return Err(GitError::Io(format!(
+                "layout probe parent is missing; {LAYOUT_HINT}"
+            )));
+        }
+        let probe = parent.join(".meshloop-layout-probe");
+        if std::fs::symlink_metadata(&probe).is_ok() {
+            return Err(GitError::Io(format!(
+                "layout probe path already exists; {LAYOUT_HINT}"
+            )));
+        }
+        let probe_arg = git_worktree_arg(&probe);
+        let probe_text = probe_arg.to_string_lossy().into_owned();
+        self.run_admin_with_retry(&["worktree", "add", "--detach", &probe_text])
+            .map_err(annotate_layout)?;
+        self.run_admin_with_retry(&["worktree", "remove", &probe_text])
+            .map_err(annotate_layout)?;
+        if std::fs::symlink_metadata(&probe).is_ok() {
+            return Err(GitError::Io(format!(
+                "layout probe remained after removal; {LAYOUT_HINT}"
+            )));
+        }
+        proven.insert(key);
+        Ok(())
+    }
+}
+
+fn git_worktree_arg(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn annotate_layout(error: GitError) -> GitError {
+    match error {
+        GitError::CommandFailed { stderr } => GitError::CommandFailed {
+            stderr: format!("{stderr}\n{LAYOUT_HINT}"),
+        },
+        GitError::Io(message) => GitError::Io(format!("{message}; {LAYOUT_HINT}")),
+        other => other,
+    }
 }
 
 fn oid_ok(value: &str) -> bool {
@@ -223,6 +287,15 @@ impl WorkspacePort for GitWorktreeAdapter {
         branch: &str,
         start_point: &str,
     ) -> Result<(), WorkspaceError> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        let Some(parent) = parent else {
+            return Err(WorkspaceError::Io(format!(
+                "layout probe parent is missing; {LAYOUT_HINT}"
+            )));
+        };
+        self.prove_layout(parent)?;
         self.run_admin_with_retry(&[
             "worktree",
             "add",

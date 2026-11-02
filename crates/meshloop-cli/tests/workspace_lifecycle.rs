@@ -14,7 +14,9 @@ use meshloop_domain::workspace::{
     LifecycleId, PlanHash, ProcessIdentity, RelativePath, RootAlias,
 };
 use meshloop_engine::ports::{RunRow, RunStore};
-use meshloop_engine::workspace::{RepositoryFence, RepositoryIdentity, WorkspaceLedger};
+use meshloop_engine::workspace::{
+    LifecycleAccess, RepositoryFence, RepositoryIdentity, WorkspaceLedger,
+};
 
 struct Fixture {
     base: PathBuf,
@@ -139,7 +141,8 @@ fn run(fixture: &Fixture, args: &[&str]) -> (i32, serde_json::Value, String) {
         });
         (code, value, stdout)
     } else {
-        (code, serde_json::Value::Null, stdout)
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        (code, serde_json::Value::Null, format!("{stdout}{stderr}"))
     }
 }
 
@@ -236,6 +239,7 @@ fn inventory_and_preview_report_reason_codes_without_writes() {
             .exists()
     );
     assert!(!absent.base.join(".meshloop-worktrees").exists());
+    assert!(!absent.repo.join(".meshloop").join("worktrees").exists());
 
     let legacy = Fixture::new("legacy");
     {
@@ -811,4 +815,205 @@ fn cleanup_scenario(apply: bool) {
     assert_eq!(code, 0, "{empty}");
     assert_eq!(empty["data"]["cleanup"]["apply"], false);
     assert_unchanged(&fixture.base, &before_empty);
+}
+
+#[test]
+fn compatibility_adopts_verified_legacy_and_keeps_roots() {
+    let fixture = Fixture::new("compatibility");
+    let mut store = SqliteStore::open(&fixture.db).unwrap();
+    for graph_id in ["kept-run", "missing-run"] {
+        store
+            .save_run(&RunRow {
+                graph_id: graph_id.into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: hash_text(),
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+    }
+    store
+        .save_run(&RunRow {
+            graph_id: "name-only".into(),
+            plan_state: PlanState::AwaitingPlanReview,
+            run_base: "base".into(),
+            integrate_ref: "integrate".into(),
+            plan_json: "{}".into(),
+            plan_id: hash_text(),
+            created_at: "1".into(),
+            review_note: None,
+        })
+        .unwrap();
+    let mut lease = GitRepositoryIdentity::new("git")
+        .acquire(&fixture.repo, &fixture.db)
+        .unwrap();
+    store.bind_repository(&lease).unwrap();
+    let alias = RootAlias::new("legacy-pin").unwrap();
+    let root = fixture.repo.join("legacy-pin");
+    lease.bootstrap_root(alias.clone(), &root).unwrap();
+    store.register_root(&lease, &alias).unwrap();
+    fs::write(root.join("kept.txt"), "kept\n").unwrap();
+    let plan_hash = PlanHash::new(hash_text()).unwrap();
+    let kept = GenerationRecord {
+        id: LifecycleId::new("kept-generation").unwrap(),
+        repository_id: lease.repository().id.clone(),
+        graph_id: GraphId::new("kept-run").unwrap(),
+        ordinal: 1,
+        accepted_plan_hash: plan_hash.clone(),
+        root_alias: alias.clone(),
+        relative_path: RelativePath::new("kept.txt").unwrap(),
+        layout_version: 1,
+    };
+    let missing = GenerationRecord {
+        id: LifecycleId::new("missing-generation").unwrap(),
+        repository_id: lease.repository().id.clone(),
+        graph_id: GraphId::new("missing-run").unwrap(),
+        ordinal: 1,
+        accepted_plan_hash: plan_hash,
+        root_alias: alias,
+        relative_path: RelativePath::new("missing.txt").unwrap(),
+        layout_version: 1,
+    };
+    store.insert_generation(&lease, &kept).unwrap();
+    store.insert_generation(&lease, &missing).unwrap();
+    drop(store);
+    drop(lease);
+    let db = rusqlite::Connection::open(&fixture.db).unwrap();
+    db.execute(
+        "INSERT INTO workspace_legacy_unbound VALUES('runs','kept-run','Unresolved')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO workspace_legacy_unbound VALUES('runs','missing-run','Unresolved')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    fs::write(fixture.repo.join("unknown-artifact.txt"), "leave me\n").unwrap();
+    assert!(!root.join("missing.txt").exists());
+
+    let before = snapshot(&fixture.base);
+    let (code, preview, _) = run(&fixture, &["workspace", "adopt"]);
+    assert_eq!(code, 0, "{preview}");
+    assert_eq!(preview["data"]["apply"], false);
+    assert_eq!(preview["data"]["status"], "preview");
+    let digest = preview["data"]["digest"].as_str().unwrap().to_string();
+    assert_eq!(digest.len(), 64);
+    assert!(
+        preview["data"]["adopted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|pin| pin["graph_id"] == "kept-run" && pin["relative_path"] == "kept.txt")
+    );
+    assert!(
+        preview["data"]["retained"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| hold["graph_id"] == "missing-run" && hold["reason"] == "path-missing")
+    );
+    assert!(
+        preview["data"]["retained"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| {
+                hold["graph_id"] == "name-only" && hold["reason"] == "unverified-location"
+            })
+    );
+    assert_unchanged(&fixture.base, &before);
+
+    let db_bytes = fs::read(&fixture.db).unwrap();
+    let (code, stale, stale_out) = run(
+        &fixture,
+        &["workspace", "adopt", "--apply", "--digest", &"0".repeat(64)],
+    );
+    assert_eq!(code, 0, "{stale} {stale_out}");
+    assert_eq!(stale["data"]["apply"], false);
+    assert_eq!(stale["data"]["status"], "stale");
+    assert_eq!(fs::read(&fixture.db).unwrap(), db_bytes);
+    assert_unchanged(&fixture.base, &before);
+
+    let (code, applied, _) = run(
+        &fixture,
+        &["workspace", "adopt", "--apply", "--digest", &digest],
+    );
+    assert_eq!(code, 0, "{applied}");
+    assert_eq!(applied["data"]["apply"], true, "{applied}");
+    assert_eq!(applied["data"]["status"], "adopted");
+    let db = rusqlite::Connection::open(&fixture.db).unwrap();
+    let kept_marker: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id='kept-run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let missing_marker: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id='missing-run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let binding: String = db
+        .query_row(
+            "SELECT root_alias FROM workspace_run_bindings WHERE graph_id='kept-run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let name_only: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_run_bindings WHERE graph_id='name-only'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(kept_marker, 0);
+    assert_eq!(missing_marker, 1);
+    assert_eq!(binding, "legacy-pin");
+    assert_eq!(name_only, 0);
+    assert_eq!(fs::read(root.join("kept.txt")).unwrap(), b"kept\n");
+    assert_eq!(
+        fs::read(fixture.repo.join("unknown-artifact.txt")).unwrap(),
+        b"leave me\n"
+    );
+    assert!(!root.join("missing.txt").exists());
+    assert!(!fixture.repo.join(".meshloop").join("worktrees").exists());
+    assert!(!fixture.base.join(".meshloop-worktrees").exists());
+
+    let after_adopt = snapshot(&fixture.base);
+    let (code, maintain, _) = run(&fixture, &["workspace", "maintain"]);
+    assert_eq!(code, 0, "{maintain}");
+    assert_eq!(maintain["data"]["apply"], false);
+    assert_unchanged(&fixture.base, &after_adopt);
+
+    let mut configured = fixture.config.clone();
+    configured.set_extension("workspace.toml");
+    let mut text = fs::read_to_string(&fixture.config).unwrap();
+    text.push_str("\n[workspace]\nroot = \"configured-root\"\n");
+    fs::write(&configured, text).unwrap();
+    let (code, reroot, _) = run(
+        &fixture,
+        &[
+            "workspace",
+            "adopt",
+            "--config",
+            configured.to_str().unwrap(),
+            "--worktree-base",
+            "other-root",
+        ],
+    );
+    assert_eq!(code, 0, "{reroot}");
+    assert!(!fixture.repo.join("configured-root").exists());
+    assert!(!fixture.repo.join("other-root").exists());
+    assert_eq!(fs::read(root.join("kept.txt")).unwrap(), b"kept\n");
+    assert!(!root.join("missing.txt").exists());
 }
