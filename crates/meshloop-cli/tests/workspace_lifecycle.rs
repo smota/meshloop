@@ -10,7 +10,8 @@ use meshloop_adapters::workspace::GitRepositoryIdentity;
 use meshloop_domain::digest::fnv1a64;
 use meshloop_domain::state::PlanState;
 use meshloop_domain::workspace::{
-    GenerationRecord, GraphId, LifecycleId, PlanHash, RelativePath, RootAlias,
+    DriverPhase, DriverRecord, DriverTarget, ExecutionScope, GenerationRecord, GraphId,
+    LifecycleId, PlanHash, ProcessIdentity, RelativePath, RootAlias,
 };
 use meshloop_engine::ports::{RunRow, RunStore};
 use meshloop_engine::workspace::{RepositoryFence, RepositoryIdentity, WorkspaceLedger};
@@ -479,4 +480,253 @@ fn inventory_and_preview_report_reason_codes_without_writes() {
         assert_eq!(fs::read(&sentinel).unwrap(), b"SENTINEL-DO-NOT-LEAK");
         assert_unchanged(&blocked.base, &before);
     }
+}
+
+fn candidate<'a>(report: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    report["data"]["cleanup"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["lifecycle_id"] == id)
+        .unwrap_or_else(|| panic!("missing {id} in {report}"))
+}
+
+#[cfg(unix)]
+fn candidate_by_path<'a>(report: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    report["data"]["cleanup"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["location"]["relative_path"] == path)
+        .unwrap_or_else(|| panic!("missing path {path} in {report}"))
+}
+
+fn has_reason(candidate: &serde_json::Value, reason: &str) -> bool {
+    candidate["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == reason)
+}
+
+#[test]
+fn cleanup_preview_blocks_adversarial_candidates_without_writes() {
+    let fixture = Fixture::new("cleanup");
+    let root = fixture.repo.join("workspace-root");
+    fs::create_dir(&root).unwrap();
+    {
+        let mut store = SqliteStore::open(&fixture.db).unwrap();
+        let mut lease = GitRepositoryIdentity::new("git")
+            .acquire(&fixture.repo, &fixture.db)
+            .unwrap();
+        store.bind_repository(&lease).unwrap();
+        let alias = RootAlias::new("worktrees").unwrap();
+        lease.register_root(alias.clone(), &root).unwrap();
+        store.register_root(&lease, &alias).unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "graph-alpha".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: hash_text(),
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+        for (ordinal, id, path) in [
+            (1, "generation-clean", "clean-wt"),
+            (2, "generation-dirty", "dirty-wt"),
+            (3, "generation-unique", "unique-wt"),
+            (4, "generation-ignored", "ignored-wt"),
+        ] {
+            store
+                .insert_generation(
+                    &lease,
+                    &GenerationRecord {
+                        id: LifecycleId::new(id).unwrap(),
+                        repository_id: lease.repository().id.clone(),
+                        graph_id: GraphId::new("graph-alpha").unwrap(),
+                        ordinal,
+                        accepted_plan_hash: PlanHash::new(hash_text()).unwrap(),
+                        root_alias: alias.clone(),
+                        relative_path: RelativePath::new(path).unwrap(),
+                        layout_version: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let repo_id = lease.repository().id.clone();
+        let driver = DriverRecord {
+            id: LifecycleId::new("driver-live").unwrap(),
+            nonce: LifecycleId::new("nonce-1").unwrap(),
+            target: DriverTarget::Execution(ExecutionScope {
+                repository_id: repo_id.clone(),
+                graph_id: GraphId::new("graph-alpha").unwrap(),
+                generation_id: LifecycleId::new("generation-clean").unwrap(),
+            }),
+            process: Some(ProcessIdentity {
+                pid: 1,
+                creation_token: LifecycleId::new("created").unwrap(),
+                tree_token: LifecycleId::new("tree").unwrap(),
+            }),
+            phase: DriverPhase::Running,
+            heartbeat: 1,
+            error_code: None,
+            diagnostic: None,
+        };
+        let payload = serde_json::to_string(&driver).unwrap();
+        rusqlite::Connection::open(&fixture.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO workspace_drivers (id, repo_id, payload_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![driver.id.as_str(), repo_id.as_str(), payload],
+            )
+            .unwrap();
+    }
+    for (path, branch) in [
+        ("clean-wt", "clean-wt"),
+        ("dirty-wt", "dirty-wt"),
+        ("unique-wt", "unique-wt"),
+        ("ignored-wt", "ignored-wt"),
+    ] {
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                root.join(path).to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+    }
+    fs::write(root.join("dirty-wt").join("tracked.txt"), "dirty tracked\n").unwrap();
+    fs::write(root.join("unique-wt").join("unique.txt"), "unique commit\n").unwrap();
+    git(&root.join("unique-wt"), &["add", "unique.txt"]);
+    git(
+        &root.join("unique-wt"),
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "unique",
+        ],
+    );
+    let exclude = fixture.repo.join(".git").join("info").join("exclude");
+    let mut ignored = fs::read_to_string(&exclude).unwrap_or_default();
+    ignored.push_str("*.log\n");
+    fs::write(&exclude, ignored).unwrap();
+    fs::write(root.join("ignored-wt").join("notes.log"), "ignored\n").unwrap();
+    #[cfg(unix)]
+    {
+        let sentinel = fixture.base.join("sentinel.txt");
+        fs::write(&sentinel, "SENTINEL-DO-NOT-LEAK").unwrap();
+        std::os::unix::fs::symlink(&sentinel, root.join("leak")).unwrap();
+    }
+
+    let before = snapshot(&fixture.base);
+    let before_hash = fingerprint(&before);
+    let (code, report, stdout) = run(&fixture, &["workspace", "preview", "--cleanup"]);
+    assert_eq!(code, 0, "{report}");
+    assert!(!stdout.contains("SENTINEL-DO-NOT-LEAK"));
+    assert_eq!(report["data"]["apply"], false);
+    assert_eq!(report["data"]["cleanup"]["apply"], false);
+    assert_eq!(
+        report["data"]["cleanup"]["digest"].as_str().unwrap().len(),
+        64
+    );
+    let digest = report["data"]["cleanup"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(candidate(&report, "generation-clean")["status"], "eligible");
+    assert_eq!(
+        candidate(&report, "generation-clean")["reasons"],
+        serde_json::json!([])
+    );
+    let blocked = [
+        ("generation-dirty", "dirty-tracked"),
+        ("generation-unique", "unique-commit"),
+        ("generation-ignored", "unknown-ignored"),
+        ("driver-live", "active-process"),
+    ];
+    assert_eq!(blocked.len(), 4, "named cleanup candidates");
+    for (id, reason) in blocked {
+        let item = candidate(&report, id);
+        assert_eq!(item["status"], "blocked", "{id} {item}");
+        assert!(has_reason(item, reason), "{id} missing {reason}: {item}");
+    }
+    #[cfg(unix)]
+    {
+        let leak = candidate_by_path(&report, "leak");
+        assert_eq!(leak["status"], "blocked", "{leak}");
+        assert!(has_reason(leak, "unsafe-path"), "{leak}");
+    }
+    assert!(root.join("clean-wt").join("tracked.txt").is_file());
+    assert_eq!(
+        fs::read(root.join("dirty-wt").join("tracked.txt")).unwrap(),
+        b"dirty tracked\n"
+    );
+    assert!(root.join("unique-wt").join("unique.txt").is_file());
+    assert!(root.join("ignored-wt").join("notes.log").is_file());
+    #[cfg(unix)]
+    {
+        assert!(
+            root.join("leak")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(fixture.base.join("sentinel.txt")).unwrap(),
+            b"SENTINEL-DO-NOT-LEAK"
+        );
+    }
+
+    let (code, stale, _) = run(
+        &fixture,
+        &[
+            "workspace",
+            "preview",
+            "--cleanup",
+            "--digest",
+            &"0".repeat(64),
+        ],
+    );
+    assert_eq!(code, 0, "{stale}");
+    assert_eq!(stale["data"]["cleanup"]["apply"], false);
+    assert_eq!(stale["data"]["cleanup"]["digest"], digest);
+    let stale_candidates = stale["data"]["cleanup"]["candidates"].as_array().unwrap();
+    assert!(
+        stale_candidates
+            .iter()
+            .all(|item| { item["status"] == "blocked" && has_reason(item, "stale-facts") })
+    );
+    let (code, rebound, _) = run(
+        &fixture,
+        &["workspace", "preview", "--cleanup", "--digest", &digest],
+    );
+    assert_eq!(code, 0, "{rebound}");
+    assert_eq!(rebound["data"]["cleanup"]["digest"], digest);
+    assert_eq!(
+        candidate(&rebound, "generation-clean")["status"],
+        "eligible"
+    );
+    let (code, _, _) = run(&fixture, &["workspace", "apply"]);
+    assert_eq!(code, 2);
+    let after_hash = fingerprint(&snapshot(&fixture.base));
+    assert_eq!(
+        before_hash, after_hash,
+        "filesystem hash changed: before {before_hash} after {after_hash}"
+    );
+    assert_unchanged(&fixture.base, &before);
 }

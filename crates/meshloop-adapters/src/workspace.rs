@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod cleanup;
 mod inventory;
+pub use cleanup::observe_cleanup;
 pub use inventory::{InventoryScope, discover_inventory};
 mod ledger;
 #[cfg(test)]

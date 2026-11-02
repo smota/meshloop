@@ -145,6 +145,8 @@ pub enum Command {
     },
     Workspace {
         report: WorkspaceReport,
+        cleanup: bool,
+        digest: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
@@ -329,6 +331,8 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--worktree-base"),
         ],
         "workspace" => &[
+            (false, "--cleanup"),
+            (true, "--digest"),
             (true, "--config"),
             (true, "--db"),
             (true, "--worktree-base"),
@@ -687,8 +691,24 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                     );
                 }
             };
+            let cleanup = has_flag(rest, "--cleanup");
+            if cleanup && !matches!(report, WorkspaceReport::Preview) {
+                return Err(
+                    "meshloop:workspace --cleanup is only valid with preview and deletes nothing"
+                        .into(),
+                );
+            }
+            if has_flag(rest, "--digest") && !cleanup {
+                return Err("meshloop:workspace --digest requires --cleanup".into());
+            }
+            let digest = flag_value(rest, "--digest");
+            if has_flag(rest, "--digest") && digest.is_none() {
+                return Err("meshloop:workspace --digest requires a value".into());
+            }
             Ok(Command::Workspace {
                 report,
+                cleanup,
+                digest,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
@@ -725,7 +745,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
-     \x20 meshloop workspace inventory|preview [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace inventory|preview [--cleanup] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
@@ -803,6 +823,7 @@ mod tests {
         "mutate-plan --graph g --mutation-file f --mutation {} --require-review --config c --db d --worktree-base w",
         "workspace inventory --config c --db d --worktree-base w",
         "workspace preview --config c --db d --worktree-base w",
+        "workspace preview --cleanup --digest d --config c --db d --worktree-base w",
         "mcp",
         "roles",
     ];

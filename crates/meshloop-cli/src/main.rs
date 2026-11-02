@@ -87,10 +87,20 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
         Command::Workspace {
             report,
+            cleanup,
+            digest,
             config,
             db,
             worktree_base,
-        } => workspace_cmd::cmd_workspace(report, config, db, worktree_base, inv.origin),
+        } => workspace_cmd::cmd_workspace(
+            report,
+            cleanup,
+            digest,
+            config,
+            db,
+            worktree_base,
+            inv.origin,
+        ),
         Command::Status {
             graph,
             config,

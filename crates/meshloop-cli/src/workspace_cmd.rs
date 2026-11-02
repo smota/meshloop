@@ -1,10 +1,12 @@
 //! `workspace inventory` and `workspace preview`. Both print JSON and do not write.
+//! `preview --cleanup` adds a read-only cleanup verdict. It never removes artifacts.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use meshloop_adapters::workspace::{InventoryScope, discover_inventory};
+use meshloop_adapters::workspace::{InventoryScope, discover_inventory, observe_cleanup};
 use meshloop_engine::origin::Origin;
+use meshloop_engine::workspace::cleanup::cleanup_preview;
 use meshloop_engine::workspace::inventory::{adoption_preview, classify};
 
 use crate::args::WorkspaceReport;
@@ -13,6 +15,8 @@ use crate::json_out;
 
 pub fn cmd_workspace(
     report: WorkspaceReport,
+    cleanup: bool,
+    digest: Option<String>,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     worktree_base: Option<PathBuf>,
@@ -40,18 +44,50 @@ pub fn cmd_workspace(
     };
     let ledger = db.unwrap_or_else(|| default_db(&checkout));
     let configured_root = worktree_base.unwrap_or_else(|| default_worktree_base(&checkout));
-    let facts = discover_inventory(InventoryScope {
+    let scope = InventoryScope {
         checkout: &checkout,
         ledger: &ledger,
         configured_root: &configured_root,
-    });
-    let inventory = classify(&facts);
-    let body = match report {
-        WorkspaceReport::Inventory => inventory,
-        WorkspaceReport::Preview => adoption_preview(&inventory),
     };
-    debug_assert!(!body.apply);
-    let data = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
+    let facts = discover_inventory(scope);
+    let inventory = classify(&facts);
+    let data = match report {
+        WorkspaceReport::Inventory => {
+            debug_assert!(!inventory.apply);
+            serde_json::to_value(&inventory).unwrap_or(serde_json::Value::Null)
+        }
+        WorkspaceReport::Preview => {
+            let preview = adoption_preview(&inventory);
+            debug_assert!(!preview.apply);
+            let mut data = serde_json::to_value(&preview).unwrap_or(serde_json::Value::Null);
+            if cleanup {
+                let observed = observe_cleanup(
+                    InventoryScope {
+                        checkout: &checkout,
+                        ledger: &ledger,
+                        configured_root: &configured_root,
+                    },
+                    &inventory.entries,
+                );
+                let cleanup_report = cleanup_preview(
+                    observed.repository_id,
+                    observed.retained_ref,
+                    observed.retained_commit,
+                    &inventory.entries,
+                    &observed.observations,
+                    digest.as_deref(),
+                );
+                debug_assert!(!cleanup_report.apply);
+                if let Some(object) = data.as_object_mut() {
+                    object.insert(
+                        "cleanup".to_string(),
+                        serde_json::to_value(&cleanup_report).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+            data
+        }
+    };
     println!("{}", json_out::ok(command, origin, data));
     ExitCode::SUCCESS
 }
