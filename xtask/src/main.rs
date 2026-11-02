@@ -1,6 +1,8 @@
 //! Repository checks, session-control-plane smoke, session pack, and publish dry-run.
 
 #![forbid(unsafe_code)]
+mod workspace_lifecycle_smoke;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -151,6 +153,11 @@ fn smoke(root: &Path) -> ExitCode {
 
     if let Err(e) = smoke_repair_e2e(root, &bin) {
         eprintln!("smoke: 1-node repair check failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    if let Err(e) = workspace_lifecycle_smoke::smoke_workspace_lifecycle(&bin) {
+        eprintln!("smoke: workspace lifecycle failed: {e}");
         return ExitCode::FAILURE;
     }
 

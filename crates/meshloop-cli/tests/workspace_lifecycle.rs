@@ -894,6 +894,7 @@ fn compatibility_adopts_verified_legacy_and_keeps_roots() {
     .unwrap();
     drop(db);
     fs::write(fixture.repo.join("unknown-artifact.txt"), "leave me\n").unwrap();
+    fs::write(fixture.repo.join("protected-data.txt"), "protected\n").unwrap();
     assert!(!root.join("missing.txt").exists());
 
     let before = snapshot(&fixture.base);
@@ -985,6 +986,10 @@ fn compatibility_adopts_verified_legacy_and_keeps_roots() {
         fs::read(fixture.repo.join("unknown-artifact.txt")).unwrap(),
         b"leave me\n"
     );
+    assert_eq!(
+        fs::read(fixture.repo.join("protected-data.txt")).unwrap(),
+        b"protected\n"
+    );
     assert!(!root.join("missing.txt").exists());
     assert!(!fixture.repo.join(".meshloop").join("worktrees").exists());
     assert!(!fixture.base.join(".meshloop-worktrees").exists());
@@ -1015,5 +1020,9 @@ fn compatibility_adopts_verified_legacy_and_keeps_roots() {
     assert!(!fixture.repo.join("configured-root").exists());
     assert!(!fixture.repo.join("other-root").exists());
     assert_eq!(fs::read(root.join("kept.txt")).unwrap(), b"kept\n");
+    assert_eq!(
+        fs::read(fixture.repo.join("protected-data.txt")).unwrap(),
+        b"protected\n"
+    );
     assert!(!root.join("missing.txt").exists());
 }

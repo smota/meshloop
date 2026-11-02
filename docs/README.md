@@ -95,6 +95,7 @@ All operations are universally accessible via terminal slash commands, stdio Mod
 ### Layer 3: Guided Journeys & Task Runbooks
 - **[Installation and Setup](install.md)** — CLI installation, `meshloop.toml` configuration, and MCP setup.
 - **[Getting Started Guide](start.md)** — Hands-on walkthrough of the in-session operator loop.
+- **[Workspace Lifecycle](workspace-lifecycle.md)** — Preview and apply, blockers, recovery, legacy roots, retention, and rollback limits.
 - **[Skills Catalog](../skills/README.md)** — Bundled slash commands and prompt packs for CLI coding agents.
 - **[Developer Contributing Guide](../CONTRIBUTING.md)** — Workspace setup, crate boundaries, and contribution standards.
 
