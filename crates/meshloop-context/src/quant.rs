@@ -301,7 +301,8 @@ pub fn select_context(
     selected
 }
 
-fn path_pinned(path: &str, prefixes: &[String]) -> bool {
+/// Whether `path` is pinned by an allowed-path rule. Empty rules pin nothing.
+pub fn path_pinned(path: &str, prefixes: &[String]) -> bool {
     if prefixes.is_empty() {
         return false;
     }

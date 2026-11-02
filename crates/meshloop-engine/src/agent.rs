@@ -5,8 +5,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use meshloop_domain::decision::DecisionOutcome;
 use meshloop_domain::evidence::AttemptId;
 use meshloop_domain::task_graph::{AcceptanceGate, TaskGraph, TaskId, TaskNode, Tier};
+
+use crate::ports::{BatchNoulQuery, DecisionPort};
+
+/// `DecisionPort` rejects batches larger than this. Do not raise it.
+const MAX_UNPINNED_NOUL: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
@@ -67,10 +73,14 @@ pub fn build_agent_spec(
         worktree_path,
         timeout,
         &[],
+        None,
     )
 }
 
-/// Builds an AgentSpec enriched with AST skeletons and cache-optimized static prefix.
+/// Builds an AgentSpec enriched with AST skeletons and a cache-optimized static prefix.
+///
+/// `noul` of `None` does not query and keeps the FWHT prompt. `Some` reranks only the
+/// unpinned suffix with one batched noul query before skeletons are rendered.
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent_spec_with_context(
     graph: &TaskGraph,
@@ -81,6 +91,7 @@ pub fn build_agent_spec_with_context(
     worktree_path: PathBuf,
     timeout: Duration,
     skeletons: &[(String, String)],
+    noul: Option<&dyn DecisionPort>,
 ) -> AgentSpec {
     let prompt = if skeletons.is_empty() {
         render_prompt(&PromptEnvelope {
@@ -90,15 +101,24 @@ pub fn build_agent_spec_with_context(
             output_contract: DEFAULT_OUTPUT_CONTRACT.into(),
         })
     } else {
-        let ranked = meshloop_context::select_context(
+        let selected = meshloop_context::select_context(
             &node.description,
             skeletons,
             &node.allowed_paths,
             meshloop_context::DEFAULT_SKELETON_BUDGET,
         );
+        let (ranked, accepted_noul) = match noul {
+            Some(port) => {
+                rerank_unpinned_suffix(&selected, &node.description, &node.allowed_paths, port)
+            }
+            None => (selected, false),
+        };
         let mut builder = meshloop_context::PromptCacheBuilder::new()
             .with_contract(DEFAULT_OUTPUT_CONTRACT)
             .with_system_rule("Touch only allowed paths. Leave the worktree in a buildable state.");
+        if accepted_noul {
+            builder = builder.preserve_skeleton_order();
+        }
 
         for (path, skel) in &ranked {
             builder = builder.with_ast_skeleton(path, skel);
@@ -128,6 +148,61 @@ pub fn build_agent_spec_with_context(
         prompt,
         timeout,
     }
+}
+
+/// Permute unpinned slots by one batched noul query. Pinned indices stay fixed.
+/// The bool is true only when every returned score was usable.
+/// An unusable response, an empty suffix, or a suffix longer than
+/// [`MAX_UNPINNED_NOUL`] keeps `selected` and reports false. Nothing is dropped.
+fn rerank_unpinned_suffix(
+    selected: &[(String, String)],
+    description: &str,
+    pin_prefixes: &[String],
+    noul: &dyn DecisionPort,
+) -> (Vec<(String, String)>, bool) {
+    let mut unpinned_at = Vec::new();
+    for (index, (path, _)) in selected.iter().enumerate() {
+        if !meshloop_context::path_pinned(path, pin_prefixes) {
+            unpinned_at.push(index);
+        }
+    }
+    if unpinned_at.is_empty() || unpinned_at.len() > MAX_UNPINNED_NOUL {
+        return (selected.to_vec(), false);
+    }
+    let propositions: Vec<String> = unpinned_at
+        .iter()
+        .map(|&index| format!("{description}\n{}", selected[index].0))
+        .collect();
+    let Ok(outcomes) = noul.evaluate_batch_noul(&BatchNoulQuery { propositions }) else {
+        return (selected.to_vec(), false);
+    };
+    if outcomes.len() != unpinned_at.len() {
+        return (selected.to_vec(), false);
+    }
+    let mut scores = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        let DecisionOutcome::Score(score) = outcome else {
+            return (selected.to_vec(), false);
+        };
+        scores.push(score.get());
+    }
+    // noul descending, then earlier FWHT suffix index, then path ascending.
+    let mut suffix_order: Vec<usize> = (0..unpinned_at.len()).collect();
+    suffix_order.sort_by(|&left, &right| {
+        scores[right]
+            .total_cmp(&scores[left])
+            .then(left.cmp(&right))
+            .then(
+                selected[unpinned_at[left]]
+                    .0
+                    .cmp(&selected[unpinned_at[right]].0),
+            )
+    });
+    let mut result = selected.to_vec();
+    for (slot, suffix_index) in unpinned_at.iter().zip(suffix_order) {
+        result[*slot] = selected[unpinned_at[suffix_index]].clone();
+    }
+    (result, true)
 }
 
 /// Builds an AgentSpec for an inner-loop repair round, including normalized failure diagnostics
@@ -256,8 +331,15 @@ pub fn build_planning_spec(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    use meshloop_domain::decision::DecisionOutcome;
     use meshloop_domain::task_graph::Tier;
+
+    use super::*;
+    use crate::ports::{
+        BatchNoulQuery, ChoiceQuery, DecisionPort, DecisionPortError, NoulQuery, ScoreQuery,
+    };
 
     fn node(id: u32, desc: &str, deps: &[u32]) -> TaskNode {
         TaskNode {
@@ -403,6 +485,7 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             Duration::from_secs(300),
             &skeletons,
+            None,
         );
         assert!(spec.prompt.contains("pub trait Auth"));
         assert!(spec.prompt.contains("src/auth.rs"));
@@ -456,6 +539,7 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             Duration::from_secs(300),
             &skeletons,
+            None,
         );
         assert!(spec.prompt.contains("src/auth.rs"));
         assert!(spec.prompt.contains("pub trait Auth"));
@@ -495,6 +579,7 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             Duration::from_secs(300),
             &skeletons,
+            None,
         );
 
         assert!(
@@ -506,5 +591,288 @@ mod tests {
                 .contains("0031 Markdown AST Context Engineering")
         );
         assert!(spec.prompt.contains("doc_skeleton.rs"));
+    }
+
+    fn noul_score(value: f64) -> DecisionOutcome {
+        DecisionOutcome::try_score(value).expect("finite test score")
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(path, body)| (path.to_string(), body.to_string()))
+            .collect()
+    }
+
+    fn apply(
+        selected: &[(String, String)],
+        prefixes: &[String],
+        port: &BatchNoulDouble,
+    ) -> (Vec<(String, String)>, bool) {
+        super::rerank_unpinned_suffix(selected, "implement the change", prefixes, port)
+    }
+
+    fn marker(prompt: &str, path: &str) -> usize {
+        let needle = format!("// File: {path}\n");
+        match prompt.find(&needle) {
+            Some(index) => index,
+            None => panic!("prompt missing skeleton for {path}"),
+        }
+    }
+
+    struct BatchNoulDouble {
+        batch: Result<Vec<DecisionOutcome>, DecisionPortError>,
+        batch_calls: Cell<usize>,
+        noul_calls: Cell<usize>,
+        propositions: RefCell<Vec<String>>,
+    }
+
+    impl BatchNoulDouble {
+        fn new(batch: Result<Vec<DecisionOutcome>, DecisionPortError>) -> Self {
+            Self {
+                batch,
+                batch_calls: Cell::new(0),
+                noul_calls: Cell::new(0),
+                propositions: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DecisionPort for BatchNoulDouble {
+        fn evaluate_choice(
+            &self,
+            _query: &ChoiceQuery,
+        ) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_noul(&self, _query: &NoulQuery) -> Result<DecisionOutcome, DecisionPortError> {
+            self.noul_calls.set(self.noul_calls.get() + 1);
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_score(
+            &self,
+            _query: &ScoreQuery,
+        ) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_batch_noul(
+            &self,
+            query: &BatchNoulQuery,
+        ) -> Result<Vec<DecisionOutcome>, DecisionPortError> {
+            self.batch_calls.set(self.batch_calls.get() + 1);
+            *self.propositions.borrow_mut() = query.propositions.clone();
+            self.batch.clone()
+        }
+    }
+
+    #[test]
+    fn pinned_index_stays_while_unpinned_suffix_reorders() {
+        let prefixes = vec!["pin/".to_string()];
+        let selected = pairs(&[("pin/a.rs", "A"), ("u/b.rs", "B"), ("u/c.rs", "C")]);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(0.1), noul_score(0.9)]));
+        let (got, accepted) = apply(&selected, &prefixes, &port);
+        assert!(accepted);
+        assert_eq!(
+            got,
+            pairs(&[("pin/a.rs", "A"), ("u/c.rs", "C"), ("u/b.rs", "B")])
+        );
+        assert_eq!(port.batch_calls.get(), 1);
+        assert_eq!(port.noul_calls.get(), 0);
+        assert_eq!(
+            *port.propositions.borrow(),
+            vec![
+                "implement the change\nu/b.rs".to_string(),
+                "implement the change\nu/c.rs".to_string(),
+            ]
+        );
+
+        let selected = pairs(&[("u/b.rs", "B"), ("pin/a.rs", "A"), ("u/c.rs", "C")]);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(0.1), noul_score(0.9)]));
+        let (got, accepted) = apply(&selected, &prefixes, &port);
+        assert!(accepted);
+        assert_eq!(
+            got,
+            pairs(&[("u/c.rs", "C"), ("pin/a.rs", "A"), ("u/b.rs", "B")])
+        );
+        assert_eq!(port.noul_calls.get(), 0);
+    }
+
+    #[test]
+    fn equal_noul_keeps_fwht_order_by_suffix_index() {
+        let prefixes = vec!["pin/".to_string()];
+        let selected = pairs(&[("pin/a.rs", "A"), ("u/b.rs", "B"), ("u/c.rs", "C")]);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(0.4), noul_score(0.4)]));
+        let (got, accepted) = apply(&selected, &prefixes, &port);
+        assert!(accepted);
+        assert_eq!(got, selected);
+
+        // Same noul: earlier suffix index wins over path ascending.
+        let selected = pairs(&[("u/c.rs", "C"), ("u/b.rs", "B")]);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(0.4), noul_score(0.4)]));
+        let (got, accepted) = apply(&selected, &[], &port);
+        assert!(accepted);
+        assert_eq!(got, selected);
+    }
+
+    #[test]
+    fn noul_rerank_drops_nothing() {
+        let prefixes = vec!["pin/".to_string()];
+        let selected = pairs(&[("pin/a.rs", "A"), ("u/b.rs", "B"), ("u/c.rs", "C")]);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(0.1), noul_score(0.9)]));
+        let (got, _) = apply(&selected, &prefixes, &port);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], ("pin/a.rs".to_string(), "A".to_string()));
+        assert_eq!(got[1], ("u/c.rs".to_string(), "C".to_string()));
+        assert_eq!(got[2], ("u/b.rs".to_string(), "B".to_string()));
+    }
+
+    #[test]
+    fn unusable_noul_batch_keeps_input_order() {
+        let prefixes = vec!["pin/".to_string()];
+        let selected = pairs(&[("pin/a.rs", "A"), ("u/b.rs", "B"), ("u/c.rs", "C")]);
+        let cases = [
+            Err(DecisionPortError::EmptyQuery),
+            Ok(vec![noul_score(0.9)]),
+            Ok(vec![DecisionOutcome::Boolean(true), noul_score(0.9)]),
+            Ok(vec![noul_score(0.1), noul_score(0.9), noul_score(0.5)]),
+        ];
+        for batch in cases {
+            let port = BatchNoulDouble::new(batch);
+            let (got, accepted) = apply(&selected, &prefixes, &port);
+            assert!(!accepted);
+            assert_eq!(got, selected);
+            assert_eq!(port.batch_calls.get(), 1);
+            assert_eq!(port.noul_calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn empty_unpinned_suffix_does_not_call_the_port() {
+        let prefixes = vec!["pin/".to_string()];
+        let selected = pairs(&[("pin/a.rs", "A"), ("pin/b.rs", "B")]);
+        let port = BatchNoulDouble::new(Err(DecisionPortError::EmptyQuery));
+        let (got, accepted) = apply(&selected, &prefixes, &port);
+        assert!(!accepted);
+        assert_eq!(got, selected);
+        assert_eq!(port.batch_calls.get(), 0);
+        assert_eq!(port.noul_calls.get(), 0);
+    }
+
+    #[test]
+    fn suffix_longer_than_batch_max_does_not_call_the_port() {
+        let at_max = (0..super::MAX_UNPINNED_NOUL)
+            .map(|i| (format!("u/{i:02}.rs"), format!("body-{i}")))
+            .collect::<Vec<_>>();
+        let scores = (0..at_max.len()).map(|i| noul_score(i as f64)).collect();
+        let port = BatchNoulDouble::new(Ok(scores));
+        let (got, accepted) = apply(&at_max, &[], &port);
+        assert!(accepted);
+        assert_eq!(port.batch_calls.get(), 1);
+        assert_eq!(port.noul_calls.get(), 0);
+        assert_eq!(
+            got[0].0,
+            format!("u/{:02}.rs", super::MAX_UNPINNED_NOUL - 1)
+        );
+        assert_eq!(got.len(), at_max.len());
+
+        let over = (0..=super::MAX_UNPINNED_NOUL)
+            .map(|i| (format!("u/{i:02}.rs"), format!("body-{i}")))
+            .collect::<Vec<_>>();
+        assert_eq!(over.len(), super::MAX_UNPINNED_NOUL + 1);
+        let port = BatchNoulDouble::new(Ok(vec![noul_score(1.0); over.len()]));
+        let (got, accepted) = apply(&over, &[], &port);
+        assert!(!accepted);
+        assert_eq!(got, over);
+        assert_eq!(port.batch_calls.get(), 0);
+        assert_eq!(port.noul_calls.get(), 0);
+    }
+
+    #[test]
+    fn noul_rerank_changes_prompt_order_and_failure_does_not() {
+        let description = "implement Auth trait verify";
+        let mut task = node(1, description, &[]);
+        task.allowed_paths = vec!["a/pinned.rs".into()];
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![task],
+        };
+        let target = &graph.nodes[0];
+        let skeletons = vec![
+            (
+                "m/auth.rs".into(),
+                "pub trait Auth { fn verify(&self); }".into(),
+            ),
+            (
+                "z/noise.rs".into(),
+                "pub struct Pool { url: String }".into(),
+            ),
+            ("a/pinned.rs".into(), "pub struct PinnedKeep;".into()),
+        ];
+        let ranked = meshloop_context::select_context(
+            description,
+            &skeletons,
+            &target.allowed_paths,
+            meshloop_context::DEFAULT_SKELETON_BUDGET,
+        );
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].0, "a/pinned.rs");
+        let unpinned: Vec<_> = ranked
+            .iter()
+            .filter(|(path, _)| !meshloop_context::path_pinned(path, &target.allowed_paths))
+            .cloned()
+            .collect();
+        assert_eq!(unpinned.len(), 2);
+        assert_eq!(unpinned[0].0, "m/auth.rs");
+        assert_eq!(unpinned[1].0, "z/noise.rs");
+
+        let spec = |noul: Option<&dyn DecisionPort>| {
+            build_agent_spec_with_context(
+                &graph,
+                target,
+                AttemptId(1),
+                "claude-code",
+                "configured-model",
+                PathBuf::from("/tmp/wt"),
+                Duration::from_secs(300),
+                &skeletons,
+                noul,
+            )
+        };
+        let none = spec(None);
+        let failing = BatchNoulDouble::new(Err(DecisionPortError::EmptyQuery));
+        let failed = spec(Some(&failing));
+        assert_eq!(failed.prompt, none.prompt);
+        assert_eq!(failing.batch_calls.get(), 1);
+        assert_eq!(failing.noul_calls.get(), 0);
+
+        let scores = vec![noul_score(0.1), noul_score(0.9)];
+        let port = BatchNoulDouble::new(Ok(scores));
+        let scored = spec(Some(&port));
+        assert_eq!(port.batch_calls.get(), 1);
+        assert_eq!(port.noul_calls.get(), 0);
+        assert_eq!(
+            *port.propositions.borrow(),
+            unpinned
+                .iter()
+                .map(|(path, _)| format!("{description}\n{path}"))
+                .collect::<Vec<_>>()
+        );
+        let later = marker(&scored.prompt, "z/noise.rs");
+        let earlier = marker(&scored.prompt, "m/auth.rs");
+        let pinned = marker(&scored.prompt, "a/pinned.rs");
+        assert!(later < marker(&none.prompt, "z/noise.rs"));
+        assert!(pinned < later);
+        assert!(pinned < earlier);
+        assert!(later < earlier);
+        assert!(scored.prompt.contains("pub struct PinnedKeep;"));
+        assert!(
+            scored
+                .prompt
+                .contains("pub trait Auth { fn verify(&self); }")
+        );
+        assert!(scored.prompt.contains("pub struct Pool { url: String }"));
     }
 }

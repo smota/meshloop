@@ -14,7 +14,9 @@ pub mod tier1;
 
 pub use cache::{CacheOptimizedPrompt, PromptCacheBuilder};
 pub use doc_skeleton::PRUNED_SENTINEL;
-pub use quant::{BitWidth, DEFAULT_SKELETON_BUDGET, PackedCode, SignatureIndex, select_context};
+pub use quant::{
+    BitWidth, DEFAULT_SKELETON_BUDGET, PackedCode, SignatureIndex, path_pinned, select_context,
+};
 pub use signature::{Signature, SignatureKind, extract_signatures};
 pub use skeleton::{Language, SkeletonResult, estimate_tokens, extract_skeleton};
 pub use skeleton_cache::SkeletonCache;
