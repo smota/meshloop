@@ -1,6 +1,8 @@
 //! Quota-Aware Capability Routing (ADR 0009 / runtime-design.md §5). Strategy pattern
 //! (design-patterns.md): scoring is a weighted sum over pluggable `RoutingSignal`s, so
 //! adding a signal, harness, or model tier never touches this module's control flow.
+//! `HistoricalSuccessSignal` may shrink its mean toward a predictive-success oracle
+//! prior. That oracle is not a routing arm and cannot add or remove candidates.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -9,7 +11,10 @@ use meshloop_domain::capability::{HarnessProfile, QuotaState};
 use meshloop_domain::policy::{CouplingPenalty, ModelCapabilityTier, tier_fits};
 use meshloop_domain::task_graph::Tier;
 
-use crate::ports::{FeedbackKey, RoutingFeedbackStore, TierKey};
+use crate::ports::{
+    FeedbackKey, OracleQuery, PredictiveSuccessOracle, RoutingFeedbackStore, SessionSpendLedger,
+    TierKey,
+};
 
 /// A configured candidate that routing filtered out, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +36,10 @@ pub struct RoutingContext<'a> {
     pub preferred_harness: Option<&'a str>,
     pub headroom: &'a HashMap<String, f64>,
     pub feedback: &'a dyn RoutingFeedbackStore,
+    /// Predictive prior. Never a candidate and never consulted when `None`.
+    pub oracle: Option<&'a dyn PredictiveSuccessOracle>,
+    /// Charge before each oracle query. `None` predicts without spending.
+    pub spend: Option<&'a SessionSpendLedger>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -58,19 +67,47 @@ impl RoutingSignal for TierEfficiencySignal {
 }
 
 pub struct HistoricalSuccessSignal;
+
+/// Local mean, optionally shrunk toward an oracle prior by at most 0.25.
+/// Pulls are real feedback counts. A missing oracle, a declined charge, or a
+/// predict error returns the local mean and never fails selection.
+fn fused_historical_mean(mu_local: f64, successes: f64, n: u64, pi: f64) -> f64 {
+    let raw = (successes + 4.0 * pi) / (n as f64 + 4.0);
+    raw.clamp(mu_local - 0.25, mu_local + 0.25).clamp(0.0, 1.0)
+}
+
 impl RoutingSignal for HistoricalSuccessSignal {
     fn score(&self, candidate: &Candidate, ctx: &RoutingContext) -> SignalScore {
+        let tier = TierKey::from(ctx.task_tier);
         let key = FeedbackKey {
             harness: candidate.harness.clone(),
             model_ref: candidate.model_ref.clone(),
-            tier: TierKey::from(ctx.task_tier),
+            tier,
         };
         let counters = ctx.feedback.counters(&key).unwrap_or_default();
-        let total = counters.success + counters.failure;
-        if total == 0 {
-            SignalScore(0.5)
+        let n = u64::from(counters.success + counters.failure);
+        let mu_local = if n == 0 {
+            0.5
         } else {
-            SignalScore(counters.success as f64 / total as f64)
+            f64::from(counters.success) / n as f64
+        };
+        let Some(oracle) = ctx.oracle else {
+            return SignalScore(mu_local);
+        };
+        if let Some(spend) = ctx.spend
+            && !spend.try_charge()
+        {
+            return SignalScore(mu_local);
+        }
+        let arm = format!("{}\n{}\n{tier:?}", candidate.harness, candidate.model_ref);
+        match oracle.predict(&OracleQuery { arm, pulls: n }) {
+            Ok(outcome) => SignalScore(fused_historical_mean(
+                mu_local,
+                f64::from(counters.success),
+                n,
+                outcome.prior.get(),
+            )),
+            Err(_) => SignalScore(mu_local),
         }
     }
 }
@@ -263,6 +300,8 @@ mod tests {
             preferred_harness: None,
             headroom,
             feedback,
+            oracle: None,
+            spend: None,
         }
     }
 
@@ -637,5 +676,182 @@ mod tests {
         assert!(rejected[0].reason.contains("model_tier"));
         assert_eq!(rejected[1].reason, "probe timed out after 15s");
         assert_eq!(rejected[2].reason, "not probed");
+    }
+
+    fn codex() -> Candidate {
+        Candidate {
+            harness: "codex".into(),
+            model_ref: "m".into(),
+            model_tier: ModelCapabilityTier::TopTier,
+        }
+    }
+
+    fn scripted_prior(arm: &str, pulls: u64, pi: f64) -> crate::ports::ScriptedDecisionPort {
+        use meshloop_domain::decision::Confidence;
+
+        let pulls_decimal = pulls.to_string();
+        let mut port = crate::ports::ScriptedDecisionPort::default();
+        port.insert_oracle(
+            crate::ports::decision_fingerprint("oracle", &[arm, pulls_decimal.as_str()]),
+            crate::ports::OracleOutcome {
+                prior: Confidence::try_new(pi).unwrap(),
+            },
+        );
+        port
+    }
+
+    #[test]
+    fn cold_arm_exploration_is_exactly_point_seven_and_oracle_is_not_a_routing_arm() {
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let headroom = HashMap::new();
+        let cold = codex();
+        let score =
+            RestlessBanditSignal::default().score(&cold, &ctx(Tier::Tier1, &headroom, &feedback));
+        assert_eq!(score, SignalScore(0.7));
+
+        let configured = vec![
+            cold,
+            Candidate {
+                harness: "claude-code".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        profiles.insert("claude-code".into(), profile(false, true));
+        profiles.insert("jev".into(), profile(true, true));
+        profiles.insert("oracle".into(), profile(true, true));
+        let selected = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        let names: Vec<_> = selected.iter().map(|c| c.harness.as_str()).collect();
+        assert_eq!(names, ["codex"]);
+    }
+
+    #[test]
+    fn prior_clip_limits_fused_historical_mean() {
+        let cases = [
+            (0u32, 0u32, 1.0, 0.75),
+            (0, 0, 0.0, 0.25),
+            (0, 0, 0.5, 0.5),
+            (4, 0, 0.0, 0.75),
+            (4, 0, 1.0, 1.0),
+        ];
+        for (successes, failures, pi, expected) in cases {
+            let mut feedback = crate::ports::InMemoryFeedbackStore::default();
+            let key = FeedbackKey {
+                harness: "codex".into(),
+                model_ref: "m".into(),
+                tier: TierKey::Tier1,
+            };
+            for _ in 0..successes {
+                feedback.record_outcome(&key, true).unwrap();
+            }
+            for _ in 0..failures {
+                feedback.record_outcome(&key, false).unwrap();
+            }
+            let pulls = u64::from(successes + failures);
+            let arm = format!("codex\nm\n{:?}", TierKey::Tier1);
+            let port = scripted_prior(&arm, pulls, pi);
+            let headroom = HashMap::new();
+            let mut routing = ctx(Tier::Tier1, &headroom, &feedback);
+            routing.oracle = Some(&port);
+            let score = HistoricalSuccessSignal.score(&codex(), &routing);
+            assert_eq!(
+                score,
+                SignalScore(expected),
+                "successes={successes} failures={failures} pi={pi}"
+            );
+        }
+    }
+
+    #[test]
+    fn spend_exhaustion_keeps_cold_mean_and_the_candidate() {
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let headroom = HashMap::new();
+        let ledger = crate::ports::SessionSpendLedger::new(0, 1);
+        let port = scripted_prior("codex\nm\nTier1", 0, 1.0);
+        let candidate = codex();
+        let mut routing = ctx(Tier::Tier1, &headroom, &feedback);
+        routing.oracle = Some(&port);
+        routing.spend = Some(&ledger);
+        assert_eq!(
+            HistoricalSuccessSignal.score(&candidate, &routing),
+            SignalScore(0.5)
+        );
+        assert_eq!(ledger.remaining(), 0);
+
+        let configured = vec![candidate];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        let selected = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &routing,
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].harness, "codex");
+        assert_eq!(ledger.remaining(), 0);
+    }
+
+    #[test]
+    fn one_successful_charge_fuses_a_cold_prior() {
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let headroom = HashMap::new();
+        let ledger = crate::ports::SessionSpendLedger::new(1, 1);
+        let port = scripted_prior("codex\nm\nTier1", 0, 1.0);
+        let mut routing = ctx(Tier::Tier1, &headroom, &feedback);
+        routing.oracle = Some(&port);
+        routing.spend = Some(&ledger);
+        assert_eq!(
+            HistoricalSuccessSignal.score(&codex(), &routing),
+            SignalScore(0.75)
+        );
+        assert_eq!(ledger.remaining(), 0);
+    }
+
+    #[test]
+    fn predict_error_after_charge_keeps_local_mean_and_the_candidate() {
+        let mut feedback = crate::ports::InMemoryFeedbackStore::default();
+        let key = FeedbackKey {
+            harness: "codex".into(),
+            model_ref: "m".into(),
+            tier: TierKey::Tier1,
+        };
+        feedback.record_outcome(&key, true).unwrap();
+        feedback.record_outcome(&key, true).unwrap();
+        let headroom = HashMap::new();
+        let ledger = crate::ports::SessionSpendLedger::new(1, 1);
+        let port = crate::ports::ScriptedDecisionPort::default();
+        let candidate = codex();
+        let mut routing = ctx(Tier::Tier1, &headroom, &feedback);
+        routing.oracle = Some(&port);
+        routing.spend = Some(&ledger);
+        assert_eq!(
+            HistoricalSuccessSignal.score(&candidate, &routing),
+            SignalScore(1.0)
+        );
+        assert_eq!(ledger.remaining(), 0);
+
+        let configured = vec![candidate];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        let selected = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &routing,
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].harness, "codex");
+        assert_eq!(ledger.remaining(), 0);
     }
 }

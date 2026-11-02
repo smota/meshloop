@@ -12,7 +12,7 @@ use meshloop_domain::state::{Event, PlanState, TaskState};
 use meshloop_domain::task_graph::TaskId;
 use meshloop_engine::ports::{
     AttemptRow, DriverLiveness, EventLog, EvidenceStore, FeedbackCounters, FeedbackKey, QuotaStore,
-    RoutingFeedbackStore, RunRow, RunStore, StoreError, TransitionRecord,
+    RoutingFeedbackStore, RunRow, RunStore, SessionSpendLedger, StoreError, TransitionRecord,
 };
 
 pub struct SqliteStore {
@@ -20,6 +20,8 @@ pub struct SqliteStore {
     pub(crate) read_only: bool,
     pub(crate) database_handle: Option<same_file::Handle>,
     pub(crate) database_identity: Option<meshloop_domain::workspace::NativeIdentity>,
+    /// In-process oracle budget. Not loaded or written by schema SQL.
+    pub(crate) session_spend: SessionSpendLedger,
 }
 
 impl SqliteStore {
@@ -33,7 +35,12 @@ impl SqliteStore {
             read_only: false,
             database_handle: None,
             database_identity: None,
+            session_spend: SessionSpendLedger::new(0, 1),
         })
+    }
+
+    pub fn session_spend_mut(&mut self) -> &mut SessionSpendLedger {
+        &mut self.session_spend
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self, StoreError> {
@@ -56,6 +63,7 @@ impl SqliteStore {
             read_only: false,
             database_handle: Some(database_handle),
             database_identity: Some(database_identity),
+            session_spend: SessionSpendLedger::new(0, 1),
         })
     }
 
@@ -483,6 +491,10 @@ impl QuotaStore for SqliteStore {
 }
 
 impl RunStore for SqliteStore {
+    fn session_spend(&self) -> Option<&SessionSpendLedger> {
+        Some(&self.session_spend)
+    }
+
     fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError> {
         self.reject_bound_graph(&row.graph_id)?;
         let plan_state = match row.plan_state {
@@ -1106,6 +1118,18 @@ mod tests {
         let counters = store.counters(&key).unwrap();
         assert_eq!(counters.success, 2);
         assert_eq!(counters.failure, 1);
+    }
+
+    #[test]
+    fn session_spend_starts_at_zero_and_second_charge_fails_open() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(store.session_spend().unwrap().remaining(), 0);
+        assert_eq!(store.session_spend().unwrap().cost(), 1);
+        *store.session_spend_mut() = SessionSpendLedger::new(1, 1);
+        assert!(store.session_spend_mut().try_charge());
+        assert_eq!(store.session_spend().unwrap().remaining(), 0);
+        assert!(!store.session_spend().unwrap().try_charge());
+        assert_eq!(store.session_spend().unwrap().remaining(), 0);
     }
 
     #[test]

@@ -398,6 +398,7 @@ impl SqliteStore {
             read_only: true,
             database_handle: Some(handle),
             database_identity: Some(identity),
+            session_spend: meshloop_engine::ports::SessionSpendLedger::new(0, 1),
         }))
     }
     pub(crate) fn reject_bound_graph(&self, graph: &str) -> Result<(), StoreError> {
