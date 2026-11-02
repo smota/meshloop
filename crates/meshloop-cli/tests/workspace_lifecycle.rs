@@ -491,6 +491,7 @@ fn candidate<'a>(report: &'a serde_json::Value, id: &str) -> &'a serde_json::Val
         .unwrap_or_else(|| panic!("missing {id} in {report}"))
 }
 
+#[cfg(unix)]
 fn candidate_by_path<'a>(report: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
     report["data"]["cleanup"]["candidates"]
         .as_array()
