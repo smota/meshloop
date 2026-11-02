@@ -219,6 +219,7 @@ fn parse_event(s: &str) -> Result<Event, StoreError> {
         "LiveWorkerSettled" => Ok(Event::LiveWorkerSettled),
         "DependencyCleared" => Ok(Event::DependencyCleared),
         "GraphMutated" => Ok(Event::GraphMutated),
+        "VerifyGatePassed" => Ok(Event::VerifyGatePassed),
         other => Err(StoreError::Corrupt(format!("unknown event {other}"))),
     }
 }
@@ -1138,6 +1139,24 @@ mod tests {
         store.append(rec.clone()).unwrap();
         let got = store.records_for_graph("g").unwrap();
         assert_eq!(got, vec![rec]);
+    }
+
+    #[test]
+    fn verify_gate_event_round_trips_without_a_schema_bump() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let rec = TransitionRecord {
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            attempt_id: Some(AttemptId(3)),
+            from: TaskState::AwaitingReview,
+            to: TaskState::Accepted,
+            event: Event::VerifyGatePassed,
+            reason: None,
+            executor: "meshloop:verify-gate".into(),
+            occurred_at: "2".into(),
+        };
+        store.append(rec.clone()).unwrap();
+        assert_eq!(store.records_for_graph("g").unwrap(), vec![rec]);
     }
 
     #[test]

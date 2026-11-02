@@ -1757,7 +1757,7 @@ fn review_plan_lists_acceptance_required_and_nodes_wait_for_plan_acceptance() {
     );
     assert_eq!(
         parsed["data"]["acceptance_rule"],
-        "R1: every node stops for meshloop accept; tier selects harness/model only"
+        "R1: a verify gate on tier 1 or 2 accepts after deterministic checks; every other node stops for meshloop accept; tier selects harness/model only"
     );
 
     let status = status_json(&dir, &config_path, &db_path);

@@ -1397,7 +1397,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
     use hdrhistogram::Histogram;
     use meshloop_adapters::store::SqliteStore;
     use meshloop_domain::state::PlanState;
-    use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, TaskNode};
+    use meshloop_domain::task_graph::{AcceptanceGate, GraphMutation, TaskGraph, TaskId, TaskNode};
     use meshloop_engine::ports::{RunRow, RunStore};
     use std::time::Instant;
 
@@ -1468,6 +1468,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1494,6 +1495,7 @@ fn run_mutation_benchmarks(root: &Path, verbose: bool) -> Result<(f64, bool), St
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             };
             let mutation = GraphMutation::InsertPrerequisite {
                 target_task,
@@ -1540,7 +1542,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
     use meshloop_adapters::store::SqliteStore;
     use meshloop_domain::evidence::AttemptId;
     use meshloop_domain::state::{Event, PlanState, TaskState};
-    use meshloop_domain::task_graph::{GraphMutation, TaskGraph, TaskId, TaskNode};
+    use meshloop_domain::task_graph::{AcceptanceGate, GraphMutation, TaskGraph, TaskId, TaskNode};
     use meshloop_engine::ports::{RunRow, RunStore, TransitionRecord};
     use meshloop_engine::router::Router;
     use meshloop_engine::run_loop::{RunLimits, RunLoop};
@@ -1566,6 +1568,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             },
             TaskNode {
                 id: TaskId(2),
@@ -1575,6 +1578,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             },
         ],
     };
@@ -1681,6 +1685,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 }],
             },
         ),
@@ -1697,6 +1702,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 }],
             },
         ),
@@ -1713,6 +1719,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 }],
             },
         ),
@@ -1729,6 +1736,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 }],
             },
         ),
@@ -1745,6 +1753,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
                     allowed_paths: vec![],
                     empty_diff_ok: false,
                     deliverable: None,
+                    gate: AcceptanceGate::Human,
                 }],
             },
         ),
@@ -1801,6 +1810,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
             allowed_paths: vec![],
             empty_diff_ok: false,
             deliverable: None,
+            gate: AcceptanceGate::Human,
         }],
     };
     let res = saga.mutate_plan(graph_id, active_mutation, false);

@@ -15,6 +15,7 @@ flowchart LR
   pending --> ready --> running --> verifying
   verifying -->|diff ok| awaitingReview[awaiting-review]
   awaitingReview -->|accept --as| accepted --> integrated
+  awaitingReview -->|verify gate, tier 1 or 2| accepted
 ```
 
 | From | To | Trigger | Precondition |
@@ -31,6 +32,7 @@ flowchart LR
 | verifying | awaiting-review | deterministic-checks-passed event | DeterministicEvidence bound to exact candidate revision (ADR 0007) |
 | verifying | failed | deterministic-checks-failed event | failure evidence retained, redacted (ADR 0007) |
 | awaiting-review | accepted | model-review-passed (Tier 1/2, policy-eligible) or human-acceptance-recorded (Tier 3, always) event | evidence contract satisfied (ADR 0007); Tier 3 never transitions on model review alone |
+| awaiting-review | accepted | verify-gate-passed event | node gate is verify and tier is explicit Tier1 or Tier2, after deterministic checks passed (ADR 0037); not model review |
 | awaiting-review | failed | review-rejected event | rejection reason retained |
 | accepted | integrated | integration-owner-merge event | single integration owner (ADR 0005); base revision still current |
 | accepted | failed | stale-base-detected event | integration blocked, new attempt required, never a silent rebase |

@@ -51,6 +51,9 @@ pub enum Event {
     DependencyCleared,
     /// Dynamic graph mutation injected prerequisite; target reverts to Pending if Ready (ADR 0028).
     GraphMutated,
+    /// Deterministic checks passed on an explicit tier-1 or tier-2 verify gate (ADR 0037).
+    /// Not `ModelReviewPassed` and not a human accept.
+    VerifyGatePassed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,7 @@ pub fn transition(from: TaskState, event: Event) -> Result<TaskState, IllegalTra
         (Verifying, DeterministicChecksFailed) => Failed,
         (AwaitingReview, ModelReviewPassed) => Accepted,
         (AwaitingReview, HumanAcceptanceRecorded) => Accepted,
+        (AwaitingReview, VerifyGatePassed) => Accepted,
         (AwaitingReview, ReviewRejected) => Failed,
         (Accepted, IntegrationOwnerMerge) => Integrated,
         (Accepted, StaleBaseDetected) => Failed,
@@ -134,6 +138,7 @@ mod tests {
         (Verifying, DeterministicChecksFailed, Failed),
         (AwaitingReview, ModelReviewPassed, Accepted),
         (AwaitingReview, HumanAcceptanceRecorded, Accepted),
+        (AwaitingReview, VerifyGatePassed, Accepted),
         (AwaitingReview, ReviewRejected, Failed),
         (Accepted, IntegrationOwnerMerge, Integrated),
         (Accepted, StaleBaseDetected, Failed),
@@ -185,6 +190,7 @@ mod tests {
             LiveWorkerSettled,
             DependencyCleared,
             GraphMutated,
+            VerifyGatePassed,
         ];
         for &state in &all_states {
             for &event in &all_events {

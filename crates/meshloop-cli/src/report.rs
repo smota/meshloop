@@ -4,8 +4,7 @@ use meshloop_domain::state::TaskState;
 use meshloop_domain::task_graph::TaskGraph;
 use meshloop_engine::run_loop::{AttemptView, IdleReason, RunStatus};
 
-pub const ACCEPTANCE_RULE: &str =
-    "R1: every node stops for meshloop accept; tier selects harness/model only";
+pub const ACCEPTANCE_RULE: &str = "R1: a verify gate on tier 1 or 2 accepts after deterministic checks; every other node stops for meshloop accept; tier selects harness/model only";
 
 /// Shown when routing finds no planner and `[planner]` names no harness.
 pub const PLANNER_ROUTING_HINT: &str = "The planner is routed as a Tier3 task by default, which needs a harness with      model_tier = \"top\". To plan with another harness, set `[planner] harness = \"<name>\"`      (or `[planner] tier`) in meshloop.toml.";
@@ -233,7 +232,7 @@ pub fn banner() -> String {
 mod tests {
     use super::*;
     use meshloop_domain::state::PlanState;
-    use meshloop_domain::task_graph::{TaskId, TaskNode, Tier};
+    use meshloop_domain::task_graph::{AcceptanceGate, TaskId, TaskNode, Tier};
     use meshloop_engine::run_loop::NodeStatus;
 
     fn node(id: u32, state: TaskState, live: Option<&str>) -> NodeStatus {
@@ -272,6 +271,7 @@ mod tests {
                 allowed_paths: vec![],
                 empty_diff_ok: false,
                 deliverable: None,
+                gate: AcceptanceGate::Human,
             }],
         };
         let rendered = format_plan(&graph);

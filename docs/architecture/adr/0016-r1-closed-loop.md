@@ -10,6 +10,8 @@
 - Supersedes: none
 - Superseded by: none
 
+Amended by [ADR 0037](0037-node-verify-gate.md) for one case: an explicit verify gate on tier 1 or 2 accepts after deterministic checks.
+
 ## Context and constraints
 The five runtime ADRs (0001, 0003, 0005, 0007, 0009) describe v1. An earlier draft of this
 ADR stamped Release 1 as a fixture-backed CLI with live dispatch opt-in. That stamp was

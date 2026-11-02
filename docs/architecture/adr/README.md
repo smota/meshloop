@@ -52,6 +52,7 @@ every prior ID is preserved below with a pointer, per "IDs are stable and never 
 | 0034 | [Read-only SQLite observation](0034-read-only-sqlite-observation.md) | Accepted |
 | 0035 | [Atomic Windows process assignment to owned jobs](0035-atomic-process-job-assignment.md) | Accepted |
 | 0036 | [World D CI exit](0036-world-d-ci-exit.md) | Accepted |
+| 0037 | [Node verify gate](0037-node-verify-gate.md) | Accepted |
 
 ## Withdrawn (consolidated into an active ADR above)
 
