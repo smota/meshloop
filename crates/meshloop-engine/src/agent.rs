@@ -154,7 +154,7 @@ pub fn build_agent_spec_with_context(
 /// The bool is true only when every returned score was usable.
 /// An unusable response, an empty suffix, or a suffix longer than
 /// [`MAX_UNPINNED_NOUL`] keeps `selected` and reports false. Nothing is dropped.
-fn rerank_unpinned_suffix(
+pub fn rerank_unpinned_suffix(
     selected: &[(String, String)],
     description: &str,
     pin_prefixes: &[String],

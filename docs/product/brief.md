@@ -94,6 +94,7 @@ Meshloop adapts to four primary development environments:
   - Runs fully offline using local Ollama instances (e.g., `qwen2.5-coder`).
   - Fast Walsh-Hadamard Transform (FWHT) quantized indexing and AST skeleton pruning enable local models with smaller context windows to navigate large repositories.
   - Zero external telemetry or network data transmission.
+  - The optional decision API is off for this profile and for CI.
 
 ### Scenario D: Cloud Sandboxes, Web Platforms & CI/CD Pipelines
 - **Profile:** Autonomous agent platforms or continuous integration validation runners (GitHub Actions, Modal, E2B).
