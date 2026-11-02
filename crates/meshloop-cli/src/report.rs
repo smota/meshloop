@@ -272,6 +272,8 @@ mod tests {
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             }],
         };
         let rendered = format_plan(&graph);

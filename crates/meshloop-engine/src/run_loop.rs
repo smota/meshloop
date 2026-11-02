@@ -4245,6 +4245,8 @@ mod tests {
                 empty_diff_ok: false,
                 deliverable: None,
                 gate: AcceptanceGate::Human,
+                risk_q: None,
+                risk_prompt_hash: None,
             }],
         };
         let tick = run
@@ -4339,6 +4341,8 @@ mod tests {
             empty_diff_ok: false,
             deliverable: None,
             gate,
+            risk_q: None,
+            risk_prompt_hash: None,
         }
     }
 
