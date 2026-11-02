@@ -11,6 +11,9 @@ use std::{
 };
 
 fn main() -> ExitCode {
+    if let Some(code) = handoff_windows_exe() {
+        return code;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() else {
         eprintln!("Cannot resolve workspace root");
@@ -33,6 +36,39 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Windows cannot replace `xtask.exe` while this process is running. `check`
+/// runs `cargo test -p xtask`, which relinks that exe when a dependency
+/// changed. Continue from a copy so the original can be replaced.
+#[cfg(windows)]
+fn handoff_windows_exe() -> Option<ExitCode> {
+    let Ok(exe) = std::env::current_exe() else {
+        return None;
+    };
+    if exe.file_stem().and_then(|stem| stem.to_str()) != Some("xtask") {
+        return None;
+    }
+    let runner = exe.with_file_name("xtask-runner.exe");
+    if let Err(err) = fs::copy(&exe, &runner) {
+        eprintln!("Cannot copy xtask.exe aside: {err}");
+        return Some(ExitCode::FAILURE);
+    }
+    match Command::new(&runner)
+        .args(std::env::args().skip(1))
+        .status()
+    {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!("Cannot start xtask-runner.exe: {err}");
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn handoff_windows_exe() -> Option<ExitCode> {
+    None
 }
 
 fn cargo(root: &Path, args: &[&str]) -> bool {
