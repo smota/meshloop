@@ -1,6 +1,7 @@
-//! Read-only cleanup facts for inventory entries.
-//! Stats only those entries' joined paths. Does not scan a home directory,
-//! create a ledger, or remove anything.
+//! Cleanup facts for inventory entries, plus digest-bound apply.
+//! Observation stats only those entries' joined paths. It does not scan a home
+//! directory, create a ledger, or remove anything. Apply removes a registered
+//! worktree only after a fresh eligible verdict, and it holds the repository fence.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,18 +9,31 @@ use std::time::Duration;
 use meshloop_domain::workspace::{
     GitRef, InventoryEntry, LifecycleId, LocationScope, ObjectId, RelativePath,
 };
+use meshloop_engine::workspace::RepositoryIdentity;
 use meshloop_engine::workspace::cleanup::{CleanupObservation, ObservedCleanup};
 
 use super::{InventoryScope, RegistryView};
 
 /// Observe `inventory` entries. Paths outside the checkout are flagged and not walked.
 pub fn observe_cleanup(scope: InventoryScope<'_>, entries: &[InventoryEntry]) -> ObservedCleanup {
+    observe_cleanup_with(scope, entries, None)
+}
+
+fn observe_cleanup_with(
+    scope: InventoryScope<'_>,
+    entries: &[InventoryEntry],
+    held: Option<&RegistryView>,
+) -> ObservedCleanup {
     let common = common_dir(scope.checkout);
-    let registry = common.as_ref().and_then(|dir| {
-        super::read_registry(&dir.join("meshloop-workspace-registry.json")).unwrap_or_default()
-    });
+    let owned = if let Some(view) = held {
+        Some(view.clone())
+    } else {
+        common.as_ref().and_then(|dir| {
+            super::read_registry(&dir.join("meshloop-workspace-registry.json")).unwrap_or_default()
+        })
+    };
+    let registry = owned.as_ref();
     let repository_id = registry
-        .as_ref()
         .map(|view| view.repository.id.clone())
         .unwrap_or_else(unbound_repository);
     let retained_ref = read_retained_ref(scope.checkout);
@@ -32,7 +46,7 @@ pub fn observe_cleanup(scope: InventoryScope<'_>, entries: &[InventoryEntry]) ->
                 entry,
                 scope.checkout,
                 scope.configured_root,
-                registry.as_ref(),
+                registry,
                 checkout_canon.as_deref(),
                 retained_commit.as_ref(),
             )
@@ -348,4 +362,429 @@ fn git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
     command.args(args.iter().copied());
     command.env("GIT_OPTIONAL_LOCKS", "0");
     super::bounded_stdout(command, Duration::from_secs(10)).map_err(|_| ())
+}
+
+/// Deterministic crash injection for library callers only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupFault {
+    AfterIntent,
+    AfterRemove,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CleanupApply {
+    pub apply: bool,
+    pub digest: String,
+    pub candidates: Vec<meshloop_domain::cleanup::CleanupCandidatePreview>,
+    pub status: &'static str,
+    pub reasons: Vec<&'static str>,
+}
+
+type Before = (InventoryEntry, CleanupObservation);
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BeforeToken {
+    candidate: Before,
+    // Inventory may represent the same worktree both as ledger-owned and git-registered.
+    aliases: Vec<Before>,
+}
+struct Reconciled {
+    key: String,
+    token: String,
+    candidate: Before,
+    aliases: Vec<Before>,
+}
+
+fn cleanup_error(error: impl std::fmt::Display) -> meshloop_engine::ports::StoreError {
+    // Do not expose native locations or git stderr.
+    let _ = error;
+    meshloop_engine::ports::StoreError::Io("cleanup operation failed".into())
+}
+
+fn copy_scope<'a>(scope: &InventoryScope<'a>) -> InventoryScope<'a> {
+    InventoryScope {
+        checkout: scope.checkout,
+        ledger: scope.ledger,
+        configured_root: scope.configured_root,
+    }
+}
+
+fn preview(scope: &InventoryScope<'_>) -> (Vec<InventoryEntry>, ObservedCleanup) {
+    preview_with(scope, None)
+}
+
+fn preview_with(
+    scope: &InventoryScope<'_>,
+    held: Option<&RegistryView>,
+) -> (Vec<InventoryEntry>, ObservedCleanup) {
+    let inventory = meshloop_engine::workspace::inventory::classify(
+        &super::inventory::discover_inventory_with(copy_scope(scope), held),
+    );
+    let observed = observe_cleanup_with(copy_scope(scope), &inventory.entries, held);
+    (inventory.entries, observed)
+}
+
+fn verdict(
+    entries: &[InventoryEntry],
+    observed: &ObservedCleanup,
+) -> meshloop_domain::cleanup::CleanupPreview {
+    meshloop_engine::workspace::cleanup::cleanup_preview(
+        observed.repository_id.clone(),
+        observed.retained_ref.clone(),
+        observed.retained_commit.clone(),
+        entries,
+        &observed.observations,
+        None,
+    )
+}
+
+fn candidate_path(
+    scope: &InventoryScope<'_>,
+    entry: &InventoryEntry,
+    held: Option<&RegistryView>,
+) -> Option<PathBuf> {
+    let owned = if let Some(view) = held {
+        Some(view.clone())
+    } else {
+        let common = common_dir(scope.checkout)?;
+        super::read_registry(&common.join("meshloop-workspace-registry.json")).ok()?
+    };
+    let registry = owned.as_ref()?;
+    let location = entry.location.as_ref()?;
+    let root = location_root(
+        location,
+        scope.checkout,
+        scope.configured_root,
+        Some(registry),
+    )?;
+    Some(join_relative(&root, &location.relative_path))
+}
+
+fn registered(
+    scope: &InventoryScope<'_>,
+    path: &Path,
+) -> Result<bool, meshloop_engine::ports::StoreError> {
+    let mut command = crate::process::OwnedSpawnSpec::new("git");
+    command
+        .arg("-C")
+        .arg(scope.checkout)
+        .args(["worktree", "list", "--porcelain", "-z"]);
+    let bytes = super::bounded_stdout(command, Duration::from_secs(10))?;
+    Ok(bytes.split(|b| *b == 0).any(|record| {
+        record
+            .strip_prefix(b"worktree ")
+            .is_some_and(|listed| same_worktree(listed, path))
+    }))
+}
+
+/// Git for Windows prints worktree paths with `/`. Compare the filesystem
+/// identity when both paths exist, and the separator-normalized text otherwise.
+fn same_worktree(listed: &[u8], path: &Path) -> bool {
+    let Ok(text) = std::str::from_utf8(listed) else {
+        return false;
+    };
+    let text = text.trim_end_matches(['\r', '\n']);
+    if text.is_empty() {
+        return false;
+    }
+    let listed = PathBuf::from(text);
+    same_path(&listed, path)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if same_path_text(left, right) {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => same_path_text(&left, &right),
+        _ => false,
+    }
+}
+
+fn same_path_text(left: &Path, right: &Path) -> bool {
+    fn fold(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            let mut text = path.to_string_lossy().replace('/', "\\");
+            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                text = format!(r"\\{rest}");
+            } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+                text = rest.to_string();
+            }
+            text.make_ascii_lowercase();
+            text
+        }
+        #[cfg(not(windows))]
+        {
+            path.to_string_lossy().into_owned()
+        }
+    }
+    fold(left) == fold(right)
+}
+
+/// Git for Windows rejects `\\?\` paths in `worktree remove`. The registry
+/// stores canonical paths, which carry that prefix on Windows.
+fn git_worktree_arg(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    PathBuf::from(text.as_ref())
+}
+
+/// Apply only a digest-bound preview, journaling each non-forced git removal.
+pub fn apply_cleanup(
+    scope: InventoryScope<'_>,
+    digest: &str,
+    fault: Option<CleanupFault>,
+) -> Result<CleanupApply, meshloop_engine::ports::StoreError> {
+    use meshloop_domain::cleanup::CleanupEligibility;
+    use rusqlite::{Connection, params};
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(cleanup_error("invalid digest"));
+    }
+    let (mut entries, mut observed) = preview(&scope);
+    let fresh = verdict(&entries, &observed);
+    let mut report = CleanupApply {
+        apply: false,
+        digest: fresh.digest.clone(),
+        candidates: fresh.candidates,
+        status: "blocked",
+        reasons: vec![],
+    };
+    // Read existing recovery evidence without creating or migrating a ledger.
+    let mut journal: Vec<(String, String, String)> = Vec::new();
+    if scope.ledger.exists() {
+        let conn =
+            Connection::open_with_flags(scope.ledger, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(cleanup_error)?;
+        match super::schema::schema_version(&conn)? {
+            Some(8) => {
+                super::schema::validate8(&conn)?;
+                let mut stmt = conn.prepare("SELECT candidate_key,CASE WHEN MAX(step='blocked') THEN 'blocked' WHEN MAX(step='completed') THEN 'completed' ELSE 'intent' END,expected_before_token FROM cleanup_journal WHERE repo_id=?1 AND digest=?2 GROUP BY candidate_key,expected_before_token ORDER BY candidate_key").map_err(cleanup_error)?;
+                journal = stmt
+                    .query_map(params![observed.repository_id.as_str(), digest], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .map_err(cleanup_error)?
+                    .collect::<Result<_, _>>()
+                    .map_err(cleanup_error)?;
+            }
+            Some(7) => super::schema::validate7(&conn)?,
+            _ => return Err(cleanup_error("unsupported ledger")),
+        }
+    }
+    // Restore only proven removed candidates into the digest input. Every other
+    // current fact remains fresh, so unrelated drift still invalidates recovery.
+    let mut reconciled = Vec::new();
+    for (key, step, token) in &journal {
+        let saved: BeforeToken = serde_json::from_str(token).map_err(cleanup_error)?;
+        let before = &saved.candidate;
+        let Some(path) = candidate_path(&scope, &before.0, None) else {
+            report.status = "recovery-required";
+            return Ok(report);
+        };
+        let present = match std::fs::symlink_metadata(&path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(cleanup_error(error)),
+        };
+        let listed = registered(&scope, &path)?;
+        if step == "blocked" || present != listed || (step == "completed" && present) {
+            report.status = "recovery-required";
+            return Ok(report);
+        }
+        if !present {
+            for row in std::iter::once(before).chain(saved.aliases.iter()) {
+                if let Some(index) = entries.iter().position(|e| {
+                    e.lifecycle_id == row.0.lifecycle_id
+                        && e.source == row.0.source
+                        && e.location == row.0.location
+                }) {
+                    let mut current = entries[index].clone();
+                    // Absence changes only the inventory's missing classification.
+                    current.class = row.0.class;
+                    current
+                        .blockers
+                        .retain(|b| *b != meshloop_domain::workspace::BlockerCode::PathMissing);
+                    if current != row.0 {
+                        report.status = "recovery-required";
+                        return Ok(report);
+                    }
+                    entries[index] = row.0.clone();
+                    observed.observations[index] = row.1.clone();
+                } else {
+                    if row.0.lifecycle_id.is_some() {
+                        report.status = "recovery-required";
+                        return Ok(report);
+                    }
+                    entries.push(row.0.clone());
+                    observed.observations.push(row.1.clone());
+                }
+            }
+            reconciled.push(Reconciled {
+                key: key.clone(),
+                token: token.clone(),
+                candidate: before.clone(),
+                aliases: saved.aliases.clone(),
+            });
+        } else {
+            let current = entries.iter().position(|e| e == &before.0);
+            if !current.is_some_and(|i| observed.observations[i] == before.1) {
+                report.status = "recovery-required";
+                return Ok(report);
+            }
+        }
+    }
+    let bound = verdict(&entries, &observed);
+
+    if bound.digest != digest {
+        report.status = if journal.is_empty() {
+            "blocked"
+        } else {
+            "recovery-required"
+        };
+        report.reasons.push("stale-facts");
+        for c in &mut report.candidates {
+            c.status = CleanupEligibility::Blocked;
+            c.reasons
+                .push(meshloop_domain::cleanup::CleanupReason::StaleFacts);
+        }
+        return Ok(report);
+    }
+    let eligible: Vec<Before> = entries
+        .iter()
+        .zip(&observed.observations)
+        .filter(|(e, _)| {
+            bound.candidates.iter().any(|c| {
+                c.lifecycle_id == e.lifecycle_id
+                    && c.source == e.source
+                    && c.location == e.location
+                    && c.status == CleanupEligibility::Eligible
+            })
+        })
+        .map(|(e, o)| (e.clone(), o.clone()))
+        .collect();
+    if eligible.is_empty() {
+        return Ok(report);
+    }
+    let Some(common) = common_dir(scope.checkout) else {
+        report.status = "recovery-required";
+        return Ok(report);
+    };
+    if !common.join(super::REGISTRY).is_file() {
+        report.status = "recovery-required";
+        return Ok(report);
+    }
+    let fence = super::GitRepositoryIdentity::new("git").acquire(scope.checkout, scope.ledger)?;
+    let held = fence.registry_view();
+    let conn = Connection::open(scope.ledger).map_err(cleanup_error)?;
+    super::schema::migrate(&conn)?;
+    let write = |key: &str,
+                 step: &str,
+                 token: &str|
+     -> Result<(), meshloop_engine::ports::StoreError> {
+        conn.execute("INSERT INTO cleanup_journal(repo_id,digest,candidate_key,step,expected_before_token,expected_after_token) VALUES(?1,?2,?3,?4,?5,'absent-unregistered') ON CONFLICT(repo_id,digest,candidate_key,step) DO NOTHING", params![observed.repository_id.as_str(),digest,key,step,token]).map_err(cleanup_error)?;
+        Ok(())
+    };
+    for before in eligible {
+        let path = candidate_path(&scope, &before.0, Some(&held));
+        let aliases = entries
+            .iter()
+            .zip(&observed.observations)
+            .filter(|(entry, _)| {
+                **entry != before.0
+                    && match (candidate_path(&scope, entry, Some(&held)), path.as_deref()) {
+                        (Some(left), Some(right)) => same_path(&left, right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+            .map(|(entry, observation)| (entry.clone(), observation.clone()))
+            .collect();
+        let token = serde_json::to_string(&BeforeToken {
+            candidate: before.clone(),
+            aliases,
+        })
+        .map_err(cleanup_error)?;
+        let key = meshloop_domain::digest::sha256_hex(token.as_bytes());
+        // A removed worktree can no longer be canonicalized, so rebuilding the
+        // alias set on Windows changes the hash. Complete the stored row.
+        if let Some(saved) = reconciled.iter().find(|saved| saved.candidate == before) {
+            write(&saved.key, "completed", &saved.token)?;
+            continue;
+        }
+        if reconciled
+            .iter()
+            .any(|saved| saved.aliases.iter().any(|alias| alias == &before))
+        {
+            continue;
+        }
+        let (now_entries, now_observed) = preview_with(&scope, Some(&held));
+        let now = verdict(&now_entries, &now_observed);
+        let valid = now_entries
+            .iter()
+            .position(|e| e == &before.0)
+            .is_some_and(|i| now_observed.observations[i] == before.1)
+            && now.candidates.iter().any(|c| {
+                c.lifecycle_id == before.0.lifecycle_id
+                    && c.source == before.0.source
+                    && c.location == before.0.location
+                    && c.status == CleanupEligibility::Eligible
+            });
+        let Some(path) = candidate_path(&scope, &before.0, Some(&held)) else {
+            report.reasons.push("candidate-path");
+            report.status = "recovery-required";
+            return Ok(report);
+        };
+        let safe = path != scope.checkout
+            && !scope.ledger.starts_with(&path)
+            && common_dir(scope.checkout).is_some_and(|p| !p.starts_with(&path));
+        let listed = registered(&scope, &path)?;
+        if !valid || !safe || !listed {
+            if !valid {
+                report.reasons.push("revalidation");
+            }
+            if !safe {
+                report.reasons.push("unsafe-path");
+            }
+            if !listed {
+                report.reasons.push("unregistered");
+            }
+            write(&key, "blocked", &token)?;
+            report.status = "recovery-required";
+            return Ok(report);
+        }
+        write(&key, "intent", &token)?;
+        if fault == Some(CleanupFault::AfterIntent) {
+            report.status = "interrupted";
+            return Ok(report);
+        }
+        let mut command = crate::process::OwnedSpawnSpec::new("git");
+        command
+            .current_dir(scope.checkout)
+            .args(["worktree", "remove"])
+            .arg(git_worktree_arg(&path));
+        if let Err(error) = super::bounded_stdout(command, Duration::from_secs(10)) {
+            write(&key, "blocked", &token)?;
+            return Err(error);
+        }
+        if fault == Some(CleanupFault::AfterRemove) {
+            report.status = "interrupted";
+            return Ok(report);
+        }
+        write(&key, "completed", &token)?;
+    }
+    report.apply = true;
+    report.status = "completed";
+    Ok(report)
 }

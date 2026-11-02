@@ -493,6 +493,26 @@ pub(super) fn validate7(conn: &Connection) -> Result<(), StoreError> {
     }
     Ok(())
 }
+pub(super) const CLEANUP_SCHEMA: &str = "CREATE TABLE cleanup_journal (repo_id TEXT NOT NULL, digest TEXT NOT NULL, candidate_key TEXT NOT NULL, step TEXT NOT NULL CHECK(step IN ('intent','completed','blocked')), expected_before_token TEXT NOT NULL, expected_after_token TEXT NOT NULL, PRIMARY KEY(repo_id,digest,candidate_key,step));";
+pub(super) fn validate8(conn: &Connection) -> Result<(), StoreError> {
+    validate7(conn)?;
+    let canonical = Connection::open_in_memory().map_err(err)?;
+    canonical.execute_batch(CLEANUP_SCHEMA).map_err(err)?;
+    if owned_objects(conn, "cleanup_journal")? != owned_objects(&canonical, "cleanup_journal")? {
+        return Err(err("noncanonical v8 schema"));
+    }
+    Ok(())
+}
+fn migrate_v7_to_v8(conn: &Connection) -> Result<(), StoreError> {
+    validate7(conn)?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(err)?;
+    tx.execute_batch(CLEANUP_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=8", [])
+        .map_err(err)?;
+    validate8(&tx)?;
+    tx.commit().map_err(err)
+}
 fn migrate_v6_to_v7(conn: &Connection) -> Result<(), StoreError> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(err)?;
@@ -500,15 +520,19 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<(), StoreError> {
     tx.execute("UPDATE schema_meta SET version=7", [])
         .map_err(err)?;
     validate7(&tx)?;
-    tx.commit().map_err(err)
+    tx.commit().map_err(err)?;
+    migrate_v7_to_v8(conn)
 }
 pub(super) fn migrate_with_fault(
     conn: &Connection,
     fail_after_ddl: bool,
 ) -> Result<(), StoreError> {
     let version = schema_version(conn)?;
+    if version == Some(8) {
+        return validate8(conn);
+    }
     if version == Some(7) {
-        return validate7(conn);
+        return migrate_v7_to_v8(conn);
     }
     if version == Some(6) {
         validate6(conn)?;
@@ -538,5 +562,9 @@ CREATE TABLE workspace_run_bindings(graph_id TEXT PRIMARY KEY);")
     tx.execute("UPDATE schema_meta SET version=7", [])
         .map_err(err)?;
     validate7(&tx)?;
+    tx.execute_batch(CLEANUP_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=8", [])
+        .map_err(err)?;
+    validate8(&tx)?;
     tx.commit().map_err(err)
 }

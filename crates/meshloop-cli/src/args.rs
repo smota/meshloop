@@ -157,6 +157,7 @@ pub enum Command {
 pub enum WorkspaceReport {
     Inventory,
     Preview,
+    Apply,
 }
 
 pub fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -678,25 +679,17 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
             let report = match names.as_slice() {
                 ["inventory"] => WorkspaceReport::Inventory,
                 ["preview"] => WorkspaceReport::Preview,
-                ["apply"] => {
-                    return Err(
-                        "meshloop:workspace apply is not available; inventory and preview are read-only"
-                            .into(),
-                    );
-                }
+                ["apply"] => WorkspaceReport::Apply,
                 _ => {
                     return Err(
-                        "meshloop:workspace requires inventory or preview; apply is not available"
+                        "meshloop:workspace requires inventory, preview, or apply --cleanup --digest <hex>"
                             .into(),
                     );
                 }
             };
             let cleanup = has_flag(rest, "--cleanup");
-            if cleanup && !matches!(report, WorkspaceReport::Preview) {
-                return Err(
-                    "meshloop:workspace --cleanup is only valid with preview and deletes nothing"
-                        .into(),
-                );
+            if cleanup && matches!(report, WorkspaceReport::Inventory) {
+                return Err("meshloop:workspace --cleanup requires preview or apply".into());
             }
             if has_flag(rest, "--digest") && !cleanup {
                 return Err("meshloop:workspace --digest requires --cleanup".into());
@@ -704,6 +697,19 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
             let digest = flag_value(rest, "--digest");
             if has_flag(rest, "--digest") && digest.is_none() {
                 return Err("meshloop:workspace --digest requires a value".into());
+            }
+            if report == WorkspaceReport::Apply
+                && (!cleanup
+                    || !digest.as_deref().is_some_and(|d| {
+                        d.len() == 64
+                            && d.bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    }))
+            {
+                return Err(
+                    "meshloop:workspace apply requires --cleanup --digest <64 lowercase hex>"
+                        .into(),
+                );
             }
             Ok(Command::Workspace {
                 report,
@@ -745,7 +751,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
-     \x20 meshloop workspace inventory|preview [--cleanup] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace inventory|preview|apply [--cleanup] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\

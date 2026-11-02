@@ -41,6 +41,13 @@ struct LedgerView {
 }
 
 pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
+    discover_inventory_with(scope, None)
+}
+
+pub(crate) fn discover_inventory_with(
+    scope: InventoryScope<'_>,
+    held: Option<&RegistryView>,
+) -> InventoryFacts {
     let mut blockers = Vec::new();
     let mut observations = Vec::new();
     if probe(scope.checkout) != Presence::Present {
@@ -59,22 +66,29 @@ pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
             return finish(blockers, observations);
         }
     };
-    let registry = match read_registry(&common.join("meshloop-workspace-registry.json")) {
-        Ok(None) => {
-            push(&mut blockers, BlockerCode::FenceMissing);
-            None
-        }
-        Ok(Some(view)) => Some(view),
-        Err(_) => {
-            push(&mut blockers, BlockerCode::FenceInaccessible);
-            None
+    // `held` is the manifest already loaded by the fence. Do not open the
+    // registry file again: Windows denies that read while the lock is held.
+    let owned = if let Some(view) = held {
+        Some(view.clone())
+    } else {
+        match read_registry(&common.join("meshloop-workspace-registry.json")) {
+            Ok(None) => {
+                push(&mut blockers, BlockerCode::FenceMissing);
+                None
+            }
+            Ok(Some(view)) => Some(view),
+            Err(_) => {
+                push(&mut blockers, BlockerCode::FenceInaccessible);
+                None
+            }
         }
     };
-    let mut conflict = registry_conflicts(&common, registry.as_ref());
+    let registry = owned.as_ref();
+    let mut conflict = registry_conflicts(&common, registry);
     let ledger = open_ledger(scope.ledger, &mut blockers);
     let identity_confirmed = confirm_identity(
         scope.ledger,
-        registry.as_ref(),
+        registry,
         ledger.as_ref(),
         &mut conflict,
         &mut blockers,
@@ -85,7 +99,7 @@ pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
     if let Some(view) = ledger.as_ref() {
         push_ledger_observations(
             view,
-            registry.as_ref(),
+            registry,
             identity_confirmed && !conflict,
             scope.checkout,
             scope.configured_root,
@@ -95,7 +109,7 @@ pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
     push_git_worktrees(
         scope.checkout,
         scope.configured_root,
-        registry.as_ref(),
+        registry,
         identity_confirmed && !conflict,
         &mut observations,
         &mut blockers,
@@ -103,7 +117,7 @@ pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
     push_configured_children(
         scope.checkout,
         scope.configured_root,
-        registry.as_ref(),
+        registry,
         identity_confirmed && !conflict,
         &mut observations,
         &mut blockers,

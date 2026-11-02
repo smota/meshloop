@@ -211,7 +211,7 @@ fn migration_v4_preserves_legacy_unbound() {
     assert_eq!(original_id, native_identity(&path).unwrap());
     assert_eq!(
         rows(&store.conn, "schema_meta")[0][0],
-        rusqlite::types::Value::Integer(7)
+        rusqlite::types::Value::Integer(8)
     );
     assert_eq!(rows(&store.conn, "workspace_legacy_unbound").len(), 4);
     assert!(rows(&store.conn, "workspace_repositories").is_empty());
@@ -287,7 +287,7 @@ fn migration_v1_v3_explicit_compatibility() {
             schema::migrate(&conn).unwrap();
             assert_eq!(
                 rows(&conn, "schema_meta")[0][0],
-                rusqlite::types::Value::Integer(7)
+                rusqlite::types::Value::Integer(8)
             );
         }
         for (table, columns, before_rows) in before {
@@ -1122,26 +1122,30 @@ fn lifecycle_fence_v6_rollback_and_future_schema_refusal() {
     assert_eq!(before_schema, schema_snapshot(&c));
     assert_eq!(lifecycle, lifecycle_snapshot(&c));
     assert_eq!(schema::schema_version(&c).unwrap(), Some(5));
-    let future = f.base.join("future8.sqlite");
-    let c = Connection::open(&future).unwrap();
-    c.execute_batch("CREATE TABLE schema_meta(version INTEGER);INSERT INTO schema_meta VALUES(8);CREATE TABLE sentinel(value TEXT);INSERT INTO sentinel VALUES('unchanged');").unwrap();
-    let before_schema = schema_snapshot(&c);
-    let before_rows = rows(&c, "sentinel");
-    let mode: String = c
-        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-        .unwrap();
-    let identity = native_identity(&future).unwrap();
-    drop(c);
-    assert!(SqliteStore::open(&future).is_err());
-    let c = Connection::open(&future).unwrap();
-    assert_eq!(before_schema, schema_snapshot(&c));
-    assert_eq!(before_rows, rows(&c, "sentinel"));
-    assert_eq!(identity, native_identity(&future).unwrap());
-    assert_eq!(
-        mode,
-        c.query_row::<String, _, _>("PRAGMA journal_mode", [], |r| r.get(0))
-            .unwrap()
-    );
+    for version in [8, 9] {
+        let future = f.base.join(format!("future{version}.sqlite"));
+        let c = Connection::open(&future).unwrap();
+        c.execute_batch(&format!("CREATE TABLE schema_meta(version INTEGER);INSERT INTO schema_meta VALUES({version});CREATE TABLE sentinel(value TEXT);INSERT INTO sentinel VALUES('unchanged');")).unwrap();
+        let before_schema = schema_snapshot(&c);
+        let before_rows = rows(&c, "sentinel");
+        let mode: String = c
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let identity = native_identity(&future).unwrap();
+        drop(c);
+        let bytes = std::fs::read(&future).unwrap();
+        assert!(SqliteStore::open(&future).is_err());
+        assert_eq!(bytes, std::fs::read(&future).unwrap());
+        let c = Connection::open(&future).unwrap();
+        assert_eq!(before_schema, schema_snapshot(&c));
+        assert_eq!(before_rows, rows(&c, "sentinel"));
+        assert_eq!(identity, native_identity(&future).unwrap());
+        assert_eq!(
+            mode,
+            c.query_row::<String, _, _>("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap()
+        );
+    }
 }
 #[test]
 fn driver_liveness_migrates_from_schema6_without_dropping_history() {
@@ -1156,16 +1160,16 @@ fn driver_liveness_migrates_from_schema6_without_dropping_history() {
             [],
         )
         .unwrap();
-    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(7));
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE run_driver_liveness; UPDATE schema_meta SET version=6;")
+    conn.execute_batch("DROP TABLE cleanup_journal; DROP TABLE run_driver_liveness; UPDATE schema_meta SET version=6;")
         .unwrap();
     let before = history(&conn);
     assert_eq!(schema::schema_version(&conn).unwrap(), Some(6));
     drop(conn);
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(7));
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
     assert_eq!(before, history(&store.conn));
     assert!(rows(&store.conn, "run_driver_liveness").is_empty());
 }
@@ -2441,4 +2445,195 @@ fn bound_existing_attempt_cannot_be_reassigned_to_unmarked_graph() {
         Err(StoreError::LegacyOwnershipUnresolved)
     );
     assert_eq!(before, history(&store.conn));
+}
+
+#[test]
+fn cleanup_recovery_crash_points_and_disagreement() {
+    for fault in [CleanupFault::AfterIntent, CleanupFault::AfterRemove] {
+        for disagree in [false, true] {
+            let f = Fixture::new();
+            let (mut store, lease) = bound(&f);
+            let g = generation(&lease, 1);
+            store.insert_generation(&lease, &g).unwrap();
+            drop(store);
+            drop(lease);
+            let path = f.repo.join(g.relative_path.as_str());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            git(
+                &f.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            let protected = f.repo.join("protected.txt");
+            std::fs::write(&protected, "protected").unwrap();
+            let scope = || InventoryScope {
+                checkout: &f.repo,
+                ledger: &f.ledger,
+                configured_root: &f.repo,
+            };
+            let inventory =
+                meshloop_engine::workspace::inventory::classify(&discover_inventory(scope()));
+            let obs = observe_cleanup(scope(), &inventory.entries);
+            let digest = meshloop_engine::workspace::cleanup::cleanup_preview(
+                obs.repository_id,
+                obs.retained_ref,
+                obs.retained_commit,
+                &inventory.entries,
+                &obs.observations,
+                None,
+            )
+            .digest;
+            let interrupted = apply_cleanup(scope(), &digest, Some(fault)).unwrap();
+            assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
+            assert!(!interrupted.apply);
+            assert_eq!(path.exists(), fault == CleanupFault::AfterIntent);
+            if disagree {
+                if fault == CleanupFault::AfterRemove {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(path.join("protected.txt"), "keep").unwrap();
+                } else {
+                    // A present but unregistered path must never be retried.
+                    let output = Command::new("git")
+                        .arg("-C")
+                        .arg(&path)
+                        .args(["rev-parse", "--absolute-git-dir"])
+                        .guarded_output()
+                        .unwrap();
+                    assert!(output.status.success());
+                    let admin = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+                    std::fs::rename(&admin, f.base.join("saved-admin")).unwrap();
+                }
+            }
+            let result = apply_cleanup(scope(), &digest, None).unwrap();
+            if disagree {
+                assert_eq!(result.status, "recovery-required");
+                assert!(!result.apply);
+                assert!(path.exists());
+            } else {
+                assert!(result.apply, "{result:?}");
+                assert!(!path.exists());
+                let conn = Connection::open(&f.ledger).unwrap();
+                let step: String = conn
+                    .query_row(
+                        "SELECT step FROM cleanup_journal WHERE step='completed'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(step, "completed");
+            }
+            assert_eq!(std::fs::read(&protected).unwrap(), b"protected");
+            assert!(f.repo.join(".git").is_dir());
+            assert!(f.ledger.is_file());
+            assert!(f.repo.join(".git").join(REGISTRY).is_file());
+        }
+    }
+}
+
+#[test]
+fn cleanup_recovery_schema7_upgrade_and_readonly8_validation() {
+    let f = Fixture::new();
+    let (store, lease) = bound(&f);
+    let before = history(&store.conn);
+    drop(store);
+    drop(lease);
+    let conn = Connection::open(&f.ledger).unwrap();
+    conn.execute_batch("DROP TABLE cleanup_journal; UPDATE schema_meta SET version=7;")
+        .unwrap();
+    drop(conn);
+    let bytes = std::fs::read(&f.ledger).unwrap();
+    let readonly = SqliteStore::open_read_only(&f.ledger).unwrap().unwrap();
+    assert_eq!(schema::schema_version(&readonly.conn).unwrap(), Some(7));
+    drop(readonly);
+    assert_eq!(bytes, std::fs::read(&f.ledger).unwrap());
+    let store = SqliteStore::open(&f.ledger).unwrap();
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
+    assert_eq!(history(&store.conn), before);
+    assert!(rows(&store.conn, "cleanup_journal").is_empty());
+    drop(store);
+    let bytes = std::fs::read(&f.ledger).unwrap();
+    let readonly = SqliteStore::open_read_only(&f.ledger).unwrap().unwrap();
+    schema::migrate(&readonly.conn).unwrap(); // v8 performs validation only.
+    drop(readonly);
+    assert_eq!(bytes, std::fs::read(&f.ledger).unwrap());
+}
+
+#[test]
+fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
+    for locked in [false, true] {
+        let f = Fixture::new();
+        let (mut store, lease) = bound(&f);
+        let mut paths = Vec::new();
+        for n in [1, 2] {
+            let g = generation(&lease, n);
+            store.insert_generation(&lease, &g).unwrap();
+            let path = f.repo.join(g.relative_path.as_str());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            git(
+                &f.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            paths.push(path);
+        }
+        drop(store);
+        drop(lease);
+        if locked {
+            git(&f.repo, &["worktree", "lock", paths[0].to_str().unwrap()]);
+        }
+        let scope = || InventoryScope {
+            checkout: &f.repo,
+            ledger: &f.ledger,
+            configured_root: &f.repo,
+        };
+        let inventory =
+            meshloop_engine::workspace::inventory::classify(&discover_inventory(scope()));
+        let obs = observe_cleanup(scope(), &inventory.entries);
+        let digest = meshloop_engine::workspace::cleanup::cleanup_preview(
+            obs.repository_id,
+            obs.retained_ref,
+            obs.retained_commit,
+            &inventory.entries,
+            &obs.observations,
+            None,
+        )
+        .digest;
+        if locked {
+            assert!(apply_cleanup(scope(), &digest, None).is_err());
+            let conn = Connection::open(&f.ledger).unwrap();
+            let steps: Vec<String> = conn
+                .prepare("SELECT step FROM cleanup_journal ORDER BY step")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(steps, ["blocked", "intent"]);
+        } else {
+            let interrupted =
+                apply_cleanup(scope(), &digest, Some(CleanupFault::AfterIntent)).unwrap();
+            assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
+            std::fs::write(paths[0].join("protected.txt"), "dirty").unwrap();
+            let result = apply_cleanup(scope(), &digest, None).unwrap();
+            assert!(!result.apply);
+            assert_eq!(result.status, "recovery-required");
+            assert_eq!(
+                std::fs::read(paths[0].join("protected.txt")).unwrap(),
+                b"dirty"
+            );
+        }
+        assert!(paths.iter().all(|p| p.is_dir()));
+        assert!(f.repo.join(".git").is_dir());
+        assert!(f.ledger.is_file());
+    }
 }

@@ -1,5 +1,6 @@
-//! `workspace inventory` and `workspace preview`. Both print JSON and do not write.
-//! `preview --cleanup` adds a read-only cleanup verdict. It never removes artifacts.
+//! `workspace inventory` and `workspace preview` print JSON and do not write.
+//! `preview --cleanup` is a read-only verdict and does not remove artifacts.
+//! `apply --cleanup --digest` removes only eligible registered worktrees.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +26,7 @@ pub fn cmd_workspace(
     let command = match report {
         WorkspaceReport::Inventory => "meshloop:workspace-inventory",
         WorkspaceReport::Preview => "meshloop:workspace-preview",
+        WorkspaceReport::Apply => "meshloop:workspace-apply",
     };
     if let Some(path) = &config
         && let Err(error) = crate::config::load(path)
@@ -55,6 +57,23 @@ pub fn cmd_workspace(
         WorkspaceReport::Inventory => {
             debug_assert!(!inventory.apply);
             serde_json::to_value(&inventory).unwrap_or(serde_json::Value::Null)
+        }
+        WorkspaceReport::Apply => {
+            match meshloop_adapters::workspace::apply_cleanup(
+                InventoryScope {
+                    checkout: &checkout,
+                    ledger: &ledger,
+                    configured_root: &configured_root,
+                },
+                digest.as_deref().unwrap_or(""),
+                None,
+            ) {
+                Ok(result) => serde_json::json!({"cleanup": result}),
+                Err(error) => {
+                    println!("{}", json_out::err(command, origin, format!("{error:?}")));
+                    return ExitCode::from(2);
+                }
+            }
         }
         WorkspaceReport::Preview => {
             let preview = adoption_preview(&inventory);
