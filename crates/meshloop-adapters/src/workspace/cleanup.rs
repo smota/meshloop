@@ -779,9 +779,12 @@ pub fn apply_cleanup(
             .current_dir(scope.checkout)
             .args(["worktree", "remove"])
             .arg(git_worktree_arg(&path));
-        if let Err(error) = super::bounded_stdout(command, Duration::from_secs(10)) {
+        if super::bounded_stdout(command, Duration::from_secs(10)).is_err() {
             write(&key, "blocked", &token)?;
-            return Err(error);
+            report.apply = false;
+            report.status = "git-remove-failed";
+            report.reasons.push("git-remove");
+            return Ok(report);
         }
         if fault == Some(CleanupFault::AfterRemove) {
             report.status = "interrupted";

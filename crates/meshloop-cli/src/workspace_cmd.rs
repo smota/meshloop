@@ -14,6 +14,7 @@ use meshloop_adapters::workspace::{
 use meshloop_domain::cleanup::CleanupEligibility;
 use meshloop_domain::workspace::InventoryEntry;
 use meshloop_engine::origin::Origin;
+use meshloop_engine::ports::StoreError;
 use meshloop_engine::workspace::cleanup::cleanup_preview;
 use meshloop_engine::workspace::inventory::{adoption_preview, classify};
 use meshloop_engine::workspace::maintenance::{
@@ -57,7 +58,10 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
         match crate::config::load(path) {
             Ok(config) => Some(config),
             Err(error) => {
-                println!("{}", json_out::err(command, origin, format!("{error:?}")));
+                println!(
+                    "{}",
+                    json_out::err(command, origin, public_config_error(&error))
+                );
                 return ExitCode::from(2);
             }
         }
@@ -66,11 +70,8 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
     };
     let checkout = match std::env::current_dir() {
         Ok(path) => path,
-        Err(error) => {
-            println!(
-                "{}",
-                json_out::err(command, origin, format!("current directory: {error}"))
-            );
+        Err(_error) => {
+            println!("{}", json_out::err(command, origin, "current-directory"));
             return ExitCode::from(2);
         }
     };
@@ -105,9 +106,26 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
                 None,
                 None,
             ) {
-                Ok(result) => serde_json::json!({"cleanup": result}),
+                Ok(result) => {
+                    if result.status == "git-remove-failed" {
+                        println!(
+                            "{}",
+                            json_out::report(
+                                command,
+                                origin,
+                                Some("git-remove-failed".into()),
+                                serde_json::json!({"cleanup": result}),
+                            )
+                        );
+                        return ExitCode::from(2);
+                    }
+                    serde_json::json!({"cleanup": result})
+                }
                 Err(error) => {
-                    println!("{}", json_out::err(command, origin, format!("{error:?}")));
+                    println!(
+                        "{}",
+                        json_out::err(command, origin, public_store_error(&error))
+                    );
                     return ExitCode::from(2);
                 }
             }
@@ -155,7 +173,10 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
             ) {
                 Ok(result) => serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
                 Err(error) => {
-                    println!("{}", json_out::err(command, origin, format!("{error:?}")));
+                    println!(
+                        "{}",
+                        json_out::err(command, origin, public_store_error(&error))
+                    );
                     return ExitCode::from(2);
                 }
             }
@@ -250,21 +271,55 @@ fn maintain_report(
         };
         match meshloop_adapters::workspace::apply_cleanup(scope, &cleanup.digest, None, Some(id)) {
             Ok(result) => {
+                let failed = result.status == "git-remove-failed";
                 if let Some(object) = data.as_object_mut() {
                     object.insert(
                         "cleanup".to_string(),
                         serde_json::to_value(&result).unwrap_or(serde_json::Value::Null),
                     );
                 }
+                if failed {
+                    println!(
+                        "{}",
+                        json_out::report(
+                            command,
+                            origin.clone(),
+                            Some("git-remove-failed".into()),
+                            data,
+                        )
+                    );
+                    return Err(ExitCode::from(2));
+                }
             }
             Err(error) => {
                 println!(
                     "{}",
-                    json_out::err(command, origin.clone(), format!("{error:?}"))
+                    json_out::err(command, origin.clone(), public_store_error(&error))
                 );
                 return Err(ExitCode::from(2));
             }
         }
     }
     Ok(data)
+}
+
+fn public_store_error(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::ReadOnly => "read-only",
+        StoreError::SchemaUpgradeRequired => "schema-upgrade-required",
+        StoreError::LegacyOwnershipUnresolved => "legacy-ownership-unresolved",
+        StoreError::PlanRevisionMismatch => "plan-revision-mismatch",
+        StoreError::LifecycleBusy => "lifecycle-busy",
+        StoreError::Io(_) => "io",
+        StoreError::Corrupt(_) => "corrupt",
+    }
+}
+
+fn public_config_error(error: &crate::config::ConfigError) -> &'static str {
+    match error {
+        crate::config::ConfigError::Io(_) => "config-io",
+        crate::config::ConfigError::Parse(_) => "config-parse",
+        crate::config::ConfigError::SelectedButNotConfigured(_) => "config-harness",
+        crate::config::ConfigError::NotFound => "config-not-found",
+    }
 }

@@ -2609,7 +2609,10 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
         )
         .digest;
         if locked {
-            assert!(apply_cleanup(scope(), &digest, None, None).is_err());
+            let result = apply_cleanup(scope(), &digest, None, None).unwrap();
+            assert!(!result.apply, "{result:?}");
+            assert_eq!(result.status, "git-remove-failed");
+            assert_eq!(result.reasons, ["git-remove"]);
             let conn = Connection::open(&f.ledger).unwrap();
             let steps: Vec<String> = conn
                 .prepare("SELECT step FROM cleanup_journal ORDER BY step")

@@ -523,6 +523,132 @@ fn cleanup_apply_removes_only_eligible_and_preserves_preview() {
     cleanup_scenario(true);
 }
 
+#[test]
+fn workspace_config_error_is_a_stable_code() {
+    let fixture = Fixture::new("config-code");
+    let missing = fixture.base.join("missing.toml");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_meshloop"));
+    command
+        .current_dir(&fixture.repo)
+        .args(["workspace", "inventory", "--json", "--config"])
+        .arg(&missing)
+        .arg("--db")
+        .arg(&fixture.db);
+    let out = bounded_output(&mut command);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(2), "{stdout}");
+    assert!(!stdout.contains(&missing.display().to_string()), "{stdout}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error"], "config-io");
+    assert!(report["data"].is_null());
+}
+
+#[test]
+fn cleanup_apply_prints_git_remove_failure() {
+    let fixture = Fixture::new("git-remove");
+    let root = fixture.repo.join("workspace-root");
+    fs::create_dir(&root).unwrap();
+    {
+        let mut store = SqliteStore::open(&fixture.db).unwrap();
+        let mut lease = GitRepositoryIdentity::new("git")
+            .acquire(&fixture.repo, &fixture.db)
+            .unwrap();
+        store.bind_repository(&lease).unwrap();
+        let alias = RootAlias::new("worktrees").unwrap();
+        lease.register_root(alias.clone(), &root).unwrap();
+        store.register_root(&lease, &alias).unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "graph-alpha".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "base".into(),
+                integrate_ref: "integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: hash_text(),
+                created_at: "1".into(),
+                review_note: None,
+            })
+            .unwrap();
+        store
+            .insert_generation(
+                &lease,
+                &GenerationRecord {
+                    id: LifecycleId::new("generation-clean").unwrap(),
+                    repository_id: lease.repository().id.clone(),
+                    graph_id: GraphId::new("graph-alpha").unwrap(),
+                    ordinal: 1,
+                    accepted_plan_hash: PlanHash::new(hash_text()).unwrap(),
+                    root_alias: alias,
+                    relative_path: RelativePath::new("clean-wt").unwrap(),
+                    layout_version: 1,
+                },
+            )
+            .unwrap();
+    }
+    let worktree = root.join("clean-wt");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "clean-wt",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    git(
+        &fixture.repo,
+        &["worktree", "lock", worktree.to_str().unwrap()],
+    );
+    let (code, preview, _) = run(&fixture, &["workspace", "preview", "--cleanup"]);
+    assert_eq!(code, 0, "{preview}");
+    let digest = preview["data"]["cleanup"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        candidate(&preview, "generation-clean")["status"],
+        "eligible"
+    );
+    let mut command = fixture.command(&[
+        "workspace",
+        "apply",
+        "--cleanup",
+        "--digest",
+        digest.as_str(),
+    ]);
+    let out = bounded_output(&mut command);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(2), "{stdout}");
+    assert!(
+        !stdout.contains(&fixture.base.display().to_string()),
+        "{stdout}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["error"], "git-remove-failed");
+    assert_eq!(report["data"]["cleanup"]["status"], "git-remove-failed");
+    assert_eq!(report["data"]["cleanup"]["apply"], false);
+    assert_eq!(
+        report["data"]["cleanup"]["reasons"],
+        serde_json::json!(["git-remove"])
+    );
+    assert!(worktree.is_dir());
+    let conn = rusqlite::Connection::open(&fixture.db).unwrap();
+    let mut steps: Vec<String> = conn
+        .prepare("SELECT step FROM cleanup_journal ORDER BY step")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    steps.sort();
+    assert_eq!(steps, ["blocked", "intent"]);
+}
+
 fn cleanup_scenario(apply: bool) {
     let fixture = Fixture::new("cleanup");
     let root = fixture.repo.join("workspace-root");

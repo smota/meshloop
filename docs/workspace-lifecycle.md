@@ -67,7 +67,18 @@ Retain reasons: `identity-unverified`, `unverified-location`, `path-missing`, `u
 
 Missing paths are reported and not recreated. Unknown files are reported and not deleted.
 
-Cleanup removal is `git worktree remove` without `--force`. It does not run `git clean`, `git gc`, `git prune`, or `git reset`, and it does not delete the directory tree when Git removal fails. A matching apply can journal a blocked candidate before that Git command. If Git then fails, the process exits with an error and the partial report may not be printed.
+Cleanup removal is `git worktree remove` without `--force`. It does not run `git clean`, `git gc`, `git prune`, or `git reset`, and it does not delete the directory tree when Git removal fails. A matching apply journals the intent, then the Git command. If Git fails, apply journals a `blocked` row for that candidate, stops before any later candidate, and returns status `git-remove-failed` with reason `git-remove`. The command prints that report and exits 2. The public error code is `git-remove-failed`.
+
+## Stable limits
+
+These limits stay as they are.
+
+- Once apply acquires the repository fence, it holds that fence until the call returns.
+- A digest mismatch returns before the fence is acquired and before a journal row is inserted. An empty journal reports `blocked` with `stale-facts`. A journal that already exists reports `recovery-required`.
+- Eligibility is per candidate. A generation can be eligible while a separate driver row is blocked because its process is active.
+- The journal column `expected_after_token` is the constant `absent-unregistered`.
+- `migrate_v6_to_v7` commits the version 7 schema, then `migrate_v7_to_v8` opens a second transaction. Each cleanup journal insert is its own autocommit statement.
+- Workspace command failures use stable codes (`config-io`, `config-parse`, `config-harness`, `config-not-found`, `current-directory`, `io`, `corrupt`, `read-only`, `schema-upgrade-required`, `legacy-ownership-unresolved`, `plan-revision-mismatch`, `lifecycle-busy`). The codes omit local paths.
 
 After a deletion, recovery completes the stored journal row. It does not recompute the candidate hash. There is no automatic repair that rebuilds a removed worktree or a missing ledger.
 
