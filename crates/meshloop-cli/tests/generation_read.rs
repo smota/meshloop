@@ -778,6 +778,7 @@ fn with_reader<T>(
         active_graph: None,
         planner: Default::default(),
         pending_outcomes: std::collections::HashMap::new(),
+        micro_repair: None,
     };
     observe(&saga)
 }

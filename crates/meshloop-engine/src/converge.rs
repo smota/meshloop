@@ -1,14 +1,22 @@
 //! Attempt-scoped self-healing convergence.
 //!
-//! Pure decision procedure over [`DiagnosticLattice`] snapshots. The saga stays
-//! in `Running`; this module never emits a new `TaskState`. Rollback is a
+//! Repair decisions over [`DiagnosticLattice`] snapshots. The saga stays in
+//! `Running`; this module never emits a new `TaskState`. Rollback is a
 //! *decision* — the caller applies `WorkspacePort::reset_hard`.
 //!
 //! Progress φ is the lattice's lexicographic vector (syntax, type, test, error,
 //! blocking count). Continue is legal only when φ strictly decreases. A repeated
 //! fingerprint is oscillation. A new syntax error is always a rollback.
+//!
+//! Micro-repair reads two [`DecisionPort`] scores and records one observation.
+//! It does not spawn a process or open a socket.
 
-use meshloop_domain::diagnostic::{DiagnosticLattice, LatticeOrder, compare, syntax_regressed};
+use meshloop_domain::decision::{Confidence, DecisionOutcome};
+use meshloop_domain::diagnostic::{
+    DiagnosticLattice, DiagnosticSeverity, LatticeOrder, compare, syntax_regressed,
+};
+
+use crate::ports::{DecisionPort, ScoreQuery};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepairBudget {
@@ -243,6 +251,161 @@ pub fn negative_constraint(baseline: &DiagnosticLattice, next: &DiagnosticLattic
     }
 }
 
+/// Blocking codes a micro-repair may close before the heavy harness.
+pub const ATOM_ALLOWLIST: &[&str] = &["E0425", "unused_imports"];
+
+const MECHANICAL_MIN: f64 = 0.70;
+const SEMANTIC_MAX: f64 = 0.20;
+
+fn unit_interval(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+/// Eligible only for a blocking, syntax-free lattice whose codes are all allowlisted
+/// and whose scores sit in the mechanical/semantic window.
+pub fn micro_repair_eligible(lattice: &DiagnosticLattice, mechanical: f64, semantic: f64) -> bool {
+    if lattice.count(DiagnosticSeverity::Syntax) != 0 || lattice.blocking() == 0 {
+        return false;
+    }
+    let codes_allowed = lattice
+        .atoms()
+        .filter(|atom| atom.severity < DiagnosticSeverity::Warning)
+        .all(|atom| ATOM_ALLOWLIST.contains(&atom.code.as_str()));
+    codes_allowed
+        && unit_interval(mechanical)
+        && mechanical >= MECHANICAL_MIN
+        && unit_interval(semantic)
+        && semantic <= SEMANTIC_MAX
+}
+
+fn unit_score(port: &dyn DecisionPort, subject: &str) -> Option<f64> {
+    let outcome = port
+        .evaluate_score(&ScoreQuery {
+            subject: subject.to_owned(),
+        })
+        .ok()?;
+    match outcome {
+        DecisionOutcome::Score(score) => Confidence::try_new(score.get()).ok().map(Confidence::get),
+        DecisionOutcome::Boolean(_)
+        | DecisionOutcome::Selected(_)
+        | DecisionOutcome::Abstain(_) => None,
+    }
+}
+
+/// Two scores, or `None` when either call is not a unit-interval score.
+fn repair_probabilities(port: &dyn DecisionPort, description: &str) -> Option<(f64, f64)> {
+    let mechanical = unit_score(port, &format!("mechanical\n{description}"));
+    let semantic = unit_score(port, &format!("semantic\n{description}"));
+    match (mechanical, semantic) {
+        (Some(mechanical), Some(semantic)) => Some((mechanical, semantic)),
+        _ => None,
+    }
+}
+
+/// One closed edit. `true` means the edit was applied. No path and no process.
+pub trait MicroRepairActuator {
+    fn apply(&mut self, lattice: &DiagnosticLattice) -> bool;
+}
+
+/// One observation of `after`. Phi is the caller's [`compare`], not this function.
+pub fn micro_observation(
+    session: &mut RepairSession,
+    before: &DiagnosticLattice,
+    after: &DiagnosticLattice,
+    snapshot_rev: &str,
+    diag: &str,
+) -> RepairAction {
+    let _ = before;
+    session.observe(after.clone(), snapshot_rev, diag)
+}
+
+/// What the repair loop should do after a micro-repair attempt.
+#[derive(Debug, PartialEq)]
+pub(crate) enum MicroRepairReport {
+    /// Phi improved. Do not call `dispatch_repair_round` this iteration.
+    Improved {
+        action: RepairAction,
+        lattice: DiagnosticLattice,
+        diag: String,
+        revision: String,
+    },
+    /// Heavy dispatch. Any applied edit was reset to `prior_revision`.
+    Heavy,
+    /// `reset_hard` failed after an edit. Do not dispatch.
+    Abort,
+}
+
+pub(crate) enum MicroRepairHost {
+    Rerun,
+    Reset { revision: String },
+}
+
+pub(crate) enum MicroRepairHostReply {
+    Reran {
+        lattice: DiagnosticLattice,
+        revision: String,
+        diag: String,
+    },
+    Unavailable,
+    ResetDone,
+    ResetFailed,
+}
+
+fn reset_micro_edit(
+    host: &mut impl FnMut(MicroRepairHost) -> MicroRepairHostReply,
+    prior_revision: &str,
+) -> MicroRepairReport {
+    match host(MicroRepairHost::Reset {
+        revision: prior_revision.to_string(),
+    }) {
+        MicroRepairHostReply::ResetFailed => MicroRepairReport::Abort,
+        MicroRepairHostReply::ResetDone
+        | MicroRepairHostReply::Unavailable
+        | MicroRepairHostReply::Reran { .. } => MicroRepairReport::Heavy,
+    }
+}
+
+/// Try one closed edit. `Heavy` and `Abort` are the only results that do not keep it.
+pub(crate) fn consider_micro_repair(
+    session: &mut RepairSession,
+    before: &DiagnosticLattice,
+    prior_revision: &str,
+    description: &str,
+    port: &dyn DecisionPort,
+    actuator: &mut dyn MicroRepairActuator,
+    mut host: impl FnMut(MicroRepairHost) -> MicroRepairHostReply,
+) -> MicroRepairReport {
+    let Some((mechanical, semantic)) = repair_probabilities(port, description) else {
+        return MicroRepairReport::Heavy;
+    };
+    if !micro_repair_eligible(before, mechanical, semantic) || !actuator.apply(before) {
+        return MicroRepairReport::Heavy;
+    }
+    let (after, after_revision, after_diag) = match host(MicroRepairHost::Rerun) {
+        MicroRepairHostReply::Reran {
+            lattice,
+            revision,
+            diag,
+        } => (lattice, revision, diag),
+        MicroRepairHostReply::Unavailable
+        | MicroRepairHostReply::ResetDone
+        | MicroRepairHostReply::ResetFailed => {
+            return reset_micro_edit(&mut host, prior_revision);
+        }
+    };
+    let action = micro_observation(session, before, &after, &after_revision, &after_diag);
+    if compare(before, &after) == LatticeOrder::Improves {
+        MicroRepairReport::Improved {
+            action,
+            lattice: after,
+            diag: after_diag,
+            revision: after_revision,
+        }
+    } else {
+        reset_micro_edit(&mut host, prior_revision)
+    }
+}
+
 fn remaining_constraint(lattice: &DiagnosticLattice) -> String {
     let mut lines = vec!["REMAINING DIAGNOSTICS (fix these, introduce nothing new):".into()];
     for atom in lattice.atoms() {
@@ -396,5 +559,302 @@ mod tests {
             }
         );
         assert_eq!(s.round_count(), 3);
+    }
+
+    use std::cell::RefCell;
+
+    use meshloop_domain::decision::SanitizedReason;
+    use meshloop_domain::diagnostic::DiagnosticAtom;
+
+    use crate::ports::{BatchNoulQuery, ChoiceQuery, DecisionPortError, NoulQuery};
+
+    struct ScoreScript {
+        mechanical: Result<DecisionOutcome, DecisionPortError>,
+        semantic: Result<DecisionOutcome, DecisionPortError>,
+        subjects: RefCell<Vec<String>>,
+    }
+
+    impl ScoreScript {
+        fn pair(mechanical: f64, semantic: f64) -> Self {
+            Self {
+                mechanical: Ok(DecisionOutcome::try_score(mechanical).expect("finite")),
+                semantic: Ok(DecisionOutcome::try_score(semantic).expect("finite")),
+                subjects: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DecisionPort for ScoreScript {
+        fn evaluate_choice(
+            &self,
+            _query: &ChoiceQuery,
+        ) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_noul(&self, _query: &NoulQuery) -> Result<DecisionOutcome, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+
+        fn evaluate_score(&self, query: &ScoreQuery) -> Result<DecisionOutcome, DecisionPortError> {
+            self.subjects.borrow_mut().push(query.subject.clone());
+            if query.subject.starts_with("mechanical\n") {
+                self.mechanical.clone()
+            } else if query.subject.starts_with("semantic\n") {
+                self.semantic.clone()
+            } else {
+                Err(DecisionPortError::Unscripted {
+                    fingerprint: query.subject.clone(),
+                })
+            }
+        }
+
+        fn evaluate_batch_noul(
+            &self,
+            _query: &BatchNoulQuery,
+        ) -> Result<Vec<DecisionOutcome>, DecisionPortError> {
+            Err(DecisionPortError::EmptyQuery)
+        }
+    }
+
+    struct CountingActuator {
+        calls: u32,
+        applied: bool,
+    }
+
+    impl MicroRepairActuator for CountingActuator {
+        fn apply(&mut self, _lattice: &DiagnosticLattice) -> bool {
+            self.calls += 1;
+            self.applied
+        }
+    }
+
+    struct MicroDrive {
+        report: MicroRepairReport,
+        calls: u32,
+        resets: u32,
+        /// Incremented only when the helper asks for the heavy path.
+        dispatches: u32,
+        rounds: u32,
+    }
+
+    fn atom(severity: DiagnosticSeverity, code: &str) -> DiagnosticLattice {
+        DiagnosticLattice::new([DiagnosticAtom {
+            severity,
+            code: code.to_string(),
+            path: "lib.rs".into(),
+            template: 1,
+        }])
+    }
+
+    fn e0425() -> DiagnosticLattice {
+        lat("error[E0425]: cannot find value `x` in this scope\n --> src/lib.rs:1:1\n")
+    }
+
+    #[test]
+    fn micro_repair_eligible_allowlists_e0425_at_thresholds() {
+        let lattice = e0425();
+        assert_eq!(lattice.count(DiagnosticSeverity::Syntax), 0);
+        assert!(lattice.blocking() > 0);
+        assert!(lattice.atoms().any(|atom| atom.code == "E0425"));
+        assert!(micro_repair_eligible(&lattice, 0.70, 0.20));
+        assert!(micro_repair_eligible(
+            &atom(DiagnosticSeverity::Type, "unused_imports"),
+            0.70,
+            0.20
+        ));
+        let with_warning = parse_diagnostics(
+            "error[E0425]: cannot find value `x` in this scope\n --> src/lib.rs:1:1\n\
+             warning: unused variable: `y`\n --> src/lib.rs:2:5\n",
+        );
+        assert!(micro_repair_eligible(&with_warning, 0.70, 0.20));
+    }
+
+    #[test]
+    fn micro_repair_rejects_low_scores_syntax_and_e0308() {
+        let lattice = e0425();
+        assert!(!micro_repair_eligible(&lattice, 0.69, 0.20));
+        assert!(!micro_repair_eligible(&lattice, 0.70, 0.21));
+        assert!(!micro_repair_eligible(&lattice, f64::NAN, 0.20));
+        assert!(!micro_repair_eligible(&lattice, 1.5, 0.20));
+        assert!(!micro_repair_eligible(&lattice, 0.70, f64::INFINITY));
+        assert!(!micro_repair_eligible(
+            &DiagnosticLattice::empty(),
+            0.70,
+            0.20
+        ));
+        assert!(!micro_repair_eligible(
+            &atom(DiagnosticSeverity::Syntax, "E0425"),
+            0.70,
+            0.20
+        ));
+        let syntax = lat("error: this file contains an unclosed delimiter\n --> src/lib.rs:1:1\n");
+        assert!(syntax.count(DiagnosticSeverity::Syntax) > 0);
+        assert!(!micro_repair_eligible(&syntax, 0.70, 0.20));
+        let mismatched = lat("error[E0308]: mismatched types\n --> src/main.rs:2:5\n");
+        assert!(mismatched.atoms().any(|atom| atom.code == "E0308"));
+        assert!(!micro_repair_eligible(&mismatched, 0.70, 0.20));
+        let mixed = parse_diagnostics(
+            "error[E0425]: cannot find value `x` in this scope\n --> a.rs:1:1\n\
+             error[E0308]: mismatched types\n --> b.rs:1:1\n",
+        );
+        assert!(!micro_repair_eligible(&mixed, 0.70, 0.20));
+    }
+
+    #[test]
+    fn micro_repair_probabilities_require_unit_interval_scores() {
+        let description = "missing x";
+        let mut port = ScoreScript::pair(0.70, 0.20);
+        assert_eq!(repair_probabilities(&port, description), Some((0.70, 0.20)));
+        assert_eq!(
+            port.subjects.borrow().as_slice(),
+            [
+                "mechanical\nmissing x".to_string(),
+                "semantic\nmissing x".to_string()
+            ]
+        );
+        port.mechanical = Ok(DecisionOutcome::Boolean(true));
+        assert_eq!(repair_probabilities(&port, description), None);
+        port.mechanical = Ok(DecisionOutcome::try_score(0.70).expect("finite"));
+        port.semantic = Ok(DecisionOutcome::try_score(1.5).expect("finite"));
+        assert_eq!(repair_probabilities(&port, description), None);
+        port.semantic = Ok(DecisionOutcome::abstain(
+            SanitizedReason::try_new("no score").expect("reason"),
+        ));
+        assert_eq!(repair_probabilities(&port, description), None);
+        port.semantic = Err(DecisionPortError::EmptyQuery);
+        assert_eq!(repair_probabilities(&port, description), None);
+        port.semantic = Ok(DecisionOutcome::try_selected("keep").expect("choice"));
+        assert_eq!(repair_probabilities(&port, description), None);
+    }
+
+    fn drive(
+        before: &DiagnosticLattice,
+        follow_up: DiagnosticLattice,
+        applied: bool,
+        port: &ScoreScript,
+    ) -> MicroDrive {
+        let mut session = RepairSession::new(RepairBudget::default());
+        let mut actuator = CountingActuator { calls: 0, applied };
+        let mut resets = 0u32;
+        let mut dispatches = 0u32;
+        let report = consider_micro_repair(
+            &mut session,
+            before,
+            "rev-before",
+            "missing x",
+            port,
+            &mut actuator,
+            |request| match request {
+                MicroRepairHost::Rerun => MicroRepairHostReply::Reran {
+                    lattice: follow_up.clone(),
+                    revision: "rev-after".into(),
+                    diag: "after".into(),
+                },
+                MicroRepairHost::Reset { revision } => {
+                    assert_eq!(revision, "rev-before");
+                    resets += 1;
+                    MicroRepairHostReply::ResetDone
+                }
+            },
+        );
+        if matches!(report, MicroRepairReport::Heavy | MicroRepairReport::Abort) {
+            dispatches += 1;
+        }
+        MicroDrive {
+            report,
+            calls: actuator.calls,
+            resets,
+            dispatches,
+            rounds: session.round_count(),
+        }
+    }
+
+    #[test]
+    fn micro_repair_clearing_actuator_observes_once_and_skips_dispatch() {
+        let before = e0425();
+        let driven = drive(
+            &before,
+            DiagnosticLattice::empty(),
+            true,
+            &ScoreScript::pair(0.70, 0.20),
+        );
+        assert_eq!(
+            compare(&before, &DiagnosticLattice::empty()),
+            LatticeOrder::Improves
+        );
+        assert!(matches!(
+            driven.report,
+            MicroRepairReport::Improved {
+                action: RepairAction::Accept,
+                ..
+            }
+        ));
+        assert_eq!(driven.calls, 1);
+        assert_eq!(driven.rounds, 1, "observe once");
+        assert_eq!(driven.resets, 0);
+        assert_eq!(driven.dispatches, 0);
+    }
+
+    #[test]
+    fn micro_repair_without_phi_improvement_resets_once_and_requests_heavy_path() {
+        let before = e0425();
+        let driven = drive(
+            &before,
+            before.clone(),
+            true,
+            &ScoreScript::pair(0.70, 0.20),
+        );
+        assert_ne!(compare(&before, &before), LatticeOrder::Improves);
+        assert_eq!(driven.report, MicroRepairReport::Heavy);
+        assert_eq!(driven.calls, 1);
+        assert_eq!(driven.resets, 1);
+        assert_eq!(
+            driven.rounds, 1,
+            "the non-improving lattice is observed once"
+        );
+        assert_eq!(driven.dispatches, 1);
+    }
+
+    #[test]
+    fn micro_repair_syntax_lattice_never_calls_actuator() {
+        let syntax = lat("error: this file contains an unclosed delimiter\n --> src/lib.rs:1:1\n");
+        assert!(syntax.count(DiagnosticSeverity::Syntax) > 0);
+        let driven = drive(
+            &syntax,
+            DiagnosticLattice::empty(),
+            true,
+            &ScoreScript::pair(0.70, 0.20),
+        );
+        assert_eq!(driven.calls, 0);
+        assert_eq!(driven.resets, 0);
+        assert_eq!(driven.rounds, 0);
+        assert_eq!(driven.report, MicroRepairReport::Heavy);
+        assert_eq!(driven.dispatches, 1);
+    }
+
+    #[test]
+    fn micro_repair_false_apply_does_not_observe_or_reset() {
+        let driven = drive(
+            &e0425(),
+            DiagnosticLattice::empty(),
+            false,
+            &ScoreScript::pair(0.70, 0.20),
+        );
+        assert_eq!(driven.calls, 1);
+        assert_eq!(driven.rounds, 0);
+        assert_eq!(driven.resets, 0);
+        assert_eq!(driven.report, MicroRepairReport::Heavy);
+    }
+
+    #[test]
+    fn micro_repair_probability_error_skips_actuator() {
+        let mut port = ScoreScript::pair(0.70, 0.20);
+        port.mechanical = Err(DecisionPortError::EmptyQuery);
+        let driven = drive(&e0425(), DiagnosticLattice::empty(), true, &port);
+        assert_eq!(driven.calls, 0);
+        assert_eq!(driven.rounds, 0);
+        assert_eq!(driven.resets, 0);
+        assert_eq!(driven.report, MicroRepairReport::Heavy);
     }
 }
