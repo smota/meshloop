@@ -77,12 +77,38 @@ mod tests {
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {
+        let template = repo
+            .parent()
+            .map(|parent| parent.join("empty-git-template"))
+            .unwrap_or_else(|| repo.join("empty-git-template"));
+        let template_arg;
+        let init_args;
+        let args = if args.first() == Some(&"init") {
+            fs::create_dir_all(&template).unwrap();
+            template_arg = template.to_string_lossy().into_owned();
+            // An empty template skips the hook-sample copy that Git for Windows
+            // races (`File exists`). The init assertion still stands.
+            init_args = vec![
+                "init",
+                "-q",
+                "-b",
+                "main",
+                "--template",
+                template_arg.as_str(),
+            ];
+            init_args.as_slice()
+        } else {
+            args
+        };
         let mut output = run_git(repo, args);
-        // Git for Windows can fail `init` while copying hook templates (`File exists`).
-        // Drop the partial `.git` and try once more. The assertion still stands.
-        if args.first() == Some(&"init") && template_copy_race(&output) {
-            fs::remove_dir_all(repo.join(".git")).ok();
-            output = run_git(repo, args);
+        if args.first() == Some(&"init") {
+            for _ in 0..3 {
+                if output.status.success() || !git_init_race(&output) {
+                    break;
+                }
+                fs::remove_dir_all(repo.join(".git")).ok();
+                output = run_git(repo, args);
+            }
         }
         assert!(
             output.status.success(),
@@ -106,12 +132,14 @@ mod tests {
             .unwrap()
     }
 
-    fn template_copy_race(output: &std::process::Output) -> bool {
+    fn git_init_race(output: &std::process::Output) -> bool {
         if output.status.success() {
             return false;
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        stderr.contains("cannot copy") && stderr.contains("File exists")
+        (stderr.contains("cannot copy") && stderr.contains("File exists"))
+            || stderr.contains("could not write config file")
+            || stderr.contains("could not set 'core.filemode'")
     }
 
     fn fixture() -> Fixture {
