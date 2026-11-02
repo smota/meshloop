@@ -552,7 +552,7 @@ mod tests {
             client
                 .evaluate_choice(&ChoiceQuery {
                     prompt: "pick".into(),
-                    options: options,
+                    options,
                 })
                 .unwrap(),
             DecisionOutcome::try_selected("keep").unwrap()
