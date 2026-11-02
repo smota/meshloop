@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 mod cleanup;
 mod inventory;
-pub use cleanup::observe_cleanup;
+pub use cleanup::{CleanupFault, apply_cleanup, observe_cleanup};
 pub use inventory::{InventoryScope, discover_inventory};
 mod ledger;
 #[cfg(test)]

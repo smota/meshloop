@@ -387,11 +387,11 @@ impl SqliteStore {
             .map_err(error)?;
 
         match super::schema::schema_version(&conn)? {
-            Some(7) => {}
+            Some(7) => super::schema::validate7(&conn)?,
+            Some(8) => super::schema::validate8(&conn)?,
             Some(1 | 2 | 4 | 5 | 6) => return Err(StoreError::SchemaUpgradeRequired),
             _ => return Err(refused()),
         }
-        super::schema::validate7(&conn)?;
         verify_handle(&handle, path)?;
         Ok(Some(Self {
             conn,

@@ -511,6 +511,15 @@ fn has_reason(candidate: &serde_json::Value, reason: &str) -> bool {
 
 #[test]
 fn cleanup_preview_blocks_adversarial_candidates_without_writes() {
+    cleanup_scenario(false);
+}
+
+#[test]
+fn cleanup_apply_removes_only_eligible_and_preserves_preview() {
+    cleanup_scenario(true);
+}
+
+fn cleanup_scenario(apply: bool) {
     let fixture = Fixture::new("cleanup");
     let root = fixture.repo.join("workspace-root");
     fs::create_dir(&root).unwrap();
@@ -729,4 +738,77 @@ fn cleanup_preview_blocks_adversarial_candidates_without_writes() {
         "filesystem hash changed: before {before_hash} after {after_hash}"
     );
     assert_unchanged(&fixture.base, &before);
+    if !apply {
+        return;
+    }
+    let (code, stale, _) = run(
+        &fixture,
+        &[
+            "workspace",
+            "apply",
+            "--cleanup",
+            "--digest",
+            &"0".repeat(64),
+        ],
+    );
+    assert_eq!(code, 0, "{stale}");
+    assert_eq!(stale["data"]["cleanup"]["apply"], false);
+    assert_eq!(
+        stale["data"]["cleanup"]["reasons"],
+        serde_json::json!(["stale-facts"])
+    );
+    assert_unchanged(&fixture.base, &before);
+    for args in [
+        vec!["workspace", "apply", "--cleanup"],
+        vec!["workspace", "apply", "--cleanup", "--digest", "bad"],
+        vec![
+            "workspace",
+            "apply",
+            "--cleanup",
+            "--digest",
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+        ],
+    ] {
+        assert_eq!(run(&fixture, &args).0, 2);
+    }
+    let (code, applied, _) = run(
+        &fixture,
+        &["workspace", "apply", "--cleanup", "--digest", &digest],
+    );
+    assert_eq!(code, 0, "{applied}");
+    assert_eq!(applied["data"]["cleanup"]["apply"], true, "{applied}");
+    assert!(!root.join("clean-wt").exists());
+    assert_eq!(
+        fs::read(root.join("dirty-wt/tracked.txt")).unwrap(),
+        b"dirty tracked\n"
+    );
+    assert_eq!(
+        fs::read(root.join("unique-wt/unique.txt")).unwrap(),
+        b"unique commit\n"
+    );
+    assert_eq!(
+        fs::read(root.join("ignored-wt/notes.log")).unwrap(),
+        b"ignored\n"
+    );
+    assert!(fixture.repo.join(".git").is_dir());
+    assert!(fixture.db.is_file());
+    #[cfg(unix)]
+    assert!(
+        root.join("leak")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let (code, preview, _) = run(&fixture, &["workspace", "preview", "--cleanup"]);
+    assert_eq!(code, 0);
+    let empty_digest = preview["data"]["cleanup"]["digest"].as_str().unwrap();
+    let before_empty = snapshot(&fixture.base);
+    let (code, empty, _) = run(
+        &fixture,
+        &["workspace", "apply", "--cleanup", "--digest", empty_digest],
+    );
+    assert_eq!(code, 0, "{empty}");
+    assert_eq!(empty["data"]["cleanup"]["apply"], false);
+    assert_unchanged(&fixture.base, &before_empty);
 }

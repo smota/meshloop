@@ -7,7 +7,7 @@ use meshloop_domain::cleanup::{
 use meshloop_domain::workspace::{DeliveryReceipt, GitRef, InventoryEntry, LifecycleId, ObjectId};
 
 /// One inventory row's filesystem and git facts. Missing rows fail closed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CleanupObservation {
     pub dirty_tracked: bool,
     pub dirty_untracked: bool,
