@@ -1,0 +1,21 @@
+# System 1 Fail-Closed Invariants (Blocking CI Gate)
+[invariants]
+"dec.tier.downward_violation_count" = { op = "eq", value = 0 }
+"dec.tier.freeze_violation_count" = { op = "eq", value = 0 }
+"dec.review.tier3_bypass_count" = { op = "eq", value = 0 }
+"dec.repair.lyapunov_monotonic_pct" = { op = "eq", value = 100 }
+"dec.repair.unallowlisted_dispatch_count" = { op = "eq", value = 0 }
+"dec.oracle.prior_influence_clip_pct" = { op = "eq", value = 100 }
+"dec.oracle.exploration_preservation" = { op = "eq", value = 100 }
+"dec.context.file_drop_count" = { op = "eq", value = 0 }
+"dec.context.pinned_shift_count" = { op = "eq", value = 0 }
+"dec.context.fallback_fidelity" = { op = "eq", value = 1.0 }
+
+# System 1 Performance and Yield Targets
+[performance.targets]
+"dec.tier.ratchet_precision" = { op = "gte", value = 90.0 }
+"dec.review.false_accept_rate" = { op = "lte", value = 2.0 }
+"dec.review.latency_ms.p95" = { op = "lte", value = 150.0 }
+"dec.repair.micro_yield_pct" = { op = "gte", value = 75.0 }
+"dec.context.rerank_latency_ms.p95" = { op = "lte", value = 250.0 }
+"dec.spend.cost_per_task_usd" = { op = "lte", value = 0.0005 }

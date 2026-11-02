@@ -215,7 +215,7 @@ The runner emits a structured record conforming to `run-record.v1`:
 
 ## 6. Thresholds and Acceptance Gates (`benches/thresholds.toml`)
 
-The following entries will be appended to `benches/thresholds.toml` upon ADR 0032 acceptance:
+The following entries live in `benches/system1-thresholds.toml`. `benches/thresholds.toml` stays the World D gate:
 
 ```toml
 # System 1 Fail-Closed Invariants (Blocking CI Gate)

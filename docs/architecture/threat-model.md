@@ -21,3 +21,7 @@ orphan prevention belong to the harness/herdr adapters plus the recovery use cas
 and the router's authorization-preserving feedback rule (ADR 0009). Independent review and
 human approval remain outside any single component, enforced at the
 `awaiting-review -> accepted` transition (execution-lifecycle.md).
+
+## Decision API
+
+CI and the default CLI do not call an external decision API. `check`, `smoke`, and `bench` open no decision socket. `JevClient::connect` is manual opt-in outside CI. A live request body is the decision subject the caller already holds (task description, score subject, or `{description}\n{path}` proposition). It does not add secrets, home directories, or host names. AST skeletons stay local unless the caller copied them into that subject. The CI double is the scripted port.

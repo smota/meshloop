@@ -1,6 +1,7 @@
 //! Repository checks, session-control-plane smoke, session pack, and publish dry-run.
 
 #![forbid(unsafe_code)]
+mod system1_bench;
 mod workspace_lifecycle_smoke;
 
 use std::{
@@ -23,12 +24,13 @@ fn main() -> ExitCode {
         Some("live") => live(root),
         Some("publish-dry") => publish_dry(root),
         Some("bench") => bench(root),
+        Some("bench-system1") => system1_bench::bench_system1(root),
         Some("bench-dag") => bench_dag(root),
         Some("bench-mutation") => bench_mutation(root),
         Some("bench-world-s") => bench_world_s(root, &args[1..]),
         _ => {
             eprintln!(
-                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-dag|bench-mutation|bench-world-s"
+                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-system1|bench-dag|bench-mutation|bench-world-s"
             );
             ExitCode::from(2)
         }

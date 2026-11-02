@@ -57,6 +57,8 @@ cargo run --release -p xtask -- bench
 ```
 *Fail-closed rule:* An invariant miss exits 1. A missing smoke artifact exits 1. A performance-only miss exits 0 while `status.thresholds` is `fail` and the scorecard records the miss. `xtask check` and `xtask smoke` still fail their own commands.
 
+`cargo run -p xtask -- bench-system1` reads [`benches/system1-thresholds.toml`](../../benches/system1-thresholds.toml). `xtask bench` still reads [`benches/thresholds.toml`](../../benches/thresholds.toml).
+
 ### 2.3 DAG Manifest Latency Benchmarks (`xtask bench-dag`)
 Tests scheduler and topological sorting overhead using `hdrhistogram` across 7 canonical manifests in `benches/manifests/`:
 ```bash
