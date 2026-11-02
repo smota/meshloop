@@ -18,12 +18,15 @@ use meshloop_domain::state::{
 use meshloop_domain::task_graph::{AcceptanceGate, GraphMutation, TaskGraph, TaskId, Tier};
 
 use crate::agent::{build_agent_spec, build_planning_spec, dependency_context};
-use crate::converge::{RepairAction, RepairBudget, RepairSession};
+use crate::converge::{
+    MicroRepairActuator, MicroRepairHost, MicroRepairHostReply, MicroRepairReport, RepairAction,
+    RepairBudget, RepairSession, consider_micro_repair,
+};
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_owned};
 use crate::ports::{
-    AttemptRow, CheckRunner, FeedbackKey, HarnessCapabilities, HarnessHandle, HarnessOutcome,
-    LiveCheck, ProcessHint, ProcessView, RunRow, RunStore, StoreError, TransitionRecord,
-    WorkspaceError, WorkspacePort,
+    AttemptRow, CheckRunner, DecisionPort, FeedbackKey, HarnessCapabilities, HarnessHandle,
+    HarnessOutcome, LiveCheck, ProcessHint, ProcessView, RunRow, RunStore, StoreError,
+    TransitionRecord, WorkspaceError, WorkspacePort,
 };
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
@@ -152,6 +155,14 @@ pub enum Tick {
     },
 }
 
+/// Closed mechanical edit attempted before a heavy repair round.
+///
+/// `None` keeps `verify_attempt` on `dispatch_repair_round`.
+pub struct MicroRepair {
+    pub port: Box<dyn DecisionPort>,
+    pub actuator: Box<dyn MicroRepairActuator>,
+}
+
 pub struct RunLoop<'a> {
     pub harnesses: HashMap<String, &'a dyn HarnessCapabilities>,
     pub candidates: Vec<Candidate>,
@@ -170,6 +181,8 @@ pub struct RunLoop<'a> {
     /// Stdout/stderr from `HarnessExited` in this process. A later tick passes it to
     /// `verify_attempt`. A new process has no entry and uses `recover_verifying` (#60).
     pub pending_outcomes: HashMap<AttemptId, HarnessOutcome>,
+    /// `None` leaves both repair arms on the heavy dispatch path.
+    pub micro_repair: Option<MicroRepair>,
 }
 
 /// Why a node is not progressing on its own.
@@ -296,6 +309,21 @@ struct RepairTick {
     lattice: Option<DiagnosticLattice>,
     diag: String,
     revision: String,
+}
+
+enum MicroRepairFollow {
+    /// Phi improved. The caller must not call `dispatch_repair_round`.
+    Improved {
+        action: RepairAction,
+        lattice: DiagnosticLattice,
+        diag: String,
+        revision: String,
+        rows: Vec<Evidence>,
+    },
+    /// Heavy `dispatch_repair_round`.
+    Heavy,
+    /// Reset failed. Do not dispatch.
+    Abort,
 }
 
 /// How often a live driver rewrites its store heartbeat. Status does not wait this
@@ -1816,6 +1844,85 @@ impl<'a> RunLoop<'a> {
         self.recover_verifying(graph_id, graph, tasks)
     }
 
+    /// One allowlisted edit. `Heavy` is the only result that still dispatches.
+    #[allow(clippy::too_many_arguments)]
+    fn try_micro_repair(
+        &mut self,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        wt: &Path,
+        base: &str,
+        session: &mut RepairSession,
+        before: &DiagnosticLattice,
+        prior_revision: &str,
+    ) -> Result<MicroRepairFollow, OrchestratorError> {
+        let Some(mut micro) = self.micro_repair.take() else {
+            return Ok(MicroRepairFollow::Heavy);
+        };
+        let mut fresh_rows: Option<Vec<Evidence>> = None;
+        let commit_msg = format!("meshloop: micro-repair for task {}", node.id.0);
+        let report = consider_micro_repair(
+            session,
+            before,
+            prior_revision,
+            &node.description,
+            micro.port.as_ref(),
+            micro.actuator.as_mut(),
+            |request| match request {
+                MicroRepairHost::Rerun => {
+                    let revision = match self.workspace.commit_all(wt, &commit_msg) {
+                        Ok(revision) => revision,
+                        Err(_) => return MicroRepairHostReply::Unavailable,
+                    };
+                    match self.run_deterministic_checks(node, attempt_id, wt, base, &revision) {
+                        Ok((rows, Some(lattice), diag)) => {
+                            fresh_rows = Some(rows);
+                            MicroRepairHostReply::Reran {
+                                lattice,
+                                revision,
+                                diag,
+                            }
+                        }
+                        // No lattice is not an improvement. The helper resets, then heavy dispatch.
+                        Ok((_, None, _)) | Err(_) => MicroRepairHostReply::Unavailable,
+                    }
+                }
+                MicroRepairHost::Reset { revision } => {
+                    if self.workspace.reset_hard(wt, &revision).is_ok() {
+                        MicroRepairHostReply::ResetDone
+                    } else {
+                        MicroRepairHostReply::ResetFailed
+                    }
+                }
+            },
+        );
+        self.micro_repair = Some(micro);
+        match report {
+            MicroRepairReport::Heavy => Ok(MicroRepairFollow::Heavy),
+            MicroRepairReport::Abort => Ok(MicroRepairFollow::Abort),
+            MicroRepairReport::Improved {
+                action,
+                lattice,
+                diag,
+                revision,
+            } => {
+                let Some(rows) = fresh_rows else {
+                    return Ok(MicroRepairFollow::Abort);
+                };
+                for row in &rows {
+                    self.store.record(row.clone())?;
+                }
+                Ok(MicroRepairFollow::Improved {
+                    action,
+                    lattice,
+                    diag,
+                    revision,
+                    rows,
+                })
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn verify_attempt(
         &mut self,
@@ -1856,14 +1963,21 @@ impl<'a> RunLoop<'a> {
         // ADR 0026: observe after every check. Accept records the terminal Φ=0 round.
         // Rollback restores the prior round's diagnostics and must not re-observe the
         // reset tree (that fingerprint is already in history → false Oscillation).
+        // A kept micro-repair already observed its post-edit lattice. `queued_action`
+        // replays that action so the next iteration does not observe it again.
         if !passed && let Some(initial_lat) = current_lattice {
             let mut session = RepairSession::new(RepairBudget::default());
             let mut lat = initial_lat;
             let repair_started = std::time::Instant::now();
+            let mut queued_action: Option<RepairAction> = None;
 
             loop {
-                let action =
-                    session.observe(lat.clone(), current_revision.clone(), current_diag.clone());
+                let action = match queued_action.take() {
+                    Some(action) => action,
+                    None => {
+                        session.observe(lat.clone(), current_revision.clone(), current_diag.clone())
+                    }
+                };
                 match action {
                     RepairAction::Accept => {
                         passed = verification_passed(&rows);
@@ -1875,27 +1989,54 @@ impl<'a> RunLoop<'a> {
                     } => {
                         let commit_msg =
                             format!("meshloop: repair round {} for task {}", round, node.id.0);
-                        match self.dispatch_repair_round(
+                        match self.try_micro_repair(
                             node,
                             attempt_id,
                             wt,
                             base,
-                            candidate,
-                            &prompt,
-                            &commit_msg,
-                            &current_diag,
-                            &negative_constraint,
+                            &mut session,
+                            &lat,
+                            &current_revision,
                         )? {
-                            Some(tick) => {
-                                rows = tick.rows;
-                                current_diag = tick.diag;
-                                current_revision = tick.revision;
-                                match tick.lattice {
-                                    Some(l) => lat = l,
+                            MicroRepairFollow::Improved {
+                                action,
+                                lattice,
+                                diag,
+                                revision,
+                                rows: new_rows,
+                            } => {
+                                // Phi improved: do not call dispatch_repair_round.
+                                rows = new_rows;
+                                current_diag = diag;
+                                current_revision = revision;
+                                lat = lattice;
+                                queued_action = Some(action);
+                            }
+                            MicroRepairFollow::Abort => break,
+                            MicroRepairFollow::Heavy => {
+                                match self.dispatch_repair_round(
+                                    node,
+                                    attempt_id,
+                                    wt,
+                                    base,
+                                    candidate,
+                                    &prompt,
+                                    &commit_msg,
+                                    &current_diag,
+                                    &negative_constraint,
+                                )? {
+                                    Some(tick) => {
+                                        rows = tick.rows;
+                                        current_diag = tick.diag;
+                                        current_revision = tick.revision;
+                                        match tick.lattice {
+                                            Some(l) => lat = l,
+                                            None => break,
+                                        }
+                                    }
                                     None => break,
                                 }
                             }
-                            None => break,
                         }
                     }
                     RepairAction::Rollback {
@@ -1911,30 +2052,61 @@ impl<'a> RunLoop<'a> {
                             .record_at(to_round)
                             .map(|r| r.diag.clone())
                             .unwrap_or(current_diag);
-                        current_revision = to_rev;
+                        current_revision = to_rev.clone();
+                        let restored = session
+                            .record_at(to_round)
+                            .map(|record| record.lattice.clone())
+                            .unwrap_or_else(|| lat.clone());
                         let commit_msg =
                             format!("meshloop: repair rollback retry for task {}", node.id.0);
-                        match self.dispatch_repair_round(
+                        match self.try_micro_repair(
                             node,
                             attempt_id,
                             wt,
                             base,
-                            candidate,
-                            &prompt,
-                            &commit_msg,
-                            &current_diag,
-                            &negative_constraint,
+                            &mut session,
+                            &restored,
+                            &current_revision,
                         )? {
-                            Some(tick) => {
-                                rows = tick.rows;
-                                current_diag = tick.diag;
-                                current_revision = tick.revision;
-                                match tick.lattice {
-                                    Some(l) => lat = l,
+                            MicroRepairFollow::Improved {
+                                action,
+                                lattice,
+                                diag,
+                                revision,
+                                rows: new_rows,
+                            } => {
+                                // Phi improved: do not call dispatch_repair_round.
+                                rows = new_rows;
+                                current_diag = diag;
+                                current_revision = revision;
+                                lat = lattice;
+                                queued_action = Some(action);
+                            }
+                            MicroRepairFollow::Abort => break,
+                            MicroRepairFollow::Heavy => {
+                                match self.dispatch_repair_round(
+                                    node,
+                                    attempt_id,
+                                    wt,
+                                    base,
+                                    candidate,
+                                    &prompt,
+                                    &commit_msg,
+                                    &current_diag,
+                                    &negative_constraint,
+                                )? {
+                                    Some(tick) => {
+                                        rows = tick.rows;
+                                        current_diag = tick.diag;
+                                        current_revision = tick.revision;
+                                        match tick.lattice {
+                                            Some(l) => lat = l,
+                                            None => break,
+                                        }
+                                    }
                                     None => break,
                                 }
                             }
-                            None => break,
                         }
                     }
                     RepairAction::Stop { .. } => break,
@@ -3192,6 +3364,7 @@ mod tests {
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
+            micro_repair: None,
         }
     }
     fn admission_graph() -> TaskGraph {
@@ -3764,6 +3937,7 @@ mod tests {
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
+            micro_repair: None,
         }
     }
 
@@ -3871,6 +4045,7 @@ mod tests {
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
+            micro_repair: None,
         }
     }
 
@@ -4233,6 +4408,7 @@ mod tests {
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
+            micro_repair: None,
         };
         let graph = TaskGraph {
             graph_id: "g".into(),
@@ -4373,6 +4549,7 @@ mod tests {
             active_graph: Some("g".into()),
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
+            micro_repair: None,
         };
         let graph = TaskGraph {
             graph_id: "g".into(),
@@ -4611,6 +4788,7 @@ mod tests {
                 active_graph: Some("g".into()),
                 planner: PlannerSelection::default(),
                 pending_outcomes: HashMap::new(),
+                micro_repair: None,
             };
             run.finish_orphaned_verification("g", &node, Some(attempt))
                 .expect("orphan gate")
@@ -4661,6 +4839,7 @@ mod tests {
                 active_graph: Some("g".into()),
                 planner: PlannerSelection::default(),
                 pending_outcomes: HashMap::new(),
+                micro_repair: None,
             };
             run.finish_orphaned_verification("g", &node, again)
                 .expect_err("already accepted")
