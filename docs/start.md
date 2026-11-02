@@ -2,7 +2,7 @@
 
 Install and first-time setup: **[Install and Setup](install.md)** (`cargo install meshloop-cli --locked`, then `meshloop bundle`).
 
-You operate Meshloop directly from your existing terminal agent (Claude Code, Codex, Pi, Grok, Agy) as `meshloop:origin`. Meshloop is the multi-agent development optimization and loop engineering runtime that executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`), with multi-language AST context reduction and deterministic prompt caching. No background daemons or multiplexer servers are required.
+You operate Meshloop directly from your existing terminal agent (Claude Code, Codex, Pi, Grok, Agy) as `meshloop:origin`. Meshloop is the multi-agent development optimization and loop engineering runtime that executes worker agents as direct CLI subprocesses in isolated ephemeral Git worktrees (`<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe; existing runs stay pinned; override with `--worktree-base` or `[workspace] root`), with multi-language AST context reduction and deterministic prompt caching. No background daemons or multiplexer servers are required.
 
 ---
 
@@ -15,7 +15,7 @@ Meshloop operations can be triggered through terminal slash commands, MCP tools,
 | `meshloop:doctor` | `/meshloop:doctor` | `meshloop_doctor` | `meshloop doctor` | **Diagnostics:** Loads `meshloop.toml` and runs each selected harness's bounded version probe; reports per-harness readiness. |
 | `meshloop:plan` | `/meshloop:plan` | `meshloop_plan` | `meshloop plan` | **Planning:** Decomposes objective into a validated DAG (`meshloop-plan.json`). |
 | `meshloop:review-plan` | `/meshloop:review-plan` | `meshloop_review_plan` | `meshloop review-plan` | **Human Gate:** Interactively review plan: Accept, Decline, or Adjust. |
-| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** Runs workers in ephemeral Git worktrees (`.meshloop-worktrees/<task-id>`). |
+| `meshloop:run` | `/meshloop:run` | `meshloop_run` | `meshloop run` | **Execution:** New runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. |
 | `meshloop:status` | `/meshloop:status` | `meshloop_status` | `meshloop status` | **Inspection:** Reports task states, active attempts, and execution history. |
 | `meshloop:accept` | `/meshloop:accept` | `meshloop_accept` | `meshloop accept` | **Verification:** Approves deterministic test evidence and git diff for a completed task. Every node stops at `AwaitingReview` until `meshloop accept`; the tier selects the harness and model only. |
 | `meshloop:resume` | — | `meshloop_resume` | `meshloop resume` | **Continuation:** Resumes execution or restarts failed tasks without replanning. |
@@ -87,7 +87,7 @@ Prompts for approval before execution:
 ```text
 /meshloop:run
 ```
-Dispatches worker agents in dedicated Git worktrees (`.meshloop-worktrees/<task-id>`). Your working branch is never modified during worker execution.
+Dispatches worker agents in dedicated Git worktrees (`<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe). Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. Your working branch is never modified during worker execution.
 
 When a task completes, verify compiler and test evidence:
 ```bash

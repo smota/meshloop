@@ -112,15 +112,27 @@ pub fn default_db(repo_root: &Path) -> PathBuf {
 }
 
 pub fn default_worktree_base(repo_root: &Path) -> PathBuf {
-    let name = repo_root
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "repo".into());
-    repo_root
-        .parent()
-        .unwrap_or(repo_root)
-        .join(".meshloop-worktrees")
-        .join(name)
+    repo_root.join(".meshloop").join("worktrees")
+}
+
+/// `--worktree-base`, then `[workspace] root`, then the nested default.
+/// This does not create the directory and does not relocate an existing run.
+pub fn resolve_worktree_base(
+    repo_root: &Path,
+    flag: Option<&Path>,
+    configured: Option<&str>,
+) -> PathBuf {
+    if let Some(flag) = flag {
+        return flag.to_path_buf();
+    }
+    if let Some(configured) = configured {
+        let path = Path::new(configured);
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        return repo_root.join(path);
+    }
+    default_worktree_base(repo_root)
 }
 
 /// Builds the subprocess adapter for one configured harness. Shared by `compose` and
@@ -234,9 +246,11 @@ fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Comp
         crate::gitignore::ensure_store_ignored(&db);
         store
     };
-    let wt = req
-        .worktree_base
-        .unwrap_or_else(|| default_worktree_base(&req.repo_root));
+    let wt = resolve_worktree_base(
+        &req.repo_root,
+        req.worktree_base.as_deref(),
+        req.config.workspace.root.as_deref(),
+    );
 
     Ok(Some(Composed {
         harnesses,
@@ -325,6 +339,36 @@ mod tests {
             assert!(matches!(harness, DispatchHarness::Direct(_)));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_worktree_base_prefers_flag_then_config_then_nested_default() {
+        let repo = Path::new("repo");
+        assert_eq!(
+            default_worktree_base(repo),
+            repo.join(".meshloop").join("worktrees")
+        );
+        assert_eq!(
+            resolve_worktree_base(repo, None, None),
+            repo.join(".meshloop").join("worktrees")
+        );
+        assert_eq!(
+            resolve_worktree_base(repo, None, Some("custom/root")),
+            repo.join("custom").join("root")
+        );
+        let absolute = if cfg!(windows) {
+            PathBuf::from(r"C:\abs\root")
+        } else {
+            PathBuf::from("/abs/root")
+        };
+        assert_eq!(
+            resolve_worktree_base(repo, None, Some(absolute.to_str().unwrap())),
+            absolute
+        );
+        assert_eq!(
+            resolve_worktree_base(repo, Some(Path::new("flag-root")), Some("custom/root")),
+            PathBuf::from("flag-root")
+        );
     }
 }
 

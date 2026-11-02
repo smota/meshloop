@@ -5,6 +5,7 @@ use std::path::Path;
 pub mod cleanup;
 pub mod delivery;
 pub mod inventory;
+pub mod maintenance;
 pub mod read;
 
 pub trait RepositoryFence {

@@ -88,19 +88,21 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Workspace {
             report,
             cleanup,
+            apply,
             digest,
             config,
             db,
             worktree_base,
-        } => workspace_cmd::cmd_workspace(
+        } => workspace_cmd::cmd_workspace(workspace_cmd::WorkspaceInvocation {
             report,
             cleanup,
+            apply,
             digest,
             config,
             db,
             worktree_base,
-            inv.origin,
-        ),
+            origin: inv.origin,
+        }),
         Command::Status {
             graph,
             config,
@@ -400,9 +402,14 @@ fn legacy_mutation_admission(store: &dyn RunStore, graph_id: &str) -> Result<(),
         .run_binding(&graph)
         .map_err(|e| format!("{e:?}"))?
         .is_some();
-    if unresolved || bound {
+    if unresolved {
         return Err(format!(
-            "LegacyOwnershipUnresolved: graph {graph_id:?}; explicit legacy ownership adoption is required before mutation. Adoption is not available in this milestone; preserve the original run and use status/inspect/export for read-only access."
+            "LegacyOwnershipUnresolved: graph {graph_id:?}; explicit legacy ownership adoption is required before mutation. Run `meshloop workspace adopt` and keep this run at its current location until that adoption is verified."
+        ));
+    }
+    if bound {
+        return Err(format!(
+            "LegacyOwnershipUnresolved: graph {graph_id:?}; legacy producers cannot mutate a bound run."
         ));
     }
     Ok(())

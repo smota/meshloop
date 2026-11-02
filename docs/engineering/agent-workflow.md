@@ -18,7 +18,7 @@ repository. The generic AgentFlow process is in [`docs/agent-workflow.md`](../ag
 | Engineering execution | Meshloop, built from this checkout |
 | Durable decisions | [ADRs](../architecture/adr/README.md) |
 | Delivered history | [Product log](../product/product-log.md), [implementation status](implementation-status.md), PRs |
-| Scratch, plans, run state | Ignored `.agent-runs/`, `.meshloop/`, `.meshloop-worktrees/` |
+| Scratch, plans, run state | Ignored `.agent-runs/`, `.meshloop/` (including `.meshloop/worktrees/`), and legacy `.meshloop-worktrees/` |
 
 ## Backlog rules
 

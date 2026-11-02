@@ -2488,7 +2488,7 @@ fn cleanup_recovery_crash_points_and_disagreement() {
                 None,
             )
             .digest;
-            let interrupted = apply_cleanup(scope(), &digest, Some(fault)).unwrap();
+            let interrupted = apply_cleanup(scope(), &digest, Some(fault), None).unwrap();
             assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
             assert!(!interrupted.apply);
             assert_eq!(path.exists(), fault == CleanupFault::AfterIntent);
@@ -2509,7 +2509,7 @@ fn cleanup_recovery_crash_points_and_disagreement() {
                     std::fs::rename(&admin, f.base.join("saved-admin")).unwrap();
                 }
             }
-            let result = apply_cleanup(scope(), &digest, None).unwrap();
+            let result = apply_cleanup(scope(), &digest, None, None).unwrap();
             if disagree {
                 assert_eq!(result.status, "recovery-required");
                 assert!(!result.apply);
@@ -2609,7 +2609,7 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
         )
         .digest;
         if locked {
-            assert!(apply_cleanup(scope(), &digest, None).is_err());
+            assert!(apply_cleanup(scope(), &digest, None, None).is_err());
             let conn = Connection::open(&f.ledger).unwrap();
             let steps: Vec<String> = conn
                 .prepare("SELECT step FROM cleanup_journal ORDER BY step")
@@ -2621,10 +2621,10 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
             assert_eq!(steps, ["blocked", "intent"]);
         } else {
             let interrupted =
-                apply_cleanup(scope(), &digest, Some(CleanupFault::AfterIntent)).unwrap();
+                apply_cleanup(scope(), &digest, Some(CleanupFault::AfterIntent), None).unwrap();
             assert_eq!(interrupted.status, "interrupted", "{interrupted:?}");
             std::fs::write(paths[0].join("protected.txt"), "dirty").unwrap();
-            let result = apply_cleanup(scope(), &digest, None).unwrap();
+            let result = apply_cleanup(scope(), &digest, None, None).unwrap();
             assert!(!result.apply);
             assert_eq!(result.status, "recovery-required");
             assert_eq!(

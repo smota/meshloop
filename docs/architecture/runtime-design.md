@@ -63,13 +63,15 @@ admit before planner ownership, process termination, review pack creation or rev
 invocation. Pre-v7 ledgers return `SchemaUpgradeRequired` from this preflight: an
 explicit writer schema migration is required first; mutation commands do not perform
 that migration implicitly. Migration does not adopt ownership. Refusals identify
-the original graph and require explicit ownership adoption, unavailable in this
-milestone. Status, inspect and export remain readable; Git export retains its
+the original graph. `meshloop workspace adopt` pins a verified legacy generation
+in place and does not move that run. Unverified, missing, and unknown artifacts
+stay reported and untouched. Status, inspect and export remain readable; Git export retains its
 existing bound-run restriction and does not reject unresolved legacy markers.
 Fresh schema7 unmarked, unbound runs keep the existing legacy path.
 This is a snapshot admission check, not a cross-process fence or complete exclusion
 of ownership changes after the check. It does not activate generations, implement
-successful bound producers, adoption or safe cleanup, or complete S3.
+successful bound producers, or complete S3. Digest-bound cleanup and verified
+adoption are separate workspace commands.
 
 ### Bounded provisional planner producer (issue #74)
 
@@ -91,7 +93,7 @@ The selected existing root is registered without adopting artifacts. Missing roo
 parents use one retained registry intent containing the full relative suffix before
 any directory creation. Reparse ancestors and ambiguous partially created trees
 are refused and retained for reconciliation; automatic recovery is not implemented.
-The current default root and explicit configuration behavior are preserved.
+New runs use `<repo>/.meshloop/worktrees/<run-id>` after a fail-closed Git layout probe. Existing runs stay on their registered roots. `--worktree-base` and `[workspace] root` select an explicit root and do not relocate an existing run.
 Windows canonical drive/UNC prefixes are converted only after identity and
 containment validation so native Git can consume equivalent absolute paths.
 

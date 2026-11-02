@@ -52,7 +52,7 @@ flowchart TB
 - **70% to 90% AST Context Reduction:** Strips function bodies while preserving signatures, types, and interfaces across 7 languages (*Rust, TS/JS, Python, Go, C#, PHP, C++*).
 - **Prompt Cache Alignment:** Byte-identical static prefix normalization maximizes provider KV-cache reuse above **80%**.
 - **Deterministic Lyapunov Convergence ($\phi$):** Diagnostically bounds self-repair attempts; rolls back code via `git reset --hard` if regressions occur and aborts on oscillation cycles.
-- **Fail-Closed Workspace Isolation:** Every task attempt executes in `.meshloop-worktrees/<task-id>`, keeping the working branch pristine until explicit human integration (`meshloop integrate --into`).
+- **Fail-Closed Workspace Isolation:** New runs use `<repo>/.meshloop/worktrees/<run-id>` after a Git layout probe. Existing runs stay pinned. Override with `--worktree-base` or `[workspace] root`. The working branch stays pristine until explicit human integration (`meshloop integrate --into`).
 
 ### 2. High-Performance Architecture
 - **Sub-Millisecond Symbol Retrieval:** Quantized 64-dim Fast Walsh-Hadamard Transform (FWHT) indexing searches signatures in $< 500\mu\text{s}$ with **8x memory compression**.

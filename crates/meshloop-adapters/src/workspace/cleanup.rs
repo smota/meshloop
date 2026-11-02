@@ -226,7 +226,7 @@ fn location_root(
     }
 }
 
-fn join_relative(root: &Path, relative: &RelativePath) -> PathBuf {
+pub(crate) fn join_relative(root: &Path, relative: &RelativePath) -> PathBuf {
     let mut path = root.to_path_buf();
     for part in relative.as_str().split('/') {
         path.push(part);
@@ -234,14 +234,14 @@ fn join_relative(root: &Path, relative: &RelativePath) -> PathBuf {
     path
 }
 
-enum PathProbe {
+pub(crate) enum PathProbe {
     Reparse { symlink: bool },
     Missing,
     Inaccessible,
     Present,
 }
 
-fn probe_path(path: &Path) -> PathProbe {
+pub(crate) fn probe_path(path: &Path) -> PathProbe {
     if path.as_os_str().is_empty() {
         return PathProbe::Inaccessible;
     }
@@ -301,7 +301,7 @@ fn canonical_directory_or_file(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-fn common_dir(checkout: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(checkout: &Path) -> Option<PathBuf> {
     let bytes = git_ok(
         checkout,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -542,6 +542,7 @@ pub fn apply_cleanup(
     scope: InventoryScope<'_>,
     digest: &str,
     fault: Option<CleanupFault>,
+    only: Option<&str>,
 ) -> Result<CleanupApply, meshloop_engine::ports::StoreError> {
     use meshloop_domain::cleanup::CleanupEligibility;
     use rusqlite::{Connection, params};
@@ -665,7 +666,11 @@ pub fn apply_cleanup(
         .iter()
         .zip(&observed.observations)
         .filter(|(e, _)| {
-            bound.candidates.iter().any(|c| {
+            only.is_none_or(|id| {
+                e.lifecycle_id
+                    .as_ref()
+                    .is_some_and(|value| value.as_str() == id)
+            }) && bound.candidates.iter().any(|c| {
                 c.lifecycle_id == e.lifecycle_id
                     && c.source == e.source
                     && c.location == e.location

@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod adoption;
 mod cleanup;
 mod inventory;
+pub use adoption::apply_adoption;
 pub use cleanup::{CleanupFault, apply_cleanup, observe_cleanup};
-pub use inventory::{InventoryScope, discover_inventory};
+pub use inventory::{GraphOutcome, InventoryScope, discover_inventory, graph_outcomes};
 mod ledger;
 #[cfg(test)]
 mod tests;
