@@ -21,3 +21,28 @@ AGENTS.md and relevant linked documents, and verify that it actually does so bef
 assigning implementation. This is a manual session practice, not an AFD discovery claim.
 Resolve missing AFD contracts upstream as a separate scoped change. Do not equate Agy
 with Antigravity or invent a Grok instruction filename.
+
+## Quota windows
+
+Meshloop does not call a vendor quota API. Each selected harness CLI was checked for a
+remaining-window command. None expose one, so QACR keeps the local cooldown breaker and
+does not invent numeric limits.
+
+| Harness | Vendor quota window |
+|---|---|
+| codex | absent |
+| claude-code | absent |
+| pi | absent |
+| grok | absent |
+| agy | absent |
+
+`grok usage` prints persisted token and cost totals for one session id. That output is
+session accounting. Meshloop leaves the command unused and does not treat those totals
+as a remaining window.
+
+Routing behavior for the local record:
+
+- A missing quota record stays selectable.
+- A present Open breaker inside its cooldown is filtered out
+  (`candidate_in_open_cooldown_is_filtered_out`).
+- A stale Open breaker whose cooldown has elapsed is selectable again.
