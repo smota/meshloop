@@ -399,6 +399,7 @@ impl SqliteStore {
             database_handle: Some(handle),
             database_identity: Some(identity),
             session_spend: meshloop_engine::ports::SessionSpendLedger::new(0, 1),
+            telemetry: crate::telemetry::Transitions::default(),
         }))
     }
     pub(crate) fn reject_bound_graph(&self, graph: &str) -> Result<(), StoreError> {
@@ -852,7 +853,15 @@ impl RuntimeLedger for SqliteStore {
                 },
             )?;
         }
-        tx.commit().map_err(error)
+        tx.commit().map_err(error)?;
+        for record in &a.events {
+            crate::telemetry::committed_transition(
+                &mut self.telemetry,
+                record,
+                Some(g.id.as_str()),
+            );
+        }
+        Ok(())
     }
     fn select_revision(
         &mut self,
@@ -973,7 +982,13 @@ impl RuntimeLedger for SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
         event(&tx, f, e)?;
-        tx.commit().map_err(error)
+        tx.commit().map_err(error)?;
+        crate::telemetry::committed_transition(
+            &mut self.telemetry,
+            &e.record,
+            Some(e.scope.generation_id.as_str()),
+        );
+        Ok(())
     }
     fn reserve_attempt(
         &mut self,

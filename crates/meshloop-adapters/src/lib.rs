@@ -10,3 +10,5 @@ pub mod process;
 pub mod redact;
 pub mod store;
 pub mod workspace;
+
+pub mod telemetry;

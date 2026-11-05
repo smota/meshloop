@@ -236,5 +236,12 @@
       "grantsPublicationOrMergePower": false
     },
     "confirmedDigest": "722431460a1fc9a9f234b73063a9af228b875987e84f32cfd646700320149e48"
+  },
+  "observability": {
+    "enabled": true,
+    "offline": false,
+    "otlpEndpoint": "http://127.0.0.1:24318",
+    "serviceName": "meshloop-delivery",
+    "maxQueueSize": 256
   }
 }

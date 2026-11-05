@@ -28,6 +28,14 @@ use meshloop_engine::run_loop::{OrchestratorError, RunLoop, RunStatus, idle_exit
 use crate::args::{Command, Invocation};
 
 fn main() -> ExitCode {
+    let operation = meshloop_adapters::telemetry::Operation::start("cli.operation");
+    let code = run_main();
+    operation.finish(code == ExitCode::SUCCESS);
+    meshloop_adapters::telemetry::flush();
+    code
+}
+
+fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args::parse(&args) {
         Ok(inv) => dispatch(inv),
@@ -1069,9 +1077,11 @@ fn cmd_run(
             }
         }
     }
+    let telemetry_start = std::time::Instant::now();
     match saga.loop_until_idle() {
         Ok(reason) => {
             let status = saga.status(&gid).ok();
+            observe_graph_loop("graph.run", status.as_ref(), telemetry_start.elapsed());
             let git_export = saga.export_git_metadata(&gid).ok().flatten();
             if json {
                 let row = saga.store.load_run(&gid).ok().flatten();
@@ -1103,6 +1113,11 @@ fn cmd_run(
             ExitCode::from(code as u8)
         }
         Err(e) => {
+            meshloop_adapters::telemetry::record(
+                "graph.run",
+                "error",
+                Some(telemetry_start.elapsed().as_secs_f64()),
+            );
             if json {
                 println!(
                     "{}",
@@ -1509,9 +1524,11 @@ fn cmd_resume(
             }
             driver_liveness::panic_if_requested(fixture_only);
         }
+        let telemetry_start = std::time::Instant::now();
         match saga.resume(&id, retry, restart) {
             Ok(reason) => {
                 let status = saga.status(&id).ok();
+                observe_graph_loop("graph.resume", status.as_ref(), telemetry_start.elapsed());
                 let code = status
                     .as_ref()
                     .map(|s| idle_exit_code(reason, s))
@@ -1529,6 +1546,11 @@ fn cmd_resume(
                 }
             }
             Err(e) => {
+                meshloop_adapters::telemetry::record(
+                    "graph.resume",
+                    "error",
+                    Some(telemetry_start.elapsed().as_secs_f64()),
+                );
                 if tracked.is_some() {
                     driver_liveness::finish(saga.store, &id, 1);
                 }
@@ -1642,6 +1664,17 @@ fn print_driver(saga: &RunLoop<'_>, status: &RunStatus) {
     if let Some(report) = driver_liveness::observe(saga.store, saga.processes, status) {
         print!("{}", report.text());
     }
+}
+
+fn observe_graph_loop(operation: &str, status: Option<&RunStatus>, duration: std::time::Duration) {
+    let outcome = match status.map(compute_overall_status) {
+        Some("completed") => "complete",
+        Some("failed") => "failure",
+        Some("cancelled") => "cancelled",
+        Some(_) => "idle",
+        None => "error",
+    };
+    meshloop_adapters::telemetry::record(operation, outcome, Some(duration.as_secs_f64()));
 }
 
 fn compute_overall_status(s: &meshloop_engine::run_loop::RunStatus) -> &'static str {
