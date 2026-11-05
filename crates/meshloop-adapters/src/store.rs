@@ -22,6 +22,7 @@ pub struct SqliteStore {
     pub(crate) database_identity: Option<meshloop_domain::workspace::NativeIdentity>,
     /// In-process oracle budget. Not loaded or written by schema SQL.
     pub(crate) session_spend: SessionSpendLedger,
+    pub(crate) telemetry: crate::telemetry::Transitions,
 }
 
 impl SqliteStore {
@@ -36,6 +37,7 @@ impl SqliteStore {
             database_handle: None,
             database_identity: None,
             session_spend: SessionSpendLedger::new(0, 1),
+            telemetry: crate::telemetry::Transitions::default(),
         })
     }
 
@@ -64,6 +66,7 @@ impl SqliteStore {
             database_handle: Some(database_handle),
             database_identity: Some(database_identity),
             session_spend: SessionSpendLedger::new(0, 1),
+            telemetry: crate::telemetry::Transitions::default(),
         })
     }
 
@@ -129,6 +132,7 @@ impl SqliteStore {
         }
 
         tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
+        crate::telemetry::committed_transition(&mut self.telemetry, &record, None);
         Ok(())
     }
 
@@ -391,6 +395,7 @@ impl EventLog for SqliteStore {
                 ],
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
+        crate::telemetry::committed_transition(&mut self.telemetry, &record, None);
         Ok(())
     }
 
@@ -582,6 +587,9 @@ impl RunStore for SqliteStore {
         }
 
         tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
+        for record in events {
+            crate::telemetry::committed_transition(&mut self.telemetry, record, None);
+        }
         Ok(())
     }
 
@@ -780,6 +788,7 @@ impl RunStore for SqliteStore {
 
     fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError> {
         self.reject_bound_graph(graph_id)?;
+        self.telemetry.clear_graph(graph_id);
         self.conn
             .execute(
                 "DELETE FROM evidence WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE graph_id = ?1)",
