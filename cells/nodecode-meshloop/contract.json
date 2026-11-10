@@ -1,0 +1,67 @@
+{
+  "schema": "nodecode-meshloop/cli-contract/1",
+  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on a fixture repository and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null.",
+  "envelope": [
+    { "path": "ok", "type": "boolean" },
+    { "path": "command", "type": "string" }
+  ],
+  "cases": {
+    "error": {
+      "argv": ["inspect", "--graph", "contract-missing-graph"],
+      "ok": false,
+      "fields": [
+        { "path": "error", "type": "string" }
+      ]
+    },
+    "doctor": {
+      "argv": ["doctor"],
+      "ok": true,
+      "fields": [
+        { "path": "data.config", "type": "string?" },
+        { "path": "data.harnesses_ready", "type": "boolean" },
+        { "path": "data.harnesses", "type": "array" },
+        { "path": "data.harnesses[].name", "type": "string" },
+        { "path": "data.harnesses[].dispatchable", "type": "boolean" },
+        { "path": "data.harnesses[].reason", "type": "string?" },
+        { "path": "data.store_ignored", "type": "boolean" },
+        { "path": "data.warnings", "type": "array" }
+      ]
+    },
+    "status_empty": {
+      "argv": ["status"],
+      "ok": true,
+      "fields": [
+        { "path": "data.runs", "type": "array" }
+      ]
+    },
+    "status": {
+      "argv": ["status"],
+      "ok": true,
+      "fields": [
+        { "path": "data.graph_id", "type": "string" },
+        { "path": "data.plan_state", "type": "string" },
+        { "path": "data.summary.attempts", "type": "integer" },
+        { "path": "data.summary.retries", "type": "integer" },
+        { "path": "data.nodes", "type": "array" },
+        { "path": "data.nodes[].id", "type": "integer" },
+        { "path": "data.nodes[].state", "type": "string" },
+        { "path": "data.nodes[].waiting_for", "type": "string?" },
+        { "path": "data.nodes[].description", "type": "string" }
+      ]
+    },
+    "inspect": {
+      "argv": ["inspect"],
+      "ok": true,
+      "fields": [
+        { "path": "data.session_id", "type": "string" },
+        { "path": "data.status", "type": "string" },
+        { "path": "data.plan_state", "type": "string" },
+        { "path": "data.nodes", "type": "array" },
+        { "path": "data.nodes[].id", "type": "integer" },
+        { "path": "data.nodes[].state", "type": "string" },
+        { "path": "data.nodes[].waiting_for", "type": "string?" },
+        { "path": "data.nodes[].description", "type": "string" }
+      ]
+    }
+  }
+}
