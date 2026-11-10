@@ -263,7 +263,20 @@ CI. Prompt-construction tests assert no context outside a node's declared depend
 leaks into its prompt. A fixture harness returning a clean exit code with a broken worktree
 (or the reverse) must prove the worktree diff, not exit code, gates `verifying`.
 
+> **Amendment 2026-11-10 (ADR 0039, accepted 2026-11-10; implementation pending #147–#153).** Native
+> attempts do not pass through `HarnessCapabilities`. Meshloop does not call `invoke`,
+> `try_collect` or `cancel` for them, and the port is unchanged. The worktree-diff rule
+> above applies to native attempts without exception. See §3 "Native dispatch (ADR 0039)".
+
 ## 3. Execution, transport, isolation, and recovery (ADR 0005)
+
+> **Amendment 2026-11-10 (ADR 0039, accepted 2026-11-10; implementation pending #147–#153).** This
+> section's subprocess-only rule stays in force for every attempt except the native worker
+> attempts described in "Native dispatch (ADR 0039)" at the end of this section. The
+> subprocess-only rule is the v1 "CLI-subprocess only" statement, which became direct CLI
+> workers under ADR 0022. Herdr itself was removed by ADR 0022. Ownership, cancellation
+> and liveness commitments below apply to subprocess attempts only. The text below is
+> otherwise unchanged.
 
 **Herdr transport.** `HerdrSessionPort` (meshloop-engine) exposes `spawn`, `status`,
 `cancel`, `cleanup`. v1 ships exactly one implementation: CLI-subprocess invocation of the
@@ -300,6 +313,205 @@ repositories. Fault-injection for crash, timeout, stale state, partial completio
 exhausted retries, including killing the Meshloop process itself mid-`running` and
 mid-`accepted`-to-`integrated`, asserting recovery reaches `blocked` or a correctly new
 attempt — never a duplicate integration.
+
+### Native dispatch (ADR 0039)
+
+Accepted with ADR 0039 on 2026-11-10. This is the mechanism for that record; it is not yet
+implemented, and #147 to #150 implement it.
+
+**Eligibility.** Routing (§5) runs unchanged. A run-loop worker node is native-eligible
+only when all of the following hold:
+- the routed harness has `dispatch = "native"`;
+- its `kind` is set and equals the origin harness;
+- an origin session is set;
+- that `kind` is in the proven set (below).
+
+`kind` is optional in config (`HarnessConfig::kind`, config.rs:117-118), and a harness
+without one is never eligible. `doctor` refuses `native` for an unproven or unset kind, and
+`dispatch_warnings` reports a setting that can never apply. Planner, reviewer and
+model-review dispatch are never native.
+
+**Proven set.** The proven set is a compiled-in, read-only capability table in the
+composition root, for example `crates/meshloop-cli/src/native_support.rs`. Each entry has:
+- the harness `kind`;
+- the version range observed in the live proof;
+- a link to the #152 evidence and its date.
+
+How the table is maintained and used:
+- It is mirrored in docs/engineering/harnesses.md "Native dispatch support".
+- `doctor` and `dispatch_warnings` read it. `doctor` warns when a probed version is
+  outside the observed range.
+- It is not configurable through `meshloop.toml`. An operator cannot certify a harness.
+- It changes only by pull request with new live evidence.
+- Nodecode additionally needs an ADR 0038 amendment.
+- The table records observed capability. It is not a per-harness CLI flag, so ADR 0003's
+  rule that Meshloop ships no per-harness flags is unaffected.
+
+Which command acts on an eligible node:
+- **`meshloop next`** parks eligible nodes. It is the only command that does.
+- **`run`, `resume` and detached drivers** leave eligible nodes `ready`. They return
+  `AwaitingNativePull`, or `AwaitingNativeReport` when only parked attempts remain, and
+  `loop_until_idle` returns on both instead of re-ticking.
+- **`next`** returns `AwaitingSubprocessDriver` when the only ready nodes left are routed
+  to subprocess dispatch.
+
+**`meshloop next [--graph <id>] [--wait-seconds <n>] --json`.** It is origin-bound and
+never starts a subprocess worker, so it never holds an owned process when it returns.
+Subprocess-routed ready nodes are left for `run` or `resume`. `next` refuses while another
+driver is live on the graph: one ticking writer at a time. `report` only appends, so it is
+allowed while another driver is live. Steps, in order:
+1. For every parked attempt past `deadline_at`, append `ParkDeadlinePassed`.
+2. Run the loop steps that need no subprocess worker: verify reported attempts, merge,
+   promote. Stop between ticks when `--wait-seconds` expires. The default is finite and
+   set by #148. One verification already running is not interrupted, so `next` can
+   overrun `--wait-seconds` by up to the check timeout (`task_timeout`, run_loop.rs:1616).
+3. For each eligible ready node within `max_concurrent_workers` (parked attempts occupy
+   slots):
+   1. If the task's previous attempt used the other mode, append `DispatchModeChanged`
+      (`ready → ready`, reason required).
+   2. Create the attempt id, worktree, branch and `.meshloop-prompt-<attempt>` file.
+   3. Persist on the attempt: mode, origin harness and session, requested harness and
+      model, base revision, `parked_at`, and
+      `deadline_at = parked_at + [limits] task_timeout_seconds`.
+   4. Record the expected-state baseline: the integrate HEAD, the origin checkout HEAD,
+      and the origin checkout's tracked-file porcelain digest.
+   5. Append `AttemptParked`. The attempt row and the event are written in one store
+      transaction.
+
+Output: every parked, unreported attempt bound to this origin, with `task_id`,
+`attempt_id`, `role` (`meshloop:worker`), `prompt_path`, `worktree_path`,
+`base_revision`, `harness`, `model_ref` and `deadline_at`. It also carries the idle
+reason, or `WaitBoundReached` when the bound expired. Repeating `next` returns the same
+items and never re-parks them.
+
+**`meshloop report --task <id> --attempt <id> [--note <text> | --note-file <path>] [--model <name>] --json`.**
+1. Refuse, appending nothing, when any of these holds:
+   - the origin differs from the attempt's recorded origin;
+   - the attempt is not the task's latest;
+   - a `NativeReportReceived` already exists for the attempt.
+2. If the attempt is overdue, append `ParkDeadlinePassed` first.
+3. Append `NativeReportReceived` and set `ended_at`.
+4. Store the note redacted and truncated to the 2048-byte outcome limit, as a
+   `native-report` row that never counts toward a pass. Store the reported model beside
+   the requested one.
+5. On `failed` or `cancelled`, the event is stored, the state is unchanged, and nothing is
+   verified. `LiveWorkerSettled` is never used for native attempts.
+
+The origin binding is an unauthenticated claim, like `--as`.
+
+**Verification.** It runs on the next tick through the no-in-memory-outcome path
+(`recover_verifying` / `finish_orphaned_verification`). That path gets a native branch:
+1. **Expected-state check.**
+   - The integrate worktree's HEAD must equal the last ledger-recorded
+     `IntegrationOwnerMerge` result, or the park baseline if there is none, and its
+     porcelain must be clean.
+   - The origin checkout's HEAD must equal the park baseline, or the result of a
+     ledger-recorded Meshloop integrate event since park. Its tracked-file porcelain digest
+     must equal the park baseline.
+   - Any other difference fails the attempt and lists the paths.
+   - Today neither `merge_accepted` nor `integrate_into` records the resulting HEAD
+     (run_loop.rs:1347-1355, 2644-2652). #149 adds it.
+2. **Snapshot.** `commit_all` in the attempt worktree. The resulting SHA is stored as the
+   attempt's `verified_revision`.
+3. **Checks.** `git-diff` against the recorded base (honouring `empty_diff_ok`),
+   `allowed-paths`, and the configured verify command, all bound to `verified_revision`.
+4. **Re-read.** Re-read the attempt worktree's HEAD and porcelain. Any change since step 2
+   fails the attempt with reason `worktree changed during verification`.
+5. **No repair.** No repair runs, heavy or micro (ADR 0039 decision 6). A failure goes to
+   the retry budget.
+6. **Feedback.** Record feedback under `(harness, "unverified", tier, native)`.
+7. **Gate.** The unchanged gate path follows: ADR 0037 verify gate or
+   `meshloop accept --as`.
+
+**Integration of a native attempt.** Integration uses `verified_revision`, never the
+branch tip.
+- `accept` refuses when the attempt branch tip differs from `verified_revision`.
+- `merge_accepted` merges `verified_revision`. If the tip differs, it appends
+  `StaleBaseDetected` (accepted → failed). Today it merges the branch ref
+  (run_loop.rs:1344-1346).
+- `prepare_deliverable` cherry-picks `base..verified_revision`. If the tip differs, it
+  refuses. Today it picks up to the branch tip (run_loop.rs:2767-2768).
+
+Required test: "commit after report is not integrated". The same binding is recommended,
+but not required by ADR 0039, for subprocess attempts.
+
+**Cancel, attestation, restart, recovery.**
+- **Cancel.** `meshloop cancel` on `awaiting-report` appends `Cancel` with reason
+  `native: tracking stopped; sub-agent not stopped by Meshloop`. It calls no harness
+  method and uses no recorded PID. Its JSON names the attempt and the origin.
+- **Attestation.** `meshloop cancel --task <id> --attempt <id> --attest-stopped --as <identity>`
+  appends `NativeStopAttested` for that native attempt.
+  - It is recorded as a self-transition on `failed`, `cancelled`, `accepted` or
+    `integrated`. When the attempt is still parked, `Cancel` is appended first.
+  - The executor is the identity.
+  - It covers only the named attempt.
+- **Cleanup.** A native attempt's worktree is eligible for cleanup (ADR 0033, #142) only
+  in one of two cases:
+  - a `NativeStopAttested` event exists;
+  - its `verified_revision` is landed and the worktree still equals it at cleanup
+    preview.
+
+  Otherwise it is liveness-uncertain, and cleanup is blocked.
+- **Restart.** `resume --restart` refuses while any attempt is `awaiting-report`.
+- **Recovery.** `crash_fail` and `reattach_running` consider only `running`. A parked
+  attempt is reconciled only by report, deadline or cancel.
+
+**Status.** Read-only (ADR 0034). For each native attempt, `status` and `inspect` show:
+- `dispatch_mode`, state `awaiting-report`, `waiting_for: native_report`;
+- origin harness and session, `parked_at`, `deadline_at`, `overdue`;
+- `report` (`pending`, `received` or `late`);
+- `model_ref`, `model_reported` and `verified_revision`;
+- `live: NotObservable`;
+- `limits`: `no_owned_process`, `no_cancel_proof`, `no_liveness`,
+  `no_detached_execution`, `inherits_session_permissions`.
+
+**Validation scenarios.** All are fixture-only and offline:
+- park, report, deadline, cancel, attestation;
+- late report on `failed` or `cancelled`;
+- wrong-origin refusal and a duplicate report;
+- crash between park and report, then `resume`;
+- a report claiming success while checks fail;
+- an out-of-worktree change, versus a Meshloop merge that is not flagged;
+- a commit in the origin checkout during park that fails the attempt, versus a
+  ledger-recorded Meshloop integrate that does not;
+- a commit after report that is not integrated;
+- an empty diff;
+- a mode change event;
+- the `--wait-seconds` bound;
+- an unproven or unset kind refused by `doctor`, and a probed version outside the
+  observed range warned about;
+- `AwaitingSubprocessDriver` from `next`, and `report` accepted while another driver is
+  live;
+- refusal of a ledger with an unknown state or event.
+
+Live proof per harness is #152, not CI.
+
+### Sizing at 45ef6a4 (ADR 0039)
+
+This evidence checks the engine estimate on goal #145. "Confirmed" means the code matched
+the estimate, and "correction" means it did not.
+
+| Fact | Evidence | Effect |
+|---|---|---|
+| The tick does not block: dispatch returns `Running`, and later ticks poll | run_loop.rs:1560 (`Ok(None)` arm), 1055-1144 (`try_collect` at 1105) | Confirmed: a new state plus arms, no loop restructuring |
+| `orchestrator.rs` is not on the live path | `dispatch_with_fallback` (orchestrator.rs:35) is called only by its tests (161, 192, 216); live fallback is `maybe_fallback` (run_loop.rs:2151) | Correction: no change there |
+| A PID-less `Running` attempt is failed on resume | `attempt_driver_dead` returns true for `pid: None` (run_loop.rs:2300); `crash_fail` (2322-2331) | Correction: a new task state is needed in domain, store and both status projections (`status_snapshot` run_loop.rs:2894, `workspace/read.rs`) |
+| The foreground loop spins on live workers | run_loop.rs:2218 | New idle reasons are needed |
+| Heavy repair blocks inside the tick | `dispatch_repair_round` invoke then blocking `collect` (run_loop.rs:1670-1675) | No in-attempt heavy repair for native attempts |
+| The orphan verification path verifies from the worktree alone | `verify_deferred` → `recover_verifying` / `finish_orphaned_verification` (run_loop.rs:1797-1850, 2340-2474) | Reusable, but it runs no repair, heavy or micro, and records feedback under the requested `model_ref` with no mode (run_loop.rs:2456); it needs a native branch |
+| Integration uses the branch tip, not the verified revision | `merge_accepted` (run_loop.rs:1344-1346); `prepare_deliverable` (2767-2768); `integrate_into` records no event (2644-2652) | Verified-revision binding is needed for native attempts |
+| No per-node timeout exists | `TaskNode` (task_graph.rs:50-73); `[limits] task_timeout_seconds` (config.rs:50) → `RunLimits::task_timeout` (run_loop.rs:85, compose.rs:265) | Correction: the deadline uses this value, persisted at park |
+| The origin is not persisted | `Origin` (origin.rs:6-9); `attempts` columns (workspace/schema.rs:42-55) | Confirmed: a schema migration is needed |
+| Unknown names fail closed | `parse_state` / `parse_event` (store.rs:199-237) | Older binaries refuse new ledgers |
+| Late harness exit is legal only on `failed` | state.rs:96; `LiveWorkerSettled` state.rs:94 | Native needs its own late-report arms |
+| Nodes have no role field | `TaskNode` (task_graph.rs:50-73); reviewers are `meshloop orchestrate` leaves (orchestrate.rs:1-3) | Correction: "builder nodes only" means run-loop worker attempts |
+| MCP wraps the CLI with an unbounded wait | `dispatch_tool` (mcp.rs:202-235; `wait_with_output` at 235) | Confirmed: the CLI is the contract; `next` needs `--wait-seconds` |
+| Harness `kind` is optional | config.rs:117-118 | An unset kind is never eligible |
+| `Origin::blocks_worker` is unused on the live path | origin.rs:33, referenced only by its own test | No conflicting guard |
+| The run loop mutates only unbound runs | `require_legacy_mutation` (run_loop.rs:356-372) | Native mode follows the same producer path |
+
+Effort L for #147 stands. The surface also includes `state.rs`, store parse and migration
+(attempt columns plus a `routing_feedback` mode column), and both status projections.
 
 ## 4. Verification and persistence (ADR 0007)
 

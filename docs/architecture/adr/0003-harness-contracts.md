@@ -10,6 +10,8 @@
 - Supersedes: none
 - Superseded by: none
 
+> **Scope narrowed by [ADR 0039](0039-native-sub-agent-dispatch.md) (accepted 2026-11-10; implementation pending).** Once native dispatch ships, dispatch through the `HarnessCapabilities` port (probe/invoke/cancel/collect) applies to subprocess attempts only. Native worker attempts are parked and reported by the origin session without `invoke`, `collect` or `cancel`. The worktree diff stays the verified deliverable for every mode, and ADR 0007 is unchanged. This note does not change this record's decision for subprocess attempts.
+
 ## Context and constraints
 Verifying what a harness can do, and turning a task into a concrete dispatched unit of
 work, are one contract, not two: nothing can be routed or dispatched without both.
