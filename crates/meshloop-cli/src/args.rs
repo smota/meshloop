@@ -68,6 +68,8 @@ pub enum Command {
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
         fixture_only: bool,
+        /// Start the resume as a detached driver, as `run --detach` does; needs `--graph`.
+        detach: bool,
     },
     Cancel {
         driver: Option<String>,
@@ -270,6 +272,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--db"),
             (true, "--worktree-base"),
             (false, "--fixture-only"),
+            (false, "--detach"),
         ],
         "cancel" => &[
             (true, "--driver"),
@@ -520,6 +523,10 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
             if retry && restart {
                 return Err("meshloop:resume accepts either --retry or --restart, not both".into());
             }
+            let detach = has_flag(rest, "--detach");
+            if detach && flag_value(rest, "--graph").is_none() {
+                return Err("meshloop:resume --detach requires --graph <id>".into());
+            }
             Ok(Command::Resume {
                 graph: flag_value(rest, "--graph"),
                 retry,
@@ -528,6 +535,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
                 fixture_only: has_flag(rest, "--fixture-only"),
+                detach,
             })
         }
         Some(v) if v == "cancel" => {
@@ -780,7 +788,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop plan --objective \"<text>\" [--intent-file <path>] [--config] [--out] [--json]\n\
      \x20 meshloop review-plan --plan <path> --accept|--decline|--adjust [--reason] [--as] [--json]\n\
      \x20 meshloop run --plan <path> [--accept-plan] [--reset] [--fixture-only] [--json]\n\
-     \x20 meshloop resume [--graph <id>] [--retry|--restart] [--json]\n\
+     \x20 meshloop resume [--graph <id>] [--retry|--restart] [--detach (needs --graph)] [--json]\n\
      \x20 meshloop status [--graph <id>|--drivers] [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
@@ -850,7 +858,7 @@ mod tests {
         "review-plan --adjust --reason r",
         "run --plan p --accept-plan --reset --config c --worktree-base w --db d --fixture-only --detach",
         "status --graph g --config c --db d",
-        "resume --graph g --retry --config c --db d --worktree-base w --fixture-only",
+        "resume --graph g --retry --config c --db d --worktree-base w --fixture-only --detach",
         "resume --restart",
         "cancel --session-id s --graph g --task 1 --config c --db d --worktree-base w",
         "inspect --session-id s --graph g --task 1 --config c --db d --attempts",
@@ -922,5 +930,21 @@ mod tests {
     #[test]
     fn prefixed_verb_form_is_validated_too() {
         assert!(parse(&argv("meshloop:status --bogus")).is_err());
+    }
+
+    #[test]
+    fn detached_resume_names_its_graph() {
+        let err = parse(&argv("resume --detach")).expect_err("must name the graph");
+        assert!(err.contains("--detach requires --graph"), "{err}");
+        match parse(&argv("resume --detach --graph g"))
+            .expect("parse")
+            .command
+        {
+            Command::Resume { detach, graph, .. } => {
+                assert!(detach);
+                assert_eq!(graph.as_deref(), Some("g"));
+            }
+            _ => panic!("expected resume"),
+        }
     }
 }

@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use meshloop_domain::capability::{Breaker, QuotaState};
 use meshloop_domain::evidence::{AttemptId, CandidateRef, Evidence};
-use meshloop_domain::state::{Event, PlanState, TaskState};
+use meshloop_domain::state::{Event, PlanState, TaskState, transition};
 use meshloop_domain::task_graph::TaskId;
 use meshloop_engine::ports::{
     AttemptRow, DriverLiveness, EventLog, EvidenceStore, FeedbackCounters, FeedbackKey, QuotaStore,
@@ -90,22 +90,7 @@ impl SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| StoreError::Io(e.to_string()))?;
 
-        tx.execute(
-            "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                record.graph_id,
-                record.task_id.0,
-                record.attempt_id.map(|a| a.0),
-                format!("{:?}", record.from),
-                format!("{:?}", record.to),
-                format!("{:?}", record.event),
-                record.reason,
-                record.executor,
-                record.occurred_at,
-            ],
-        )
-        .map_err(|e| StoreError::Io(e.to_string()))?;
+        append_checked(&tx, &record)?;
 
         if let Some(row) = attempt {
             tx.execute(
@@ -194,6 +179,93 @@ impl SqliteStore {
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         crate::workspace::schema::migrate(conn)
     }
+}
+
+/// Run-table events a reader sees for `graph_id` (optionally one task), in append
+/// order. A run-loop restart moves earlier events into their generation; those rows
+/// are hidden here exactly as every reader hides them.
+fn visible_records(
+    conn: &Connection,
+    graph_id: &str,
+    task: Option<TaskId>,
+) -> Result<Vec<TransitionRecord>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at
+             FROM events WHERE graph_id = ?1 AND (?2 IS NULL OR task_id = ?2) AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) ORDER BY event_id ASC",
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![graph_id, task.map(|t| t.0)], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u32>(1)?,
+                r.get::<_, Option<u32>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (gid, tid, aid, from, to, ev, reason, executor, occurred) =
+            row.map_err(|e| StoreError::Io(e.to_string()))?;
+        out.push(TransitionRecord {
+            graph_id: gid,
+            task_id: TaskId(tid),
+            attempt_id: aid.map(AttemptId),
+            from: parse_state(&from)?,
+            to: parse_state(&to)?,
+            event: parse_event(&ev)?,
+            reason,
+            executor,
+            occurred_at: occurred,
+        });
+    }
+    Ok(out)
+}
+
+/// Compare-and-append for one run-table event (issue #167). The caller holds an
+/// immediate transaction, so the persisted state read here cannot change before the
+/// insert. The task's persisted state is the same per-task fold every reader uses.
+/// Refused, with nothing written, when `record.from` is not that state (another writer
+/// appended first) or `from + event` is not the recorded `to`. A task with no events
+/// yet starts from `record.from`, as the fold does.
+fn append_checked(conn: &Connection, record: &TransitionRecord) -> Result<(), StoreError> {
+    let history = visible_records(conn, &record.graph_id, Some(record.task_id))?;
+    let persisted = meshloop_engine::recovery::replay_tasks(&history)?
+        .get(&record.task_id)
+        .copied();
+    let legal = transition(record.from, record.event) == Ok(record.to);
+    if !legal || persisted.is_some_and(|state| state != record.from) {
+        return Err(StoreError::TransitionRefused {
+            task_id: record.task_id,
+            persisted,
+            from: record.from,
+            event: record.event,
+        });
+    }
+    conn.execute(
+        "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            record.graph_id,
+            record.task_id.0,
+            record.attempt_id.map(|a| a.0),
+            format!("{:?}", record.from),
+            format!("{:?}", record.to),
+            format!("{:?}", record.event),
+            record.reason,
+            record.executor,
+            record.occurred_at,
+        ],
+    )
+    .map_err(|e| StoreError::Io(e.to_string()))?;
+    Ok(())
 }
 
 fn parse_state(s: &str) -> Result<TaskState, StoreError> {
@@ -373,72 +445,26 @@ impl RoutingFeedbackStore for SqliteStore {
 }
 
 impl EventLog for SqliteStore {
+    /// Compare-and-append (issue #167): the record is checked against the task's
+    /// persisted state and inserted inside one `BEGIN IMMEDIATE` transaction, so no
+    /// other writer can append between the check and the insert.
     fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
         self.reject_bound_graph(&record.graph_id)?;
         if let Some(id) = record.attempt_id {
             self.reject_legacy_attempt(id)?;
         }
-        self.conn
-            .execute(
-                "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    record.graph_id,
-                    record.task_id.0,
-                    record.attempt_id.map(|a| a.0),
-                    format!("{:?}", record.from),
-                    format!("{:?}", record.to),
-                    format!("{:?}", record.event),
-                    record.reason,
-                    record.executor,
-                    record.occurred_at,
-                ],
-            )
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| StoreError::Io(e.to_string()))?;
+        append_checked(&tx, &record)?;
+        tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
         crate::telemetry::committed_transition(&mut self.telemetry, &record, None);
         Ok(())
     }
 
     fn records_for_graph(&self, graph_id: &str) -> Result<Vec<TransitionRecord>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at
-                 FROM events WHERE graph_id = ?1 AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) ORDER BY event_id ASC",
-            )
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![graph_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, u32>(1)?,
-                    r.get::<_, Option<u32>>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, String>(8)?,
-                ))
-            })
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (gid, tid, aid, from, to, ev, reason, executor, occurred) =
-                row.map_err(|e| StoreError::Io(e.to_string()))?;
-            out.push(TransitionRecord {
-                graph_id: gid,
-                task_id: TaskId(tid),
-                attempt_id: aid.map(AttemptId),
-                from: parse_state(&from)?,
-                to: parse_state(&to)?,
-                event: parse_event(&ev)?,
-                reason,
-                executor,
-                occurred_at: occurred,
-            });
-        }
-        Ok(out)
+        visible_records(&self.conn, graph_id, None)
     }
 }
 
@@ -568,22 +594,7 @@ impl RunStore for SqliteStore {
         .map_err(|e| StoreError::Io(e.to_string()))?;
 
         for record in events {
-            tx.execute(
-                "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    record.graph_id,
-                    record.task_id.0,
-                    record.attempt_id.map(|a| a.0),
-                    format!("{:?}", record.from),
-                    format!("{:?}", record.to),
-                    format!("{:?}", record.event),
-                    record.reason,
-                    record.executor,
-                    record.occurred_at,
-                ],
-            )
-            .map_err(|e| StoreError::Io(e.to_string()))?;
+            append_checked(&tx, record)?;
         }
 
         tx.commit().map_err(|e| StoreError::Io(e.to_string()))?;
@@ -1238,5 +1249,292 @@ mod tests {
         let loaded_attempt = store.load_attempt(AttemptId(10)).unwrap().unwrap();
         assert_eq!(loaded_attempt.pid, Some(12345));
         assert_eq!(loaded_attempt.harness.as_deref(), Some("claude"));
+    }
+
+    // Issue #167: compare-and-append.
+
+    fn rec(from: TaskState, event: Event, to: TaskState) -> TransitionRecord {
+        TransitionRecord {
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            attempt_id: Some(AttemptId(1)),
+            from,
+            to,
+            event,
+            reason: None,
+            executor: "meshloop".into(),
+            occurred_at: "0".into(),
+        }
+    }
+
+    /// Task 1 up to `Verifying`.
+    fn verifying(store: &mut SqliteStore) {
+        store
+            .append(rec(
+                TaskState::Pending,
+                Event::DependencySatisfied,
+                TaskState::Ready,
+            ))
+            .unwrap();
+        store
+            .append(rec(
+                TaskState::Ready,
+                Event::AttemptStarted,
+                TaskState::Running,
+            ))
+            .unwrap();
+        store
+            .append(rec(
+                TaskState::Running,
+                Event::HarnessExited,
+                TaskState::Verifying,
+            ))
+            .unwrap();
+    }
+
+    fn run_row(graph_id: &str) -> RunRow {
+        RunRow {
+            graph_id: graph_id.into(),
+            plan_state: PlanState::PlanAccepted,
+            run_base: "abc".into(),
+            integrate_ref: format!("meshloop/{graph_id}/integrate"),
+            plan_json: "{}".into(),
+            plan_id: "x".into(),
+            created_at: "0".into(),
+            review_note: None,
+        }
+    }
+
+    #[test]
+    fn append_refuses_a_stale_from_and_writes_nothing() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        verifying(&mut store);
+        store
+            .append(rec(
+                TaskState::Verifying,
+                Event::Cancel,
+                TaskState::Cancelled,
+            ))
+            .unwrap();
+        let before = store.event_count().unwrap();
+        let refused = store.append(rec(
+            TaskState::Verifying,
+            Event::DeterministicChecksFailed,
+            TaskState::Failed,
+        ));
+        assert_eq!(
+            refused,
+            Err(StoreError::TransitionRefused {
+                task_id: TaskId(1),
+                persisted: Some(TaskState::Cancelled),
+                from: TaskState::Verifying,
+                event: Event::DeterministicChecksFailed,
+            })
+        );
+        assert_eq!(store.event_count().unwrap(), before);
+        let tasks = meshloop_engine::recovery::replay_tasks(&store.records_for_graph("g").unwrap())
+            .unwrap();
+        assert_eq!(tasks[&TaskId(1)], TaskState::Cancelled);
+    }
+
+    #[test]
+    fn append_refuses_a_record_that_is_not_a_legal_transition() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        // Not in the table at all, on an empty task.
+        let illegal = store.append(rec(
+            TaskState::Pending,
+            Event::AttemptStarted,
+            TaskState::Running,
+        ));
+        assert!(matches!(
+            illegal,
+            Err(StoreError::TransitionRefused {
+                persisted: None,
+                ..
+            })
+        ));
+        // Legal pair, wrong recorded target.
+        verifying(&mut store);
+        let wrong_to = store.append(rec(
+            TaskState::Verifying,
+            Event::DeterministicChecksFailed,
+            TaskState::Accepted,
+        ));
+        assert!(matches!(
+            wrong_to,
+            Err(StoreError::TransitionRefused {
+                persisted: Some(TaskState::Verifying),
+                ..
+            })
+        ));
+        // Nothing may leave Cancelled, not even a second Cancel.
+        store
+            .append(rec(
+                TaskState::Verifying,
+                Event::Cancel,
+                TaskState::Cancelled,
+            ))
+            .unwrap();
+        assert!(matches!(
+            store.append(rec(
+                TaskState::Cancelled,
+                Event::Cancel,
+                TaskState::Cancelled
+            )),
+            Err(StoreError::TransitionRefused { .. })
+        ));
+        assert_eq!(store.event_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn append_compares_against_the_state_another_connection_committed() {
+        let dir = std::env::temp_dir().join(format!("meshloop-cas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("state.sqlite");
+        let mut driver = SqliteStore::open(&db).unwrap();
+        let mut cancel = SqliteStore::open(&db).unwrap();
+        verifying(&mut driver);
+        // Both writers saw Verifying. The cancel commits first.
+        cancel
+            .append(rec(
+                TaskState::Verifying,
+                Event::Cancel,
+                TaskState::Cancelled,
+            ))
+            .unwrap();
+        let late = driver.append(rec(
+            TaskState::Verifying,
+            Event::DeterministicChecksFailed,
+            TaskState::Failed,
+        ));
+        assert!(matches!(
+            late,
+            Err(StoreError::TransitionRefused {
+                persisted: Some(TaskState::Cancelled),
+                ..
+            })
+        ));
+        // And the other way round: a check result committed first refuses a stale cancel
+        // read before it, so the cancel re-reads instead of landing on a state it never saw.
+        let mut other = rec(
+            TaskState::Pending,
+            Event::DependencySatisfied,
+            TaskState::Ready,
+        );
+        other.task_id = TaskId(2);
+        driver.append(other).unwrap();
+        for (from, event, to) in [
+            (TaskState::Ready, Event::AttemptStarted, TaskState::Running),
+            (
+                TaskState::Running,
+                Event::HarnessExited,
+                TaskState::Verifying,
+            ),
+        ] {
+            let mut r = rec(from, event, to);
+            r.task_id = TaskId(2);
+            r.attempt_id = Some(AttemptId(2));
+            driver.append(r).unwrap();
+        }
+        let mut stale_cancel = rec(TaskState::Running, Event::Cancel, TaskState::Cancelled);
+        stale_cancel.task_id = TaskId(2);
+        assert!(matches!(
+            cancel.append(stale_cancel),
+            Err(StoreError::TransitionRefused {
+                persisted: Some(TaskState::Verifying),
+                ..
+            })
+        ));
+        drop((driver, cancel));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transactional_writers_refuse_a_stale_event_and_roll_back_their_other_rows() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.save_run(&run_row("g")).unwrap();
+        verifying(&mut store);
+        store
+            .append(rec(
+                TaskState::Verifying,
+                Event::Cancel,
+                TaskState::Cancelled,
+            ))
+            .unwrap();
+        let attempt = AttemptRow {
+            attempt_id: AttemptId(9),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: None,
+            model_ref: None,
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: None,
+            ended_at: None,
+            outcome: None,
+        };
+        let refused = store.record_transition_and_attempt(
+            rec(
+                TaskState::Verifying,
+                Event::DeterministicChecksPassed,
+                TaskState::AwaitingReview,
+            ),
+            Some(&attempt),
+        );
+        assert!(matches!(refused, Err(StoreError::TransitionRefused { .. })));
+        assert_eq!(store.load_attempt(AttemptId(9)).unwrap(), None);
+
+        let mut declined = run_row("g");
+        declined.review_note = Some("must not be saved".into());
+        let refused = store.save_run_and_events(
+            &declined,
+            &[rec(
+                TaskState::Ready,
+                Event::GraphMutated,
+                TaskState::Pending,
+            )],
+        );
+        assert!(matches!(refused, Err(StoreError::TransitionRefused { .. })));
+        assert_eq!(store.load_run("g").unwrap().unwrap().review_note, None);
+        assert_eq!(store.event_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_ledger_written_before_compare_and_append_stays_readable_and_closed() {
+        // The exact rows issue #167 left: the driver's stale check after Cancelled.
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        verifying(&mut store);
+        store
+            .append(rec(
+                TaskState::Verifying,
+                Event::Cancel,
+                TaskState::Cancelled,
+            ))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, executor, occurred_at)
+                 VALUES ('g', 1, 1, 'Verifying', 'Failed', 'DeterministicChecksFailed', 'meshloop', '0')",
+                [],
+            )
+            .unwrap();
+        let tasks = meshloop_engine::recovery::replay_tasks(&store.records_for_graph("g").unwrap())
+            .expect("the #167 ledger is readable");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Cancelled);
+        // The task stays closed: the driver's next stale append is refused.
+        assert!(matches!(
+            store.append(rec(
+                TaskState::Failed,
+                Event::RetryAuthorized,
+                TaskState::Ready
+            )),
+            Err(StoreError::TransitionRefused {
+                persisted: Some(TaskState::Cancelled),
+                ..
+            })
+        ));
     }
 }

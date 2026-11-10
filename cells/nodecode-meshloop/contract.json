@@ -1,9 +1,17 @@
 {
   "schema": "nodecode-meshloop/cli-contract/1",
-  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on a fixture repository and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null.",
+  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on fixture repositories and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null. A field with \"optional\": true may be absent, and has its type when present. `command` names the envelope's command when it is not meshloop:<first argv word>. `graph` lists the fields the cell reads of a plan (the plan file review-plan shows, and data.graph of plan and review-plan). accept, and integrate without --deliverable, answer text, not JSON: the cell reads their exit code, then reads back what they recorded through inspect_attempts and status.",
   "envelope": [
     { "path": "ok", "type": "boolean" },
     { "path": "command", "type": "string" }
+  ],
+  "graph": [
+    { "path": "graph_id", "type": "string" },
+    { "path": "nodes", "type": "array" },
+    { "path": "nodes[].id", "type": "integer" },
+    { "path": "nodes[].description", "type": "string" },
+    { "path": "nodes[].depends_on", "type": "array" },
+    { "path": "nodes[].tier", "type": "string?" }
   ],
   "cases": {
     "error": {
@@ -46,7 +54,10 @@
         { "path": "data.nodes[].id", "type": "integer" },
         { "path": "data.nodes[].state", "type": "string" },
         { "path": "data.nodes[].waiting_for", "type": "string?" },
-        { "path": "data.nodes[].description", "type": "string" }
+        { "path": "data.nodes[].description", "type": "string" },
+        { "path": "data.nodes[].live", "type": "string?" },
+        { "path": "data.awaiting_acceptance", "type": "array" },
+        { "path": "data.driver", "type": "string?", "optional": true }
       ]
     },
     "inspect": {
@@ -61,6 +72,101 @@
         { "path": "data.nodes[].state", "type": "string" },
         { "path": "data.nodes[].waiting_for", "type": "string?" },
         { "path": "data.nodes[].description", "type": "string" }
+      ]
+    },
+    "inspect_attempts": {
+      "argv": ["inspect", "--attempts"],
+      "ok": true,
+      "fields": [
+        { "path": "data.session_id", "type": "string" },
+        { "path": "data.status", "type": "string" },
+        { "path": "data.plan_state", "type": "string" },
+        { "path": "data.nodes", "type": "array" },
+        { "path": "data.nodes[].id", "type": "integer" },
+        { "path": "data.nodes[].state", "type": "string" },
+        { "path": "data.nodes[].attempts", "type": "array" },
+        { "path": "data.nodes[].attempts[].harness", "type": "string" },
+        { "path": "data.nodes[].attempts[].model_ref", "type": "string" },
+        { "path": "data.nodes[].attempts[].outcome", "type": "string" },
+        { "path": "data.nodes[].attempts[].evidence", "type": "array" },
+        { "path": "data.nodes[].attempts[].evidence[].kind", "type": "string" },
+        { "path": "data.nodes[].attempts[].evidence[].tool", "type": "string?" },
+        { "path": "data.nodes[].attempts[].evidence[].exit_code", "type": "integer?" },
+        { "path": "data.nodes[].attempts[].evidence[].summary_redacted", "type": "string?" }
+      ]
+    },
+    "integrate_preview": {
+      "argv": ["inspect"],
+      "ok": true,
+      "fields": [
+        { "path": "data.git_export", "type": "object" },
+        { "path": "data.git_export.worktree_path", "type": "string" },
+        { "path": "data.git_export.branch_ref", "type": "string" },
+        { "path": "data.git_export.commit_sha", "type": "string" }
+      ]
+    },
+    "plan": {
+      "argv": ["plan", "--objective", "contract objective", "--out", "planned.json"],
+      "ok": true,
+      "fields": [
+        { "path": "data.path", "type": "string" },
+        { "path": "data.graph", "type": "object" }
+      ]
+    },
+    "review_plan": {
+      "argv": ["review-plan", "--plan", "plan.json", "--accept", "--as", "contract-person"],
+      "ok": true,
+      "fields": [
+        { "path": "data.decision", "type": "string" },
+        { "path": "data.plan_state", "type": "string" },
+        { "path": "data.graph_id", "type": "string" },
+        { "path": "data.as", "type": "string?" },
+        { "path": "data.graph", "type": "object" }
+      ]
+    },
+    "run_detached": {
+      "argv": ["run", "--plan", "plan.json", "--detach"],
+      "ok": true,
+      "fields": [
+        { "path": "data.graph_id", "type": "string" },
+        { "path": "data.status", "type": "string" },
+        { "path": "data.detached", "type": "boolean" },
+        { "path": "data.driver_log", "type": "string" }
+      ]
+    },
+    "resume_detached": {
+      "argv": ["resume", "--detach", "--graph", "gcell"],
+      "ok": true,
+      "fields": [
+        { "path": "data.graph_id", "type": "string" },
+        { "path": "data.status", "type": "string" },
+        { "path": "data.detached", "type": "boolean" },
+        { "path": "data.driver_log", "type": "string" }
+      ]
+    },
+    "resume_driver_alive": {
+      "argv": ["resume", "--detach", "--graph", "gcell"],
+      "ok": false,
+      "fields": [
+        { "path": "error", "type": "string" }
+      ]
+    },
+    "cancel": {
+      "argv": ["cancel", "--graph", "gcancel"],
+      "ok": true,
+      "fields": [
+        { "path": "data.session_id", "type": "string" },
+        { "path": "data.status", "type": "string" }
+      ]
+    },
+    "workspace_inventory": {
+      "argv": ["workspace", "inventory"],
+      "command": "meshloop:workspace-inventory",
+      "ok": true,
+      "fields": [
+        { "path": "data.entries", "type": "array" },
+        { "path": "data.entries[].graph_id", "type": "string?" },
+        { "path": "data.entries[].ownership", "type": "string" }
       ]
     }
   }
