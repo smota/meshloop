@@ -1,0 +1,24 @@
+{
+  "version": "lp-4",
+  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier, verify.py or meshloop.toml requires a new version and a new baseline. lp-4 supersedes lp-3: verify.py no longer trusts a bare exit code, because the editable code runs in the test process. A Python pass needs the runner's result line carrying a nonce that the tested code cannot read from stdin; a Rust pass needs cargo's summaries adding up to expected_tests. Both check the expected_tests count from task.json.",
+  "tasks": [
+    "py-median-bugfix",
+    "py-wordfreq",
+    "py-lru",
+    "py-intervals",
+    "py-roman",
+    "rs-brackets",
+    "py-calc",
+    "py-semver"
+  ],
+  "plan_tiers": {
+    "py-median-bugfix": "Tier1",
+    "py-wordfreq": "Tier1",
+    "py-lru": "Tier2",
+    "py-intervals": "Tier2",
+    "py-roman": "Tier2",
+    "rs-brackets": "Tier2",
+    "py-calc": "Tier3",
+    "py-semver": "Tier3"
+  }
+}

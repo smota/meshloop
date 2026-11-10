@@ -1,0 +1,9 @@
+[package]
+name = "brackets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+# Standalone: this seed lives inside the Meshloop repository but is not a member.
+[workspace]
