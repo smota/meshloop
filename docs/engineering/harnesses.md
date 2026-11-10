@@ -46,3 +46,18 @@ Routing behavior for the local record:
 - A present Open breaker inside its cooldown is filtered out
   (`candidate_in_open_cooldown_is_filtered_out`).
 - A stale Open breaker whose cooldown has elapsed is selectable again.
+
+## Native dispatch support
+
+Accepted with ADR 0039 (2026-11-10); the table is empty until #152 records live evidence.
+
+This is a mirror of the compiled-in proven set in the composition root (for example
+`crates/meshloop-cli/src/native_support.rs`). Native dispatch is honoured only for a
+`kind` listed in that table. The table is read-only: it is not configurable through
+`meshloop.toml`, and an operator cannot self-certify a harness. It changes only by pull
+request with new live evidence from #152. Nodecode also needs an ADR 0038 amendment.
+`doctor` warns when a probed version is outside the observed range.
+
+| Kind | Observed version range | Live evidence (#152) | Date |
+|---|---|---|---|
+| (none proven yet) | — | — | — |

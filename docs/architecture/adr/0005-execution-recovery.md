@@ -10,6 +10,8 @@
 - Supersedes: none
 - Superseded by: none
 
+> **Scope narrowed by [ADR 0039](0039-native-sub-agent-dispatch.md) (accepted 2026-11-10; implementation pending).** Once native dispatch ships, recovery that reconciles persisted intent against a real process applies to subprocess attempts. A native `awaiting-report` attempt has no owning process; it is reconciled only by report, deadline or cancel, and is never failed for a missing PID. Worktree isolation, single integration owner and the event log apply to every mode. This note does not change this record's decision for subprocess attempts.
+
 ## Context and constraints
 How a session is transported to a worker, how that worker's changes are isolated, and how
 the whole run recovers from a crash are one lifecycle, not three separate decisions — a

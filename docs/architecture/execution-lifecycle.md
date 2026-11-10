@@ -55,6 +55,61 @@ would make evidence ambiguous about which run it validates.
 Timeout and cancellation terminate the owned process tree, preserve redacted evidence, and
 land in `failed`/`cancelled` — never `accepted` or `integrated`, even partially.
 
+## Amendment 2026-11-10: native attempts (ADR 0039, accepted; implementation pending)
+
+Accepted with ADR 0039; not yet implemented (#147 to #150). The table and rules above are unchanged for
+subprocess attempts. This amendment adds one state and its rows for native worker
+attempts, which run as sub-agents started by the origin session. Mechanism is in
+runtime-design.md §3 "Native dispatch (ADR 0039)".
+
+New state `awaiting-report`: the attempt is parked. A native sub-agent was handed the work,
+and Meshloop owns no process for it. The state occupies a concurrency slot like `running`.
+
+```mermaid
+flowchart LR
+  ready -->|attempt-parked| awaitingReport[awaiting-report]
+  awaitingReport -->|native-report-received| verifying
+  awaitingReport -->|park-deadline-passed| failed
+  awaitingReport -->|cancel| cancelled
+```
+
+| From | To | Trigger | Precondition |
+|---|---|---|---|
+| ready | awaiting-report | attempt-parked event | native-eligible per ADR 0039 (dispatch `native`, kind set, equal to the origin harness and proven by #152, origin session set, run-loop worker attempt); only `meshloop next` parks; mode, origin, base revision, deadline and expected-state baseline persisted with the attempt |
+| awaiting-report | verifying | native-report-received event | reporting origin equals the attempt's recorded origin; attempt is the task's latest; no earlier native-report-received for the attempt; deadline not passed. The report is data, never evidence |
+| awaiting-report | failed | park-deadline-passed event | recorded `deadline_at` passed, appended before any other effect of the command that observed it; no process is terminated because none is owned |
+| awaiting-report | cancelled | user/operator cancel event | tracking stops; the sub-agent is **not** stopped by Meshloop and no recorded-PID fallback is used |
+| verifying | failed | deterministic-checks-failed event | also when the expected-state check fails, or the attempt worktree changed between the snapshot commit and the post-check re-read |
+| failed | failed | native-report-received event | late report after the deadline; stored, never verified. Refused when the attempt already has a native-report-received event |
+| cancelled | cancelled | native-report-received event | report after cancel; stored, never verified. Refused when the attempt already has a native-report-received event |
+| failed | failed | native-stop-attested event | `meshloop cancel --task <id> --attempt <id> --attest-stopped --as <identity>` on a native attempt; executor is the identity; makes that attempt's worktree eligible for cleanup |
+| cancelled | cancelled | native-stop-attested event | as above |
+| accepted | accepted | native-stop-attested event | as above |
+| integrated | integrated | native-stop-attested event | as above |
+| ready | ready | dispatch-mode-changed event | the new attempt's mode differs from the task's previous attempt; reason required |
+| awaiting-review | accepted | human-acceptance-recorded or verify-gate-passed event | additionally for native: the attempt branch tip equals the recorded `verified_revision`, else `accept` is refused |
+| accepted | integrated | integration-owner-merge event | additionally for native: merges `verified_revision`, not the branch tip, and records the resulting integrate HEAD |
+| accepted | failed | stale-base-detected event | additionally for native: the attempt branch tip differs from `verified_revision` at merge |
+
+`live-worker-settled` is never used for native attempts. A native attempt gets no
+in-attempt repair; a failure goes through `retry-authorized` and a new attempt (ADR 0039
+decision 6).
+
+These rules qualify "Attempts and idempotency" for native attempts only:
+- An `awaiting-report` attempt has no owning process. It is never reattached or resumed.
+  Recovery reconciles it only by report, deadline or cancel. It is not failed for a
+  missing PID.
+- Timeout and cancellation of a native attempt still land in `failed` or `cancelled`,
+  never `accepted` or `integrated`. They do not terminate or prove termination of
+  anything. Writes made after that point are never verified or integrated, because
+  integration uses `verified_revision`.
+- The deadline transition is driven by a recorded event that carries the observed time
+  and the recorded `deadline_at`. The transition itself stays a pure function of state
+  and event.
+- `verifying` after a native report uses the same deterministic evidence and gates as
+  subprocess attempts, bound to `verified_revision`. Explicit
+  `meshloop accept --task <id> --as <identity>` is unchanged.
+
 ## Plan-level gate (ADR 0009)
 Before any node in a graph is scheduled, the graph itself passes through
 `awaiting-plan-review`, then `meshloop:review-plan` `--accept` → `plan-accepted`,
