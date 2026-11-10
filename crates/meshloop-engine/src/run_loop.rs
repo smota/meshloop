@@ -141,6 +141,8 @@ pub enum IdleReason {
     NoCapableCandidate,
     FailedTerminal,
     WaitingOnLiveWorker,
+    /// The repository fence was busy; nothing was recorded. Resume later (issue #142).
+    FenceBusy,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -727,17 +729,59 @@ impl<'a> RunLoop<'a> {
                     .into(),
             ));
         }
-        // Ownership precedes the first worktree of the run (issue #142).
-        self.own_new_run(graph_id)?;
-        self.own_artifact(
-            graph_id,
-            meshloop_domain::workspace::ArtifactKind::Integration,
-            "integrate",
-            None,
-        )?;
+        // Ownership precedes the first worktree of the run (issue #142), under one
+        // fence held through the add.
+        let fresh = self.fresh_for_ownership(graph_id)?;
+        let owned = !fresh && self.run_loop_owned(graph_id)?;
+        let ownership = self.ownership;
+        let mut lease = match ownership {
+            Some(ownership) if fresh || owned => Some(ownership.acquire()?),
+            _ => None,
+        };
+        let mut artifact = None;
+        if let Some(lease) = lease.as_mut() {
+            if owned && std::fs::symlink_metadata(&integrate).is_ok() {
+                return Err(OrchestratorError::Illegal(
+                    "integrate path exists without a worktree; refusing to take ownership of it"
+                        .into(),
+                ));
+            }
+            if fresh {
+                self.bind_new_run(lease.as_mut(), graph_id)?;
+            }
+            artifact = self.own_artifact_held(
+                lease.as_mut(),
+                graph_id,
+                meshloop_domain::workspace::ArtifactKind::Integration,
+                "integrate",
+                None,
+            )?;
+        }
         let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
-        self.workspace
-            .add_worktree_from(&integrate, &ibranch, run_base)?;
+        let added = self
+            .workspace
+            .add_worktree_from(&integrate, &ibranch, run_base);
+        if let (Err(_), Some(lease)) = (&added, lease.as_mut()) {
+            self.retire_not_created(lease.as_mut(), artifact, &integrate)?;
+        }
+        added?;
+        Ok(())
+    }
+
+    /// `run --accept-plan` on a new graph: refuse leftover `integrate` state before
+    /// anything is staged, as `start` does for a graph it creates.
+    pub fn require_fresh_integrate(&self, graph_id: &str) -> Result<(), OrchestratorError> {
+        let integrate = self.integrate_path(graph_id);
+        if self.workspace.worktree_exists(&integrate)
+            || std::fs::symlink_metadata(&integrate).is_ok()
+            || self
+                .workspace
+                .branch_exists(&self.integrate_branch(graph_id))?
+        {
+            return Err(OrchestratorError::Illegal(
+                "integrate worktree/branch exists without a runs row".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -810,6 +854,10 @@ impl<'a> RunLoop<'a> {
             row.review_note = note;
         }
         self.store.save_run(&row)?;
+        if next == PlanState::PlanAccepted {
+            // A re-accepted plan of an owned run gets its own generation (ADR 0033).
+            self.advance_generation(graph_id)?;
+        }
         self.active_graph = Some(graph_id.into());
         Ok(next)
     }
@@ -901,6 +949,9 @@ impl<'a> RunLoop<'a> {
         }
 
         self.store.save_run_and_events(&row, &mutation_events)?;
+        if row.plan_state == PlanState::PlanAccepted {
+            self.advance_generation(graph_id)?;
+        }
 
         let mesh = self.workspace.repo_root().join(".meshloop");
         let _ = std::fs::create_dir_all(&mesh);
@@ -1460,7 +1511,11 @@ impl<'a> RunLoop<'a> {
         let attempt_id = self.store.next_attempt_id()?;
         let wt = self.attempt_path(graph_id, task_id, attempt_id);
         let branch = self.attempt_branch(graph_id, task_id, attempt_id);
-        if self.workspace.worktree_exists(&wt) || self.workspace.branch_exists(&branch)? {
+        let owned = self.run_loop_owned(graph_id)?;
+        if self.workspace.worktree_exists(&wt)
+            || self.workspace.branch_exists(&branch)?
+            || (owned && std::fs::symlink_metadata(&wt).is_ok())
+        {
             return Err(OrchestratorError::Illegal(format!(
                 "leftover worktree or branch for attempt {}",
                 attempt_id.0
@@ -1470,7 +1525,15 @@ impl<'a> RunLoop<'a> {
         // unavailable fence stops this tick without changing any state (issue #142).
         let ownership = self.ownership;
         let mut lease = match ownership {
-            Some(ownership) if self.run_loop_owned(graph_id)? => Some(ownership.acquire()?),
+            Some(ownership) if owned => match ownership.acquire() {
+                Ok(lease) => Some(lease),
+                Err(StoreError::FenceBusy) => {
+                    return Ok(Tick::Idle {
+                        reason: IdleReason::FenceBusy,
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            },
             _ => None,
         };
         if let Some(lease) = lease.as_deref() {
@@ -1524,15 +1587,18 @@ impl<'a> RunLoop<'a> {
                     Some(attempt_id),
                 )
             }
-            None => Ok(()),
+            None => Ok(None),
         };
-        let added = match registered {
-            Ok(()) => self
+        let added = match &registered {
+            Ok(_) => self
                 .workspace
                 .add_worktree_from(&wt, &branch, &start)
                 .map_err(|e| format!("{e:?}")),
             Err(e) => Err(format!("{e:?}")),
         };
+        if let (Err(_), Some(lease), Ok(artifact)) = (&added, lease.as_mut(), registered) {
+            self.retire_not_created(lease.as_mut(), artifact, &wt)?;
+        }
         drop(lease);
         if let Err(reason) = added {
             let fail = self.append(
@@ -2297,6 +2363,9 @@ impl<'a> RunLoop<'a> {
         if restart {
             self.restart(graph_id)?;
         } else {
+            // Reconcile ownership with the worktrees before resuming (issue #142).
+            self.advance_generation(graph_id)?;
+            self.reconcile_owned(graph_id)?;
             self.crash_fail(graph_id)?;
             if retry {
                 self.retry_failed(graph_id)?;
@@ -2343,7 +2412,10 @@ impl<'a> RunLoop<'a> {
         if self.workspace.worktree_exists(&integrate) {
             let _ = self.workspace.reset_hard(&integrate, &row.run_base);
         }
-        self.store.reset_graph_execution(graph_id)?;
+        // An owned run keeps its history in a new generation (issue #142).
+        if !self.restart_owned(graph_id)? {
+            self.store.reset_graph_execution(graph_id)?;
+        }
         self.active_graph = Some(graph_id.into());
         Ok(())
     }
@@ -2706,6 +2778,7 @@ impl<'a> RunLoop<'a> {
     ) -> Result<(), OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
         self.require_owned_root(graph_id)?;
+        self.reconcile_owned(graph_id)?;
         let integrate = self.integrate_path(graph_id);
         self.land_worktree(&integrate, git_ref)
     }
@@ -2799,19 +2872,42 @@ impl<'a> RunLoop<'a> {
 
         let wt = self.deliverable_path(graph_id, tag);
         let branch = self.deliverable_branch(graph_id, tag);
-        // Registered before the old build is replaced; the same location is reused.
-        self.own_artifact(
-            graph_id,
-            meshloop_domain::workspace::ArtifactKind::Deliverable,
-            &format!("integrate-{tag}"),
-            None,
-        )?;
+        // Registered before the old build is replaced; a live record at the same
+        // location is reused. The fence is held through the add.
+        let ownership = self.ownership;
+        let mut lease = match ownership {
+            Some(ownership) if self.run_loop_owned(graph_id)? => Some(ownership.acquire()?),
+            _ => None,
+        };
+        let mut artifact = None;
+        if let Some(lease) = lease.as_mut() {
+            // Only an earlier build (a registered worktree) may be replaced; never
+            // take ownership of anything else at the deliverable path.
+            if !self.workspace.worktree_exists(&wt) && std::fs::symlink_metadata(&wt).is_ok() {
+                return Err(OrchestratorError::Illegal(format!(
+                    "deliverable path for {tag} exists without a worktree; refusing to take ownership of it"
+                )));
+            }
+            artifact = self.own_artifact_held(
+                lease.as_mut(),
+                graph_id,
+                meshloop_domain::workspace::ArtifactKind::Deliverable,
+                &format!("integrate-{tag}"),
+                None,
+            )?;
+        }
         self.workspace.remove_worktree(&wt)?;
         self.workspace.prune()?;
         self.workspace.delete_branch(&branch)?;
         let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
-        self.workspace
-            .add_worktree_from(&wt, &branch, &run.run_base)?;
+        let added = self
+            .workspace
+            .add_worktree_from(&wt, &branch, &run.run_base);
+        if let (Err(_), Some(lease)) = (&added, lease.as_mut()) {
+            self.retire_not_created(lease.as_mut(), artifact, &wt)?;
+        }
+        drop(lease);
+        added?;
 
         for id in &order {
             let attempt = self
@@ -3202,7 +3298,7 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
             }
         }
         IdleReason::WaitingOnLiveWorker => 0,
-        IdleReason::NoCapableCandidate | IdleReason::FailedTerminal => 1,
+        IdleReason::NoCapableCandidate | IdleReason::FailedTerminal | IdleReason::FenceBusy => 1,
     }
 }
 

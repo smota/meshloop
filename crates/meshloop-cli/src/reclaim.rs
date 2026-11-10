@@ -78,14 +78,25 @@ pub fn after_run(ctx: &ReclaimContext, graph: &str) -> Option<ReclaimNote> {
                 "workspace: run {graph} kept ({}).",
                 report.reasons.join(", ")
             ),
-            if ctx.auto {
+            // Only work that is not on the base branch yet is resolved by landing it.
+            if ctx.auto && report.reasons.iter().all(|r| r == "unique-commit") {
                 format!(
                     "  It is reclaimed automatically by `meshloop integrate --graph {graph} --into <base> --accept-integrate`. After landing it any other way: {preview}, then {apply} <digest>"
                 )
-            } else {
+            } else if report.reasons.iter().all(|r| r == "unique-commit") {
                 format!("  After landing it on the base branch: {preview}, then {apply} <digest>")
+            } else {
+                format!("  Resolve the reasons above, then: {preview}, then {apply} <digest>")
             },
         ],
+        "partial" => vec![format!(
+            "workspace: run {graph} partly reclaimed ({}); see {preview}",
+            report
+                .cleanup
+                .as_ref()
+                .map(|c| c.reasons.join(", "))
+                .unwrap_or_default()
+        )],
         other => vec![format!(
             "workspace: reclamation of run {graph} stopped ({other}); inspect with: {preview}"
         )],

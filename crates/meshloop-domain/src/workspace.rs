@@ -112,6 +112,23 @@ pub struct GenerationRecord {
     pub root_alias: RootAlias,
     pub relative_path: RelativePath,
     pub layout_version: u32,
+    /// Explicit producer marker. `None` on every record written before issue #142
+    /// and by scoped or adoption producers; absent fields are not serialized, so
+    /// those payloads are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<Producer>,
+    /// Base branch (`refs/heads/<name>`, never under `refs/heads/meshloop/`) the run
+    /// was started from. Landing is judged against this ref only. `None` means the
+    /// run is never judged landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<GitRef>,
+}
+/// Who wrote a generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Producer {
+    /// The run loop, for a run it created (issue #142).
+    RunLoop,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArtifactKind {
@@ -147,7 +164,18 @@ pub enum Retention {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reclamation {
     Pending,
+    /// The worktree was removed by cleanup or restart (issue #142).
     Reclaimed,
+    /// Registration succeeded but the worktree was never added.
+    NotCreated,
+    /// Recovery found neither the directory nor a Git registration.
+    Absent,
+}
+impl Reclamation {
+    /// The artifact no longer describes an existing worktree it owns.
+    pub fn retires(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fact {
@@ -229,6 +257,8 @@ mod tests {
             root_alias: RootAlias::new("worktrees").unwrap(),
             relative_path: RelativePath::new("run/generation-1").unwrap(),
             layout_version: 1,
+            producer: None,
+            base_ref: None,
         };
         let artifact = ArtifactRecord {
             id: LifecycleId::new("artifact-1").unwrap(),
@@ -364,18 +394,32 @@ pub struct RunBinding {
 }
 /// Layout written by the run loop (issue #142): the run location is
 /// `<root>/<graph>` and holds `integrate`, `task-<n>-attempt-<m>` and
-/// `integrate-<tag>` worktrees on `meshloop/<graph>/...` branches.
+/// `integrate-<tag>` worktrees on `meshloop/<graph>/...` branches. It describes
+/// placement only; ownership is the explicit `Producer::RunLoop` marker.
 ///
-/// A run the run loop creates is bound by its first generation with this layout:
-/// that record pins graph, repository, root alias, run location and layout. It
-/// has no `workspace_run_bindings` row, which stays reserved for scoped runs whose
-/// events and attempts carry generation and revision scope.
+/// A run the run loop creates is bound by its first generation: that record pins
+/// graph, repository, root alias, run location, layout and base branch. It has no
+/// `workspace_run_bindings` row, which stays reserved for scoped runs whose events
+/// and attempts carry generation and revision scope.
 pub const RUN_LOOP_LAYOUT_VERSION: u32 = 2;
 impl GenerationRecord {
-    /// True for the binding generation of a run the run loop created.
-    pub fn is_run_loop_binding(&self) -> bool {
-        self.layout_version == RUN_LOOP_LAYOUT_VERSION && self.ordinal == 1
+    /// True for any generation the run loop wrote with its layout.
+    pub fn is_run_loop(&self) -> bool {
+        self.producer == Some(Producer::RunLoop) && self.layout_version == RUN_LOOP_LAYOUT_VERSION
     }
+    /// True for the binding (first) generation of a run the run loop created.
+    pub fn is_run_loop_binding(&self) -> bool {
+        self.is_run_loop() && self.ordinal == 1
+    }
+}
+/// A base branch the run loop may judge landing against: `refs/heads/<name>`,
+/// never one of its own `refs/heads/meshloop/...` branches.
+pub fn run_loop_base_ref(symbolic: &str) -> Option<GitRef> {
+    let name = symbolic.strip_prefix("refs/heads/")?;
+    if name.is_empty() || name == "meshloop" || name.starts_with("meshloop/") {
+        return None;
+    }
+    GitRef::new(symbolic).ok()
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProvisionalKind {

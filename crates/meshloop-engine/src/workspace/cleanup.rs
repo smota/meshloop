@@ -28,6 +28,10 @@ pub struct CleanupObservation {
     pub run_outcome: Option<RunOutcome>,
     #[serde(default)]
     pub run_container: bool,
+    #[serde(default)]
+    pub attempt_failed: bool,
+    #[serde(default)]
+    pub base_unknown: bool,
 }
 
 /// Retained identity plus one observation per inventory entry, in that order.
@@ -72,6 +76,8 @@ pub fn cleanup_preview(
                 receipt: observed.receipt,
                 run_outcome: observed.run_outcome,
                 run_container: observed.run_container,
+                attempt_failed: observed.attempt_failed,
+                base_unknown: observed.base_unknown,
             }
         })
         .collect();
@@ -104,5 +110,7 @@ fn fail_closed() -> CleanupObservation {
         receipt: None,
         run_outcome: None,
         run_container: false,
+        attempt_failed: false,
+        base_unknown: false,
     }
 }

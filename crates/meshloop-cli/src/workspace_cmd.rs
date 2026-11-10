@@ -317,6 +317,7 @@ fn public_store_error(error: &StoreError) -> &'static str {
         StoreError::LegacyOwnershipUnresolved => "legacy-ownership-unresolved",
         StoreError::PlanRevisionMismatch => "plan-revision-mismatch",
         StoreError::LifecycleBusy => "lifecycle-busy",
+        StoreError::FenceBusy => "fence-busy",
         StoreError::Io(_) => "io",
         StoreError::Corrupt(_) => "corrupt",
     }

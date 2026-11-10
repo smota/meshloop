@@ -101,6 +101,8 @@ fn generation(lease: &RepositoryLease, n: u32) -> GenerationRecord {
         root_alias: alias(),
         relative_path: RelativePath::new(format!("run/generation-{n}")).unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     }
 }
 fn artifact(name: &str, generation: &GenerationRecord, kind: ArtifactKind) -> ArtifactRecord {
@@ -1040,6 +1042,8 @@ fn seeded_v5(path: &Path) -> Connection {
         root_alias: alias(),
         relative_path: RelativePath::new("retained/run").unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     conn.execute(
         "INSERT INTO workspace_generations VALUES(?1,?2,?3,1,?4,?5,?6)",
@@ -2661,6 +2665,8 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
         root_alias: alias(),
         relative_path: RelativePath::new("graph-alpha").unwrap(),
         layout_version: RUN_LOOP_LAYOUT_VERSION,
+        producer: Some(Producer::RunLoop),
+        base_ref: Some(GitRef::new("refs/heads/main").unwrap()),
     };
     let mut wrong_hash = binding.clone();
     wrong_hash.accepted_plan_hash = hash();
@@ -2668,7 +2674,18 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
     wrong_path.relative_path = RelativePath::new("elsewhere").unwrap();
     let mut wrong_layout = binding.clone();
     wrong_layout.layout_version = 1;
-    for refused in [&wrong_hash, &wrong_path, &wrong_layout] {
+    // Ownership is the explicit producer marker, not the layout number.
+    let mut no_producer = binding.clone();
+    no_producer.producer = None;
+    let mut own_branch = binding.clone();
+    own_branch.base_ref = Some(GitRef::new("refs/heads/meshloop/graph-alpha/integrate").unwrap());
+    for refused in [
+        &wrong_hash,
+        &wrong_path,
+        &wrong_layout,
+        &no_producer,
+        &own_branch,
+    ] {
         assert!(store.register_run_loop_run(&lease, refused).is_err());
     }
     // An unaccepted plan is not bound.
@@ -2790,9 +2807,109 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
         Some(1),
     );
     store.register_run_loop_artifact(&lease, &attempt).unwrap();
-    // Restart forgets attempt artifacts with their rows, and keeps the binding.
-    store.reset_graph_execution("graph-alpha").unwrap();
-    assert_eq!(store.artifact(&attempt.id).unwrap(), None);
-    assert!(store.artifact(&first.id).unwrap().is_some());
-    assert_eq!(store.run_loop_generation(&graph).unwrap(), Some(binding));
+
+    // Plan pinning: a changed accepted plan is refused until a generation pins it.
+    let mut changed = run();
+    changed.plan_json = r#"{"changed":true}"#.into();
+    store.save_run(&changed).unwrap();
+    let late = integrate(
+        "late",
+        "graph-alpha/integrate-docs",
+        ArtifactKind::Deliverable,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &late),
+        Err(StoreError::PlanRevisionMismatch)
+    );
+    let second = GenerationRecord {
+        id: id("run-loop-generation-2"),
+        ordinal: 2,
+        accepted_plan_hash: PlanHash::new(meshloop_domain::digest::sha256_hex(
+            br#"{"changed":true}"#,
+        ))
+        .unwrap(),
+        ..binding.clone()
+    };
+    let mut skipped = second.clone();
+    skipped.ordinal = 3;
+    let mut moved = second.clone();
+    moved.base_ref = None;
+    for refused in [&skipped, &moved] {
+        assert!(store.register_run_loop_run(&lease, refused).is_err());
+    }
+    store.register_run_loop_run(&lease, &second).unwrap();
+    assert_eq!(
+        store.run_loop_generation(&graph).unwrap(),
+        Some(binding.clone())
+    );
+    assert_eq!(
+        store.run_loop_current_generation(&graph).unwrap(),
+        Some(second.clone())
+    );
+    // Artifacts join the current generation only.
+    assert!(store.register_run_loop_artifact(&lease, &late).is_err());
+    let late = ArtifactRecord {
+        generation_id: second.id.clone(),
+        ..late
+    };
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &late).unwrap(),
+        late.id
+    );
+
+    // Retired records are kept and never reused.
+    store
+        .retire_run_loop_artifacts(
+            &lease,
+            &[LifecycleFact {
+                id: id("retire-late"),
+                artifact_id: late.id.clone(),
+                fact: Fact::Reclamation(Reclamation::NotCreated),
+            }],
+        )
+        .unwrap();
+    assert!(store.artifact(&late.id).unwrap().is_some());
+    let again = ArtifactRecord {
+        id: id("late-2"),
+        ..late.clone()
+    };
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &again).unwrap(),
+        again.id
+    );
+    let listed = store.run_loop_artifacts(&graph).unwrap();
+    assert!(listed.contains(&(late.clone(), true)));
+    assert!(listed.contains(&(again.clone(), false)));
+
+    // Restart never deletes: the legacy reset is refused, and the restart moves
+    // history into the current generation and pins the next one.
+    assert_eq!(
+        store.reset_graph_execution("graph-alpha"),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    let third = GenerationRecord {
+        id: id("run-loop-generation-3"),
+        ordinal: 3,
+        ..second.clone()
+    };
+    store
+        .restart_run_loop_run(
+            &lease,
+            &[LifecycleFact {
+                id: id("retire-attempt"),
+                artifact_id: attempt.id.clone(),
+                fact: Fact::Reclamation(Reclamation::Reclaimed),
+            }],
+            &third,
+        )
+        .unwrap();
+    assert!(store.artifact(&attempt.id).unwrap().is_some());
+    assert!(store.attempts_for_graph("graph-alpha").unwrap().is_empty());
+    assert!(store.load_attempt(AttemptId(1)).unwrap().is_some());
+    assert_eq!(store.next_attempt_id().unwrap(), AttemptId(2));
+    assert_eq!(
+        store.run_loop_current_generation(&graph).unwrap(),
+        Some(third)
+    );
 }

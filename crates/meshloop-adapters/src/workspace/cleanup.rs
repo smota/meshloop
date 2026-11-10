@@ -44,7 +44,8 @@ fn observe_cleanup_with(
     let retained_ref = read_retained_ref(scope.checkout);
     let retained_commit = read_retained_commit(scope.checkout);
     let checkout_canon = canonical_directory(scope.checkout);
-    let runs = run_loop_runs(scope.ledger);
+    // An unreadable ledger fails closed: every graph's entries are retained.
+    let runs = run_loop_runs(scope.ledger).ok();
     let observations = entries
         .iter()
         .map(|entry| {
@@ -56,7 +57,7 @@ fn observe_cleanup_with(
                 checkout_canon.as_deref(),
                 retained_commit.as_ref(),
             );
-            run_loop_facts(entry, &runs, &mut observation);
+            run_loop_facts(entry, runs.as_ref(), scope.checkout, &mut observation);
             observation
         })
         .collect();
@@ -96,21 +97,42 @@ fn observe_entry(
     }
 }
 
-/// Adds the owning run's outcome to every entry of a run-loop run, and marks the
-/// run directory itself, which cleanup never passes to `git worktree remove`.
+/// Adds the owning run's outcome to every entry of a run-loop run, marks the run
+/// directory itself (never passed to `git worktree remove`), and judges landing
+/// against the run's recorded base branch only, never the checkout's HEAD.
+/// `runs == None` (unreadable ledger) retains every entry that names a graph.
 fn run_loop_facts(
     entry: &InventoryEntry,
-    runs: &BTreeMap<String, RunLoopRun>,
+    runs: Option<&BTreeMap<String, RunLoopRun>>,
+    checkout: &Path,
     observation: &mut CleanupObservation,
 ) {
-    let Some(run) = entry
-        .graph_id
-        .as_ref()
-        .and_then(|graph| runs.get(graph.as_str()))
-    else {
+    let Some(graph) = entry.graph_id.as_ref() else {
+        return;
+    };
+    let Some(runs) = runs else {
+        observation.run_outcome = Some(RunOutcome::Incomplete);
+        return;
+    };
+    let Some(run) = runs.get(graph.as_str()) else {
         return;
     };
     observation.run_outcome = Some(run.outcome);
+    observation.attempt_failed = entry
+        .lifecycle_id
+        .as_ref()
+        .is_some_and(|id| run.failed_attempts.contains(id));
+    match &run.generation.base_ref {
+        None => {
+            observation.base_unknown = true;
+            observation.commit_reachable = false;
+        }
+        Some(base) => {
+            if let Some(commit) = observation.commit.as_ref() {
+                observation.commit_reachable = on_base(checkout, commit, base);
+            }
+        }
+    }
     observation.run_container = entry.lifecycle_id.as_ref() == Some(&run.generation.id);
     if observation.run_container {
         // The run directory is not a worktree. Git status there describes the
@@ -123,6 +145,20 @@ fn run_loop_facts(
         observation.commit_reachable = false;
         observation.commit_unproven = false;
     }
+}
+
+/// `commit` is an ancestor of (or equal to) the tip of `base`, read without locks.
+fn on_base(checkout: &Path, commit: &ObjectId, base: &GitRef) -> bool {
+    git_ok(
+        checkout,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            commit.as_str(),
+            base.as_str(),
+        ],
+    )
+    .is_ok()
 }
 
 fn flagged(
@@ -636,14 +672,36 @@ fn run_loop_branch(
     (parse_oid(&tip).as_ref() == Some(commit)).then_some(short)
 }
 
+/// Records that cleanup removed a run-loop artifact's worktree (issue #142).
+fn retire_removed(
+    conn: &rusqlite::Connection,
+    artifact: &LifecycleId,
+) -> Result<(), meshloop_engine::ports::StoreError> {
+    use meshloop_domain::workspace::{Fact, LifecycleFact, Reclamation};
+    let fact = LifecycleFact {
+        id: LifecycleId::new(uuid::Uuid::new_v4().to_string()).map_err(cleanup_error)?,
+        artifact_id: artifact.clone(),
+        fact: Fact::Reclamation(Reclamation::Reclaimed),
+    };
+    let payload = serde_json::to_string(&fact).map_err(cleanup_error)?;
+    conn.execute(
+        "INSERT INTO workspace_facts VALUES(?1,?2,?3)",
+        rusqlite::params![fact.id.as_str(), artifact.as_str(), payload],
+    )
+    .map_err(cleanup_error)?;
+    Ok(())
+}
+
 /// Removes an emptied run-loop run directory. `remove_dir` refuses a non-empty
-/// directory, so nothing inside it can be deleted here.
+/// directory, so nothing inside it can be deleted here. Returns `false` when an
+/// empty run directory could not be removed.
 fn remove_empty_run_dirs(
     scope: &InventoryScope<'_>,
     held: &RegistryView,
     runs: &BTreeMap<String, RunLoopRun>,
     graphs: &[String],
-) {
+) -> bool {
+    let mut removed_all = true;
     for graph in graphs {
         let Some(run) = runs.get(graph) else {
             continue;
@@ -661,10 +719,15 @@ fn remove_empty_run_dirs(
         let inside = canonical_directory(&root.path)
             .is_some_and(|root| canonical.starts_with(&root) && canonical != root);
         let empty = std::fs::read_dir(&canonical).is_ok_and(|mut items| items.next().is_none());
-        if inside && empty && canonical != scope.checkout {
-            let _ = std::fs::remove_dir(&canonical);
+        if inside
+            && empty
+            && canonical != scope.checkout
+            && std::fs::remove_dir(&canonical).is_err()
+        {
+            removed_all = false;
         }
     }
+    removed_all
 }
 
 fn apply_selected(
@@ -826,8 +889,10 @@ fn apply_selected(
     }
     let fence = super::GitRepositoryIdentity::new("git").acquire(scope.checkout, scope.ledger)?;
     let held = fence.registry_view();
-    let runs = run_loop_runs(scope.ledger);
+    // Fail closed: without readable run state nothing is removed.
+    let runs = run_loop_runs(scope.ledger)?;
     let mut emptied: Vec<String> = Vec::new();
+    let mut retained_branch = false;
     let conn = Connection::open(scope.ledger).map_err(cleanup_error)?;
     super::schema::migrate(&conn)?;
     let write = |key: &str,
@@ -930,28 +995,48 @@ fn apply_selected(
         }
         write(&key, "completed", &token)?;
         if let Some(graph) = before.0.graph_id.as_ref()
-            && runs.contains_key(graph.as_str())
-            && !emptied.iter().any(|item| item == graph.as_str())
+            && let Some(run) = runs.get(graph.as_str())
         {
-            emptied.push(graph.as_str().to_string());
-        }
-        // `branch -d` (never `-D`) refuses a branch that is not merged into HEAD.
-        if let Some(branch) = branch {
-            let mut command = crate::process::OwnedSpawnSpec::new("git");
-            command
-                .current_dir(scope.checkout)
-                .args(["branch", "-d"])
-                .arg(&branch);
-            if super::bounded_stdout(command, Duration::from_secs(10)).is_err()
-                && !report.reasons.contains(&"branch-retained")
+            if !emptied.iter().any(|item| item == graph.as_str()) {
+                emptied.push(graph.as_str().to_string());
+            }
+            // Retire the removed worktree's record; it is never deleted.
+            if before.0.source == EntrySource::Artifact
+                && let Some(artifact) = before.0.lifecycle_id.as_ref()
             {
-                report.reasons.push("branch-retained");
+                retire_removed(&conn, artifact)?;
+            }
+            // `branch -d` (never `-D`), and only while the tip is on the run's base
+            // branch: Git's own check is against HEAD, which may be elsewhere.
+            if let Some(branch) = branch {
+                let landed = match (&run.generation.base_ref, before.1.commit.as_ref()) {
+                    (Some(base), Some(commit)) => on_base(scope.checkout, commit, base),
+                    _ => false,
+                };
+                let mut command = crate::process::OwnedSpawnSpec::new("git");
+                command
+                    .current_dir(scope.checkout)
+                    .args(["branch", "-d"])
+                    .arg(&branch);
+                if !landed || super::bounded_stdout(command, Duration::from_secs(10)).is_err() {
+                    retained_branch = true;
+                }
             }
         }
     }
-    remove_empty_run_dirs(&scope, &held, &runs, &emptied);
+    let retained_dir = !remove_empty_run_dirs(&scope, &held, &runs, &emptied);
+    if retained_branch {
+        report.reasons.push("branch-retained");
+    }
+    if retained_dir {
+        report.reasons.push("run-dir-retained");
+    }
     report.apply = true;
-    report.status = "completed";
+    report.status = if retained_branch || retained_dir {
+        "partial"
+    } else {
+        "completed"
+    };
     Ok(report)
 }
 
@@ -985,11 +1070,18 @@ pub fn reclaim_run(
         reasons: Vec::new(),
         cleanup: None,
     };
-    let runs = run_loop_runs(scope.ledger);
+    let Ok(runs) = run_loop_runs(scope.ledger) else {
+        result.reasons.push("run-state-unavailable".into());
+        return Ok(result);
+    };
     let Some(run) = runs.get(graph) else {
         result.reasons.push("not-run-loop-owned".into());
         return Ok(result);
     };
+    if run.generation.base_ref.is_none() {
+        result.reasons.push("base-ref-unknown".into());
+        return Ok(result);
+    }
     if run.outcome != RunOutcome::Landed {
         result.reasons.push(format!("run-{}", run.outcome.as_str()));
         return Ok(result);

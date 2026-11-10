@@ -250,6 +250,44 @@ fn run_candidates(report: &serde_json::Value, graph: &str) -> Vec<serde_json::Va
         .collect()
 }
 
+/// After a run is reclaimed, inventory, cleanup preview and maintenance carry no
+/// entry for it: retired records are not reported and never crowd the window.
+fn assert_run_gone(fixture: &Fixture, graph: &str) {
+    let inventory = fixture.json(&["workspace", "inventory"]);
+    let left: Vec<&serde_json::Value> = inventory["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry["graph_id"] == graph
+                || entry["location"]["relative_path"]
+                    .as_str()
+                    .is_some_and(|path| path == graph || path.starts_with(&format!("{graph}/")))
+        })
+        .collect();
+    assert!(left.is_empty(), "{inventory}");
+    let preview = fixture.json(&["workspace", "preview", "--cleanup"]);
+    assert!(
+        candidates(&preview).iter().all(|item| {
+            !item["location"]["relative_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with(graph))
+        }),
+        "{preview}"
+    );
+    let maintain = fixture.json(&["workspace", "maintain"]);
+    assert_eq!(
+        maintain["data"]["selected"],
+        serde_json::json!([]),
+        "{maintain}"
+    );
+    assert_eq!(
+        maintain["data"]["retained"],
+        serde_json::json!([]),
+        "{maintain}"
+    );
+}
+
 fn digest(report: &serde_json::Value) -> String {
     report["data"]["cleanup"]["digest"]
         .as_str()
@@ -385,6 +423,9 @@ fn fresh_run_is_owned_and_one_cleanup_reclaims_the_landed_run() {
             .join(GRAPH)
             .exists()
     );
+
+    // Nothing of the reclaimed run is left to report or select.
+    assert_run_gone(&fixture, GRAPH);
 
     // Base branch and unrelated state are unchanged.
     assert_eq!(fixture.head("main"), base_landed);
@@ -649,15 +690,18 @@ fn pre_existing_legacy_runs_stay_unowned_until_adopted() {
     let plan = fixture.plan_arg();
     fixture.ok(&["review-plan", "--plan", &plan, "--accept", "--as", "probe"]);
     fixture.ok(&["run", "--plan", &plan]);
-    // Reduce the run to the shape an earlier version left: no generation, no artifacts.
+    // Reduce the ledger to the shape an earlier version left: no fence file, no
+    // repository, root, generation or artifact records.
     sql(
         &fixture,
-        &format!(
-            "DELETE FROM workspace_artifacts WHERE generation_id IN \
-             (SELECT id FROM workspace_generations WHERE graph_id='{GRAPH}'); \
-             DELETE FROM workspace_generations WHERE graph_id='{GRAPH}';"
-        ),
+        "DELETE FROM workspace_artifacts; DELETE FROM workspace_generations; \
+         DELETE FROM workspace_roots; DELETE FROM workspace_repositories;",
     );
+    let registry = fixture
+        .repo
+        .join(".git")
+        .join("meshloop-workspace-registry.json");
+    fs::remove_file(&registry).unwrap();
     fixture.ok(&["accept", "--task", "1", "--as", "probe"]);
     fixture.ok(&["resume"]);
     fixture.ok(&["accept", "--task", "2", "--as", "probe"]);
@@ -672,6 +716,8 @@ fn pre_existing_legacy_runs_stay_unowned_until_adopted() {
             &format!("meshloop/{GRAPH}/integrate"),
         ],
     );
+    // Nothing this version ran afterwards created a fence for the legacy run.
+    assert!(!registry.exists());
     let inventory = fixture.json(&["workspace", "inventory"]);
     let mine: Vec<&serde_json::Value> = inventory["data"]["entries"]
         .as_array()
@@ -713,16 +759,11 @@ fn pre_existing_legacy_runs_stay_unowned_until_adopted() {
         String::from_utf8_lossy(&refused.stderr).contains("LegacyOwnershipUnresolved"),
         "{refused:?}"
     );
+    // Adoption never creates the fence; it reports what is missing and writes nothing.
     let adopt = fixture.json(&["workspace", "adopt"]);
     assert_eq!(adopt["data"]["apply"], false, "{adopt}");
-    assert!(
-        adopt["data"]["retained"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["graph_id"] == GRAPH),
-        "{adopt}"
-    );
+    assert_eq!(adopt["data"]["status"], "fence-missing", "{adopt}");
+    assert!(!registry.exists());
     assert_eq!(fixture.meshloop_worktrees().len(), 4);
 }
 
@@ -751,6 +792,10 @@ fn busy_fence_stops_before_any_attempt_state_changes() {
         .unwrap();
     let refused = fixture.meshloop(&["resume"]);
     assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("holds the repository fence"),
+        "{refused:?}"
+    );
     assert_eq!(count(), attempts);
     assert_eq!(fixture.meshloop_worktrees(), worktrees);
     drop(held);
@@ -840,4 +885,325 @@ fn unregistered_worktree_of_an_owned_run_is_never_selected() {
     let task3 = fixture.meshloop_worktrees();
     assert_eq!(task3.len(), 1, "{task3:?}");
     assert!(task3[0].contains("task-3-"), "{task3:?}");
+}
+
+/// Review round 1 blocker: landing is judged against the base branch recorded when
+/// the run was bound, never against whatever HEAD the main checkout has now.
+#[test]
+fn detached_or_foreign_head_never_counts_as_landed() {
+    for (tag, checkout) in [
+        ("detached", vec!["checkout", "--quiet", "--detach"]),
+        ("foreign", vec!["checkout", "--quiet", "-b", "user/other"]),
+    ] {
+        let fixture = Fixture::landing(tag, "");
+        fixture.integrate_all();
+        let integrate = format!("meshloop/{GRAPH}/integrate");
+        let mut args = checkout.clone();
+        args.push(&integrate);
+        git(&fixture.repo, &args);
+        // HEAD now contains every run commit, but main (the base) does not.
+        let out = fixture.ok(&["resume"]);
+        assert!(!out.contains("reclaimed run"), "{tag}: {out}");
+        assert_eq!(fixture.meshloop_worktrees().len(), 4, "{tag}: {out}");
+        assert_eq!(
+            fixture.branches(&format!("meshloop/{GRAPH}")).len(),
+            4,
+            "{tag}"
+        );
+        let preview = fixture.json(&["workspace", "preview", "--cleanup"]);
+        let run = run_candidates(&preview, GRAPH);
+        assert!(
+            run.iter().all(|item| item["status"] == "blocked"),
+            "{tag}: {preview}"
+        );
+        let applied = fixture.json(&[
+            "workspace",
+            "apply",
+            "--cleanup",
+            "--digest",
+            &digest(&preview),
+        ]);
+        assert_ne!(
+            applied["data"]["cleanup"]["apply"], true,
+            "{tag}: {applied}"
+        );
+        assert_eq!(fixture.meshloop_worktrees().len(), 4, "{tag}");
+        assert_eq!(
+            fixture.branches(&format!("meshloop/{GRAPH}")).len(),
+            4,
+            "{tag}"
+        );
+    }
+}
+
+/// Switches the fixture from failing to working attempts and grants one more
+/// attempt, so `resume --retry` can supersede the failed one.
+fn rewrite_invoke_args(fixture: &Fixture, from: &str, to: &str) {
+    let text = fs::read_to_string(&fixture.config).unwrap();
+    assert!(text.contains(from), "{text}");
+    let text = text
+        .replace(from, to)
+        .replace("max_retries = 1", "max_retries = 2");
+    fs::write(&fixture.config, text).unwrap();
+}
+
+fn ledger_count(fixture: &Fixture, sql: &str) -> i64 {
+    rusqlite::Connection::open(fixture.repo.join(".meshloop").join("state.sqlite"))
+        .unwrap()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
+}
+
+const NOOP: &str = r#"["--noop"]"#;
+const WORK: &str = r#"["--prompt-file", "{prompt_file}"]"#;
+
+/// Item 5: a failed attempt superseded by an integrated one is reclaimed when it
+/// is clean with nothing off the base branch; with its own commit it is retained
+/// as `attempt-failed`.
+#[test]
+fn superseded_failed_attempts_follow_the_attempt_failed_rule() {
+    for keep_commit in [false, true] {
+        let tag = if keep_commit {
+            "failed-kept"
+        } else {
+            "failed-clean"
+        };
+        let fixture = Fixture::new(
+            tag,
+            "",
+            NOOP,
+            r#"{"graph_id":"probe-graph","nodes":[{"id":1,"description":"only","depends_on":[],"tier":null}]}"#,
+        );
+        let plan = fixture.plan_arg();
+        // The first attempt makes no change and fails verification.
+        let _ = fixture.meshloop(&["run", "--plan", &plan, "--accept-plan"]);
+        let failed = worktree_for(&fixture, "task-1-attempt-1");
+        if keep_commit {
+            fs::write(failed.join("work.txt"), "unlanded work\n").unwrap();
+            git(&failed, &["add", "work.txt"]);
+            git(&failed, &["commit", "--quiet", "-m", "unlanded"]);
+        }
+        rewrite_invoke_args(&fixture, NOOP, WORK);
+        fixture.ok(&["resume", "--retry"]);
+        fixture.ok(&["accept", "--task", "1", "--as", "probe"]);
+        fixture.ok(&["resume"]);
+        let out = fixture.ok(&[
+            "integrate",
+            "--graph",
+            GRAPH,
+            "--into",
+            "main",
+            "--accept-integrate",
+        ]);
+        if keep_commit {
+            assert!(out.contains("attempt-failed"), "{out}");
+            assert!(failed.join("work.txt").is_file());
+            let preview = fixture.json(&["workspace", "preview", "--cleanup"]);
+            let item = run_candidates(&preview, GRAPH)
+                .into_iter()
+                .find(|item| {
+                    item["location"]["relative_path"]
+                        .as_str()
+                        .is_some_and(|path| path.ends_with("task-1-attempt-1"))
+                })
+                .unwrap_or_else(|| panic!("{preview}"));
+            assert!(has_reason(&item, "attempt-failed"), "{item}");
+            assert!(
+                fixture
+                    .branches(&format!("meshloop/{GRAPH}"))
+                    .iter()
+                    .any(|b| b.ends_with("attempt-1"))
+            );
+        } else {
+            assert!(out.contains(&format!("reclaimed run {GRAPH}")), "{out}");
+            assert!(fixture.meshloop_worktrees().is_empty());
+            assert!(fixture.branches(&format!("meshloop/{GRAPH}")).is_empty());
+            assert_run_gone(&fixture, GRAPH);
+        }
+    }
+}
+
+/// Item 9: `run --accept-plan` on a new graph refuses leftover integrate state
+/// before it stages anything.
+#[test]
+fn run_refuses_leftover_integrate_branch_before_staging() {
+    let fixture = Fixture::landing("leftover", "");
+    git(
+        &fixture.repo,
+        &["branch", &format!("meshloop/{GRAPH}/integrate"), "main"],
+    );
+    let plan = fixture.plan_arg();
+    let out = fixture.meshloop(&["run", "--plan", &plan, "--accept-plan"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("without a runs row"),
+        "{out:?}"
+    );
+    assert_eq!(ledger_count(&fixture, "SELECT COUNT(*) FROM runs"), 0);
+    assert_eq!(
+        ledger_count(&fixture, "SELECT COUNT(*) FROM workspace_generations"),
+        0
+    );
+}
+
+/// Restart (`resume --restart`, `run --reset`) of an owned run keeps its records:
+/// history moves into a generation, a new generation is pinned to the plan, and
+/// only worktrees confirmed gone are retired. The restarted run still reclaims.
+#[test]
+fn restart_and_reset_keep_records_and_still_reclaim() {
+    let fixture = Fixture::landing("restart", "");
+    let plan = fixture.plan_arg();
+    fixture.ok(&["review-plan", "--plan", &plan, "--accept", "--as", "probe"]);
+    fixture.ok(&["run", "--plan", &plan]);
+    let artifacts = ledger_count(&fixture, "SELECT COUNT(*) FROM workspace_artifacts");
+    fixture.ok(&["resume", "--restart"]);
+    let _ = fixture.meshloop(&["run", "--plan", &plan, "--reset"]);
+    // Nothing deleted; two restarts added two generations.
+    assert!(ledger_count(&fixture, "SELECT COUNT(*) FROM workspace_artifacts") > artifacts);
+    assert_eq!(
+        ledger_count(
+            &fixture,
+            &format!("SELECT COUNT(*) FROM workspace_generations WHERE graph_id='{GRAPH}'")
+        ),
+        3
+    );
+    assert!(
+        ledger_count(
+            &fixture,
+            "SELECT COUNT(*) FROM attempts WHERE generation_id IS NOT NULL"
+        ) > 0
+    );
+    // Attempt ids are never reused after a restart.
+    assert_eq!(
+        ledger_count(
+            &fixture,
+            "SELECT COUNT(*) FROM (SELECT attempt_id FROM attempts GROUP BY attempt_id HAVING COUNT(*)>1)"
+        ),
+        0
+    );
+    fixture.ok(&["accept", "--task", "1", "--as", "probe"]);
+    fixture.ok(&["resume"]);
+    fixture.ok(&["accept", "--task", "2", "--as", "probe"]);
+    fixture.ok(&["accept", "--task", "3", "--as", "probe"]);
+    let last = fixture.ok(&["resume"]);
+    assert!(last.contains("Integrated"), "{last}");
+    let out = fixture.ok(&[
+        "integrate",
+        "--graph",
+        GRAPH,
+        "--into",
+        "main",
+        "--accept-integrate",
+    ]);
+    assert!(out.contains(&format!("reclaimed run {GRAPH}")), "{out}");
+    assert!(fixture.meshloop_worktrees().is_empty());
+    assert!(fixture.branches(&format!("meshloop/{GRAPH}")).is_empty());
+    assert_run_gone(&fixture, GRAPH);
+}
+
+/// A crash between registering an artifact and adding its worktree leaves a
+/// record with nothing on disk. Recovery retires it, and the run still reclaims.
+#[test]
+fn record_without_worktree_is_retired_on_recovery() {
+    let fixture = Fixture::new(
+        "crash",
+        "",
+        NOOP,
+        r#"{"graph_id":"probe-graph","nodes":[{"id":1,"description":"only","depends_on":[],"tier":null}]}"#,
+    );
+    let plan = fixture.plan_arg();
+    let _ = fixture.meshloop(&["run", "--plan", &plan, "--accept-plan"]);
+    // Emulate the crash: the attempt worktree and branch never existed.
+    let failed = worktree_for(&fixture, "task-1-attempt-1");
+    git(
+        &fixture.repo,
+        &["worktree", "remove", "--force", failed.to_str().unwrap()],
+    );
+    git(
+        &fixture.repo,
+        &[
+            "branch",
+            "-D",
+            &format!("meshloop/{GRAPH}/task-1/attempt-1"),
+        ],
+    );
+    rewrite_invoke_args(&fixture, NOOP, WORK);
+    fixture.ok(&["resume", "--retry"]);
+    assert_eq!(
+        ledger_count(&fixture, "SELECT COUNT(*) FROM workspace_facts"),
+        1
+    );
+    fixture.ok(&["accept", "--task", "1", "--as", "probe"]);
+    fixture.ok(&["resume"]);
+    let out = fixture.ok(&[
+        "integrate",
+        "--graph",
+        GRAPH,
+        "--into",
+        "main",
+        "--accept-integrate",
+    ]);
+    assert!(out.contains(&format!("reclaimed run {GRAPH}")), "{out}");
+    assert!(fixture.meshloop_worktrees().is_empty());
+    assert_run_gone(&fixture, GRAPH);
+}
+
+/// A run started on a detached HEAD records no base branch and is never judged
+/// landed, even once its work is merged.
+#[test]
+fn run_without_base_branch_is_never_landed() {
+    let fixture = Fixture::landing("no-base", "");
+    git(&fixture.repo, &["checkout", "--quiet", "--detach", "main"]);
+    fixture.integrate_all();
+    git(&fixture.repo, &["checkout", "--quiet", "main"]);
+    git(
+        &fixture.repo,
+        &[
+            "merge",
+            "--quiet",
+            "--ff-only",
+            &format!("meshloop/{GRAPH}/integrate"),
+        ],
+    );
+    let preview = fixture.json(&["workspace", "preview", "--cleanup"]);
+    let run = run_candidates(&preview, GRAPH);
+    assert!(!run.is_empty(), "{preview}");
+    for item in &run {
+        assert!(has_reason(item, "base-ref-unknown"), "{item}");
+    }
+    fixture.json(&[
+        "workspace",
+        "apply",
+        "--cleanup",
+        "--digest",
+        &digest(&preview),
+    ]);
+    assert_eq!(fixture.meshloop_worktrees().len(), 4);
+}
+
+/// A plan re-accepted after a mutation is pinned by a new generation before any
+/// further worktree is registered.
+#[test]
+fn mutated_plan_gets_a_new_generation() {
+    let fixture = Fixture::landing("mutated", "");
+    let plan = fixture.plan_arg();
+    fixture.ok(&["review-plan", "--plan", &plan, "--accept", "--as", "probe"]);
+    fixture.ok(&["run", "--plan", &plan]);
+    let generations = || {
+        ledger_count(
+            &fixture,
+            &format!(
+                "SELECT COUNT(DISTINCT plan_hash) FROM workspace_generations WHERE graph_id='{GRAPH}'"
+            ),
+        )
+    };
+    assert_eq!(generations(), 1);
+    fixture.ok(&[
+        "mutate-plan",
+        "--graph",
+        GRAPH,
+        "--mutation",
+        r#"{"type":"append_followup","source_task":3,"new_tasks":[{"id":4,"description":"fourth","depends_on":[3],"tier":null}]}"#,
+    ]);
+    assert_eq!(generations(), 2);
 }

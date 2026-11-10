@@ -404,7 +404,7 @@ impl EventLog for SqliteStore {
             .conn
             .prepare(
                 "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at
-                 FROM events WHERE graph_id = ?1 ORDER BY event_id ASC",
+                 FROM events WHERE graph_id = ?1 AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) ORDER BY event_id ASC",
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
         let rows = stmt
@@ -739,7 +739,7 @@ impl RunStore for SqliteStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT attempt_id FROM attempts WHERE graph_id = ?1 AND task_id = ?2 ORDER BY attempt_id",
+                "SELECT attempt_id FROM attempts WHERE graph_id = ?1 AND task_id = ?2 AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = attempts.graph_id)) ORDER BY attempt_id",
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
         let ids: Result<Vec<u32>, _> = stmt
@@ -770,7 +770,7 @@ impl RunStore for SqliteStore {
     fn attempts_for_graph(&self, graph_id: &str) -> Result<Vec<AttemptRow>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT attempt_id FROM attempts WHERE graph_id = ?1 ORDER BY attempt_id")
+            .prepare("SELECT attempt_id FROM attempts WHERE graph_id = ?1 AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = attempts.graph_id)) ORDER BY attempt_id")
             .map_err(|e| StoreError::Io(e.to_string()))?;
         let ids: Result<Vec<u32>, _> = stmt
             .query_map(params![graph_id], |r| r.get(0))
@@ -788,7 +788,13 @@ impl RunStore for SqliteStore {
 
     fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError> {
         self.reject_bound_graph(graph_id)?;
-        self.forget_run_loop_attempts(graph_id)?;
+        // A run-loop run's records are never deleted: its restart moves history
+        // into a generation instead (issue #142).
+        let graph = meshloop_domain::workspace::GraphId::new(graph_id)
+            .map_err(|_| StoreError::PlanRevisionMismatch)?;
+        if !self.run_loop_generations(&graph)?.is_empty() {
+            return Err(StoreError::LegacyOwnershipUnresolved);
+        }
         self.telemetry.clear_graph(graph_id);
         self.conn
             .execute(

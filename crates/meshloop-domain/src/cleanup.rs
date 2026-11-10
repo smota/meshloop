@@ -34,6 +34,12 @@ pub struct CleanupCandidateFacts {
     /// The run-loop run directory itself. It holds worktrees and is never a
     /// `git worktree remove` target; cleanup removes it only once it is empty.
     pub run_container: bool,
+    /// A run-loop attempt that never reached `Integrated` (superseded or failed).
+    /// It is reclaimable only when clean with every commit on the base branch.
+    pub attempt_failed: bool,
+    /// The owning run recorded no base branch (started on a detached HEAD or a
+    /// Meshloop branch), so it is never judged landed.
+    pub base_unknown: bool,
 }
 
 /// Task outcome of a run the run loop owns. Only `Landed` permits cleanup:
@@ -111,6 +117,8 @@ pub enum CleanupReason {
     DirtyUntracked,
     MissingDependency,
     MissingRecoveryObject,
+    AttemptFailed,
+    BaseRefUnknown,
     RunCancelled,
     RunContainer,
     RunFailed,
@@ -130,6 +138,8 @@ impl CleanupReason {
             Self::DirtyUntracked => "dirty-untracked",
             Self::MissingDependency => "missing-dependency",
             Self::MissingRecoveryObject => "missing-recovery-object",
+            Self::AttemptFailed => "attempt-failed",
+            Self::BaseRefUnknown => "base-ref-unknown",
             Self::RunCancelled => "run-cancelled",
             Self::RunContainer => "run-container",
             Self::RunFailed => "run-failed",
@@ -215,6 +225,17 @@ fn reasons_for(candidate: &CleanupCandidateFacts, stale: bool) -> Vec<CleanupRea
     if candidate.run_container {
         push(&mut reasons, CleanupReason::RunContainer);
     }
+    if candidate.base_unknown {
+        push(&mut reasons, CleanupReason::BaseRefUnknown);
+    }
+    if candidate.attempt_failed
+        && (candidate.dirty_tracked
+            || candidate.dirty_untracked
+            || candidate.unknown_ignored
+            || unique_commit(candidate))
+    {
+        push(&mut reasons, CleanupReason::AttemptFailed);
+    }
     if stale {
         push(&mut reasons, CleanupReason::StaleFacts);
     }
@@ -290,12 +311,19 @@ fn candidate_block(candidate: &CleanupCandidateFacts) -> String {
     blockers.sort_unstable();
     // Run-loop facts are appended only when present, so digests of entries the
     // run loop does not own (and their recovery journals) are unchanged.
-    let run = match (candidate.run_outcome, candidate.run_container) {
-        (None, false) => String::new(),
-        (outcome, container) => format!(
-            "\nrun={}\ncontainer={}",
+    let run = match (
+        candidate.run_outcome,
+        candidate.run_container,
+        candidate.attempt_failed,
+        candidate.base_unknown,
+    ) {
+        (None, false, false, false) => String::new(),
+        (outcome, container, failed, unknown) => format!(
+            "\nrun={}\ncontainer={}\nattempt-failed={}\nbase-unknown={}",
             outcome.map(RunOutcome::as_str).unwrap_or("-"),
-            bit(container)
+            bit(container),
+            bit(failed),
+            bit(unknown)
         ),
     };
     let block = format!(
@@ -418,6 +446,8 @@ mod tests {
             receipt: None,
             run_outcome: None,
             run_container: false,
+            attempt_failed: false,
+            base_unknown: false,
         }
     }
 
@@ -450,6 +480,8 @@ mod tests {
                 CleanupReason::MissingRecoveryObject,
                 "missing-recovery-object",
             ),
+            (CleanupReason::AttemptFailed, "attempt-failed"),
+            (CleanupReason::BaseRefUnknown, "base-ref-unknown"),
             (CleanupReason::RunCancelled, "run-cancelled"),
             (CleanupReason::RunContainer, "run-container"),
             (CleanupReason::RunFailed, "run-failed"),
@@ -691,5 +723,23 @@ mod tests {
         let preview = cleanup_policy(&container, None);
         assert_eq!(codes(&preview), vec!["run-container"]);
         assert_ne!(preview.digest, landed_preview.digest);
+        let mut unknown = landed.clone();
+        unknown.candidates[0].base_unknown = true;
+        assert_eq!(
+            codes(&cleanup_policy(&unknown, None)),
+            vec!["base-ref-unknown"]
+        );
+        // A superseded attempt that is clean and on the base branch is reclaimable;
+        // with work that is not on the base branch it is retained as attempt-failed.
+        let mut superseded = landed.clone();
+        superseded.candidates[0].attempt_failed = true;
+        let clean = cleanup_policy(&superseded, None);
+        assert_eq!(clean.candidates[0].status, CleanupEligibility::Eligible);
+        assert_ne!(clean.digest, landed_preview.digest);
+        superseded.candidates[0].commit_reachable = false;
+        assert_eq!(
+            codes(&cleanup_policy(&superseded, None)),
+            vec!["attempt-failed", "unique-commit"]
+        );
     }
 }

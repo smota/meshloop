@@ -295,6 +295,8 @@ fn activate(store: &mut SqliteStore, lease: &dyn RepositoryFence, number: u32) {
                     root_alias: RootAlias::new("worktrees").unwrap(),
                     relative_path: RelativePath::new(format!("runs/run-1/gen-{number}")).unwrap(),
                     layout_version: 1,
+                    producer: None,
+                    base_ref: None,
                 },
                 authorization: auth(rev.metadata.id.as_str()),
                 revision: rev,

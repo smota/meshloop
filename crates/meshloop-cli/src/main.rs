@@ -686,6 +686,8 @@ fn cmd_review_plan(
             return ExitCode::from(1);
         }
     };
+    // Re-acceptance pins a new generation of an owned run (issue #142).
+    let ownership = compose::run_ownership(&composed);
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -702,7 +704,7 @@ fn cmd_review_plan(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
-        ownership: None,
+        ownership: Some(&ownership),
     };
 
     let mut graph = graph;
@@ -982,8 +984,10 @@ fn cmd_run(
     // `--accept-plan` is the human acceptance. Record it before `start`, so the run's
     // ownership is registered before its first worktree (issue #142).
     if existing_state != Some(PlanState::PlanAccepted) {
+        // A new graph must not inherit leftover integrate state.
         let staged = if existing_state.is_none() {
-            saga.stage_plan(graph.clone(), run_base.clone()).map(|_| ())
+            saga.require_fresh_integrate(&graph_id)
+                .and_then(|()| saga.stage_plan(graph.clone(), run_base.clone()).map(|_| ()))
         } else {
             Ok(())
         };
@@ -2988,6 +2992,8 @@ fn cmd_mutate_plan(
         .iter()
         .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
         .collect();
+    // Re-acceptance pins a new generation of an owned run (issue #142).
+    let ownership = compose::run_ownership(&composed);
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -3004,7 +3010,7 @@ fn cmd_mutate_plan(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
-        ownership: None,
+        ownership: Some(&ownership),
     };
 
     let graph_id = match graph_arg {

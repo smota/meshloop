@@ -58,7 +58,10 @@ fn regular_entry(path: &Path, directory: bool) -> Result<(), StoreError> {
     Ok(())
 }
 fn lock(file: &File) -> Result<(), StoreError> {
-    file.try_lock().map_err(|_| refused())
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => StoreError::FenceBusy,
+        std::fs::TryLockError::Error(_) => refused(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,15 +479,20 @@ impl RunLoopOwnershipAccess {
 }
 struct RunLoopLease {
     lease: RepositoryLease,
-    alias: RootAlias,
+    alias: Option<RootAlias>,
     base: PathBuf,
 }
 impl meshloop_engine::workspace::RunOwnershipLease for RunLoopLease {
     fn fence(&self) -> &dyn RepositoryFence {
         &self.lease
     }
-    fn root_alias(&self) -> &RootAlias {
-        &self.alias
+    fn root_alias(&mut self) -> Result<RootAlias, StoreError> {
+        if let Some(alias) = &self.alias {
+            return Ok(alias.clone());
+        }
+        let alias = self.lease.run_loop_root(&self.base)?;
+        self.alias = Some(alias.clone());
+        Ok(alias)
     }
     fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError> {
         let root = self.lease.manifest.roots.get(alias);
@@ -502,20 +510,19 @@ impl meshloop_engine::workspace::RunOwnership for RunLoopOwnershipAccess {
         // holder (bounded: 20 tries, 1 second), then fail closed.
         let identity = GitRepositoryIdentity::new(&self.git);
         let mut tries = 0;
-        let mut lease = loop {
+        let lease = loop {
             match identity.acquire(&self.checkout, &self.ledger) {
                 Ok(lease) => break lease,
-                Err(_) if tries < 19 => {
+                Err(StoreError::FenceBusy) if tries < 19 => {
                     tries += 1;
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(error) => return Err(error),
             }
         };
-        let alias = lease.run_loop_root(&self.worktree_base)?;
         Ok(Box::new(RunLoopLease {
             lease,
-            alias,
+            alias: None,
             base: self.worktree_base.clone(),
         }))
     }

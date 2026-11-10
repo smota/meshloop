@@ -42,8 +42,15 @@ pub fn graph_outcomes(ledger: &Path) -> BTreeMap<String, GraphOutcome> {
     else {
         return outcomes;
     };
-    let Ok(mut statement) =
-        connection.prepare("SELECT graph_id, to_state FROM events ORDER BY graph_id, event_id")
+    // History a run-loop restart moved into an earlier generation is not the
+    // run's outcome. Ledgers older than the scope columns use every event.
+    let Ok(mut statement) = connection
+        .prepare(
+            "SELECT graph_id, to_state FROM events WHERE generation_id IS NULL OR graph_id IN (SELECT graph_id FROM workspace_run_bindings) ORDER BY graph_id, event_id",
+        )
+        .or_else(|_| {
+            connection.prepare("SELECT graph_id, to_state FROM events ORDER BY graph_id, event_id")
+        })
     else {
         return outcomes;
     };
@@ -62,54 +69,55 @@ pub fn graph_outcomes(ledger: &Path) -> BTreeMap<String, GraphOutcome> {
     outcomes
 }
 
-/// A run the run loop owns (issue #142), with its run directory generation and
-/// the current outcome of its tasks.
+/// A run the run loop owns (issue #142): its binding generation (run directory
+/// and base branch), the current outcome of its tasks, and its live attempt
+/// artifacts that never reached `Integrated`.
 #[derive(Debug, Clone)]
 pub(crate) struct RunLoopRun {
     pub generation: GenerationRecord,
     pub outcome: meshloop_domain::cleanup::RunOutcome,
+    pub failed_attempts: BTreeSet<LifecycleId>,
 }
 
-/// Read run-loop-owned runs without creating or migrating a ledger. A run whose
-/// tasks cannot be replayed is reported `Incomplete`, so cleanup retains it.
-pub(crate) fn run_loop_runs(ledger: &Path) -> BTreeMap<String, RunLoopRun> {
+/// Read run-loop runs without creating or migrating a ledger. A ledger that
+/// exists but cannot be read is an error, so callers fail closed. A run whose
+/// tasks cannot be replayed is `Incomplete`, so cleanup retains it.
+pub(crate) fn run_loop_runs(ledger: &Path) -> Result<BTreeMap<String, RunLoopRun>, StoreError> {
     use meshloop_domain::cleanup::RunOutcome;
     use meshloop_domain::state::TaskState;
     use meshloop_engine::ports::{EventLog, RunStore};
     use meshloop_engine::workspace::RuntimeLedger;
     let mut runs = BTreeMap::new();
-    if !ledger.is_file() {
-        return runs;
+    match std::fs::symlink_metadata(ledger) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+        Err(_) => return Err(StoreError::Io("ledger unreadable".into())),
+        Ok(_) => {}
     }
-    let Ok(Some(store)) = SqliteStore::open_read_only(ledger) else {
-        return runs;
+    let Some(store) = SqliteStore::open_read_only(ledger)? else {
+        return Ok(runs);
     };
-    let Ok(generations) = payloads::<GenerationRecord>(
+    let firsts = payloads::<GenerationRecord>(
         &store.conn,
         "SELECT payload_json FROM workspace_generations WHERE ordinal=1 ORDER BY id",
-    ) else {
-        return runs;
-    };
-    for first in generations
+    )
+    .map_err(|()| StoreError::Corrupt("generation records unreadable".into()))?;
+    for first in firsts
         .into_iter()
         .filter(GenerationRecord::is_run_loop_binding)
     {
         // Same rule as the store: unbound, unmarked, bound by this generation.
         let Some(generation) = store
-            .run_loop_generation(&first.graph_id)
-            .ok()
-            .flatten()
+            .run_loop_generation(&first.graph_id)?
             .filter(|binding| *binding == first)
         else {
             continue;
         };
-        let graph = generation.graph_id.as_str().to_string();
-        let graph = graph.as_str();
-        let states = store
-            .records_for_graph(graph)
-            .ok()
-            .and_then(|records| meshloop_engine::recovery::replay_tasks(&records).ok());
-        let plan = store.graph_from_run(graph).ok();
+        let graph = generation.graph_id.clone();
+        let records = store.records_for_graph(graph.as_str()).ok();
+        let states = records
+            .as_ref()
+            .and_then(|records| meshloop_engine::recovery::replay_tasks(records).ok());
+        let plan = store.graph_from_run(graph.as_str()).ok();
         let outcome = match (plan, states) {
             (Some(plan), Some(states)) => {
                 let finals: Vec<TaskState> = plan
@@ -134,15 +142,33 @@ pub(crate) fn run_loop_runs(ledger: &Path) -> BTreeMap<String, RunLoopRun> {
             }
             _ => RunOutcome::Incomplete,
         };
+        let integrated: BTreeSet<u32> = records
+            .iter()
+            .flatten()
+            .filter(|record| record.to == TaskState::Integrated)
+            .filter_map(|record| record.attempt_id.map(|id| id.0))
+            .collect();
+        let failed_attempts = store
+            .run_loop_artifacts(&graph)?
+            .into_iter()
+            .filter(|(artifact, retired)| {
+                !retired
+                    && artifact
+                        .attempt_id
+                        .is_some_and(|id| !integrated.contains(&id.0))
+            })
+            .map(|(artifact, _)| artifact.id)
+            .collect();
         runs.insert(
-            graph.to_string(),
+            graph.as_str().to_string(),
             RunLoopRun {
                 generation,
                 outcome,
+                failed_attempts,
             },
         );
     }
-    runs
+    Ok(runs)
 }
 
 struct AttemptSeen {
@@ -162,6 +188,8 @@ struct LedgerView {
     legacy_runs: BTreeSet<String>,
     legacy_attempts: BTreeSet<String>,
     attempts: Vec<AttemptSeen>,
+    /// Artifact ids a reclamation fact retired (issue #142).
+    retired: BTreeSet<String>,
 }
 
 pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
@@ -301,6 +329,7 @@ fn owned_keys(view: &LedgerView) -> BTreeSet<(RootAlias, RelativePath)> {
         .chain(
             view.artifacts
                 .iter()
+                .filter(|a| !view.retired.contains(a.id.as_str()))
                 .map(|a| (a.root_alias.clone(), a.relative_path.clone())),
         )
         .chain(view.provisionals.iter().map(|p| {
@@ -484,7 +513,31 @@ fn load_ledger(conn: &Connection) -> Result<LedgerView, ()> {
         legacy_runs,
         legacy_attempts,
         attempts: load_attempts(conn)?,
+        retired: load_retired(conn)?,
     })
+}
+
+fn load_retired(conn: &Connection) -> Result<BTreeSet<String>, ()> {
+    let facts: Vec<LifecycleFact> = payloads(
+        conn,
+        "SELECT payload_json FROM workspace_facts ORDER BY rowid",
+    )?;
+    Ok(facts
+        .into_iter()
+        .filter(|f| matches!(f.fact, Fact::Reclamation(how) if how.retires()))
+        .map(|f| f.artifact_id.as_str().to_string())
+        .collect())
+}
+
+/// True when `graph` is a run-loop run: unbound, unmarked, and bound by a run-loop
+/// first generation.
+fn run_loop_graph(view: &LedgerView, graph: &str) -> bool {
+    !view.bindings.contains(graph)
+        && !view.legacy_runs.contains(graph)
+        && view
+            .generations
+            .iter()
+            .any(|g| g.graph_id.as_str() == graph && g.is_run_loop_binding())
 }
 
 fn column_strings(conn: &Connection, sql: &str) -> Result<Vec<String>, ()> {
@@ -533,12 +586,30 @@ fn push_ledger_observations(
         .map(|generation| (generation.id.as_str(), generation))
         .collect();
     for generation in &view.generations {
+        let run_loop = run_loop_graph(view, generation.graph_id.as_str());
+        // A run-loop run is reported once, by its binding: later generations share
+        // its directory and pin only a plan.
+        if run_loop && generation.ordinal > 1 {
+            continue;
+        }
         let (location, presence, withheld) = resolve_record(
             &generation.root_alias,
             &generation.relative_path,
             registry,
             identity_confirmed,
         );
+        // A fully reclaimed run-loop run leaves nothing to report.
+        if run_loop
+            && presence == Presence::Missing
+            && !view.artifacts.iter().any(|artifact| {
+                !view.retired.contains(artifact.id.as_str())
+                    && generation_by_id
+                        .get(artifact.generation_id.as_str())
+                        .is_some_and(|g| g.graph_id == generation.graph_id)
+            })
+        {
+            continue;
+        }
         observations.push(ledger_observation(
             identity_confirmed,
             LedgerObservation {
@@ -553,7 +624,11 @@ fn push_ledger_observations(
             },
         ));
     }
-    for artifact in &view.artifacts {
+    for artifact in view
+        .artifacts
+        .iter()
+        .filter(|artifact| !view.retired.contains(artifact.id.as_str()))
+    {
         let legacy = generation_by_id
             .get(artifact.generation_id.as_str())
             .is_some_and(|generation| view.legacy_runs.contains(generation.graph_id.as_str()));
@@ -630,6 +705,15 @@ fn push_ledger_observations(
             || view.legacy_runs.contains(&attempt.graph_id)
             || legacy_run(view, &attempt.graph_id);
         if attempt.path.is_none() && (legacy_run(view, &attempt.graph_id) || !marked) {
+            continue;
+        }
+        // The attempt's worktree was retired with its artifact record.
+        if view.artifacts.iter().any(|artifact| {
+            artifact
+                .attempt_id
+                .is_some_and(|id| id.0.to_string() == attempt.id)
+                && view.retired.contains(artifact.id.as_str())
+        }) {
             continue;
         }
         let Ok(graph_id) = GraphId::new(attempt.graph_id.clone()) else {
