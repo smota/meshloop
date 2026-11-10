@@ -67,7 +67,7 @@ Read-only, in the shell and through eval:
 | `/meshloop report [GRAPH]` | `(meshloop:report "GRAPH")` | The run report: harnesses and `model_ref`s dispatched, selected harnesses not exercised, one line per node |
 | `/meshloop review-plan [--plan FILE]` | none | The plan file's nodes and where its review stands |
 | `/meshloop hook-check FORM` | none | Whether the `:tool` veto refuses an eval call whose form is FORM |
-| `/meshloop board-sync [GRAPH]` | none | Posts the runs' new events to the repository's nodecode board, when `board` is on ([The Board projection](#the-board-projection)). It writes nothing to meshloop |
+| `/meshloop board-sync [GRAPH]` | none | Puts this session on the repository's nodecode board and posts the runs' new events there, when `board` is on ([The Board projection](#the-board-projection)). It writes nothing to meshloop |
 
 Commands that write. These are slash commands only: they are not eval verbs or tools, and no
 hook, timer or Board post calls them. Each refuses in one line while `write_commands` is off,
@@ -218,16 +218,31 @@ reads a post.
 - **One board per repository.** The board is named `meshloop-` plus 12 hex digits of the
   SHA-256 of the repository root's real path, for example `meshloop-b9a29b1a6412`.
   Nodecode lets a session sit on one board, so this name is the same for every run in
-  the repository. Every post names its run (graph). The session that types the command is
-  put on that board (`board:join`), leaving any other board it was on, and every post is
-  that session's (`board:post`). A supervising session joins the board itself, with
+  the repository. Every post names its run (graph) and is posted by the session that
+  typed the command (`board:post`).
+- **Joining is explicit.** Only `/meshloop board-sync` puts the session that typed it on the
+  repository's board (`board:join`), and its answer says "this session is now on
+  meshloop-X; it left any board it was on". The cell records that session id in its cursor
+  file. A sync after another command posts only for a session recorded there that is still
+  on that board. The cell reads which board the session is on from the Board cell's
+  join and leave facts, never from posts. Any other session posts nothing and gets one
+  line: "run /meshloop board-sync to put this session on meshloop-X (it leaves its
+  current board)". A supervising session joins the board itself, with
   `/board meshloop-...`. `/meshloop board-sync` prints the name.
 - **The source.** `meshloop events --graph G --after N --json` is a read-only verb (ADR
   0034) added for this projection. It returns the graph's events in log order, each with
   `seq`, the event log's own id. The id is unique and increasing and is never renumbered.
   Each event carries the task, attempt, states, event name and the attempt's worktree. It
   never carries a reason, a note or worker output. `watch` was not enough: it polls
-  status and sees only the transitions between two polls.
+  status and sees only the transitions between two polls. The verb folds the whole log the
+  way status does (`replay_tasks`) and returns each node's folded state (`nodes`) and its
+  newest counted row (`latest`). A row the fold skips is marked `superseded`: on a ledger
+  written before #167, a cancelled attempt's stale check result after its `Cancel`. The
+  cell never posts a superseded row and moves its cursor past it, so the board never
+  shows a state that status does not, and never wakes anyone for one. `--limit` (default
+  1000; the cell passes 200) pages the rows in SQL, and `more` says that rows remain.
+  `max_seq`, the ledger's newest event id, and `ledger_id` let the cell notice a replaced
+  ledger.
 - **The post.** Each post is one line from a fixed template made of meshloop's own words:
 
   ```text
@@ -237,36 +252,48 @@ reads a post.
 
   The fields are the graph id, the event's `seq`, the node, its new state, the state it
   left, the event name, and the evidence path: the attempt's worktree relative to the
-  repository root, or `none`. A plan line is posted when the run's plan state changes,
+  repository root, or `outside-repo/` and its last two components for a worktree outside
+  it (`\` separates as `/` does), or `none`. A plan line is posted when the run's plan state changes,
   numbered by plan change. No description, note, reason, diff, log or worker output goes
   in a post. States and event names must be ASCII letters and digits or they become `?`.
   An `@` in a path is written `%40`, so a post can never mention a session by accident.
   A post fits the board's `board.post_chars` (1000 by default). The evidence path is
-  shortened from the left first.
-- **Exactly once.** A cursor holds, for each graph, the `seq` of the last posted event and
-  the last posted plan state. It is a file of this cell's own under the nodecode home,
-  `meshloop/board/<store>/<board>.cursor`, and never in meshloop's store. The cell writes
-  it with one rename after each post. A second sync, a `resume`, a restarted cell or a sync
-  after an interrupted run therefore posts nothing twice. The `seq` in the text keeps
-  posts distinct for the Board's 60-second same-words refusal. That refusal is read as
-  "already posted", which covers a crash between a post and its cursor write when the next
-  sync comes within 60 s. One gap is left: a crash in that window with the next sync more
-  than 60 s later posts that one event again. If the cursor file is not one this cell
-  wrote, the cell refuses to post. It does not start over silently.
+  shortened from the left first, then the rest of the line is clipped. The mention is
+  never cut: it is the last word, whole, or absent when `post_chars` cannot hold it.
+- **Once, and never a second wake.** A cursor holds, for each graph, the `seq` of the last
+  posted event, the last posted plan state, the ledger it was kept on, and the post in
+  flight. It is a file of this cell's own under the nodecode home,
+  `meshloop/board/<store>/<board>.cursor`, next to the joined sessions, and never in
+  meshloop's store. Before each post the cell writes a `pending` marker. After the post it
+  moves the cursor and clears the marker, each write one rename. A second sync, a
+  `resume`, a restarted cell or a sync after an interrupted run therefore posts nothing
+  twice. The `seq` in the text keeps posts distinct for the Board's 60-second same-words
+  refusal, and that refusal is read as "already posted". A crash between a post and its
+  cursor write leaves the marker. The next sync posts that one event again *without* its
+  mention: delivery is at least once, and a crash never wakes the supervisor twice. If the
+  cursor was kept on another ledger (another `ledger_id`, or a `seq` past the ledger's
+  `max_seq`, as after `.meshloop/` was deleted and runs started again), that graph starts
+  over and the answer says "cursor reset". If the cursor file is not one this cell wrote,
+  the cell refuses to post. It does not start over silently.
 - **When it runs.** Only inside a `/meshloop` command the operator typed. `/meshloop
   board-sync [GRAPH]` runs it. While `board_after_commands` is on, which is the default
   when `board` is on, `run`, `resume`, `accept`, `cancel` and `status` also sync afterwards
   and add a `meshloop board:` line to their answer. The graphs synced are the graph the
-  command named, the newest run and every run waiting for acceptance. There is no timer,
+  command named, the newest run and every run waiting for acceptance. An id that is not a
+  graph id is dropped with a note, never posted and never written to the cursor. There
+  is no timer,
   thread or hook point, so meshloop and this cell add no daemon (ADR 0022). A transition
   made by a detached driver reaches the board at the next such command. Eval verbs never
   post, so a model turn does not drive the projection. One sync posts at most 200 events
-  for each graph and says how many are left.
+  for each graph and says when more wait for the next.
 - **No mentions by default.** A post mentions no one. With `wake_on_gates` on, a post about
   a gate (`AwaitingPlanReview`, `AwaitingReview`, `Blocked`, `Failed`) ends with
   `@<supervisor_session>`, and only when that state is still the node's current state, so
-  replayed history wakes no one. The mention is the template's last word and comes with
-  no instruction. The Board wakes the named session if it is idle, on the board, and
+  replayed history wakes no one. The current state is the newest row meshloop's fold
+  counts for the node, reaching the folded state. A first sync of a run that ended `Failed`
+  therefore still wakes the supervisor, because `Failed` is that node's current gate. The
+  same holds after a "cursor reset". The mention is the template's last word and comes
+  with no instruction. The Board wakes the named session if it is idle, on the board, and
   within `board.hops` (4 by default; 0 never wakes). It answers `woke ID` or why not, and
   the cell repeats that answer.
 - **What a wake costs.** A wake starts a model turn in the supervising session with that
@@ -290,7 +317,7 @@ reads a post.
 A sync answers like this:
 
 ```text
-meshloop board: meshloop-b9a29b1a6412
+meshloop board: meshloop-b9a29b1a6412; this session is now on meshloop-b9a29b1a6412; it left any board it was on
   g137: 4 posts, cursor at event 13; the board said: woke s-MESHLOOPSUPER
 ```
 
@@ -365,18 +392,24 @@ list. To read a new field, add it to `contract.json` first.
   branch; and cancel leaves no process in the repository and only worktrees meshloop owns.
   For the Board projection (#137), on a fixture repository of its own with the
   `nodecode-board` cell on and a supervising session on the board, it checks the
-  following. With `board` off, `board-sync` refuses and `status` posts nothing. The
-  board's name matches one computed independently from the repository path. With `board`
-  on, the board file holds exactly one post per event `meshloop events` lists, in order,
+  following. With `board` off, `board-sync` refuses and `status` posts nothing. With it
+  on, `status` from a session `board-sync` never joined posts nothing and says how to
+  join, even from a session already on the board. Only `board-sync` joins, and it says
+  so. The board's name matches one computed independently from the repository path. The
+  board file holds exactly one post per event `meshloop events` lists, in order,
   and one post for the plan state. No post holds `@`, the run's text, or more than
   `post_chars`. A second sync posts nothing. A cursor rewound to before its last post posts
-  no duplicate, because the Board refuses the same words. Three posts saying `accept`,
+  no duplicate, because the Board refuses the same words. The cursor file records the
+  joined session. A joined session moved to another board posts nothing there until
+  `board-sync` brings it back. Three posts saying `accept`,
   including `/meshloop accept --task 1 --as x`, leave the event log, the meshloop store and
   the node unchanged and start no process. With `wake_on_gates` on, it kills the run's
   driver and worker during an attempt and resumes, with a retry. It then checks that every
   event of the whole run was posted exactly once and that only gate posts mention the
   supervising session. It checks that the Board woke that session once for each such
-  post, read from its timeline, and that a restarted cell posts nothing again. The
+  post, read from its timeline. A post left in flight (`pending`) is posted again without
+  its mention and wakes no one. A restarted cell posts nothing again, and a cursor kept on
+  another ledger id resets and says so. The
   throwaway home has no model, so a woken turn ends at once ("no model is chosen yet")
   with no model call: the wake is delivered and nothing is spent. It never touches the
   operator's nodecode home. `--work` must sit inside the repository's
@@ -408,9 +441,12 @@ list. To read a new field, add it to `contract.json` first.
   `@` or free text from any field, every post within `post_chars` down to 40, a long path
   shortened from the left), when a post mentions (`wake_on_gates` off: never; on: only a
   current gate, only a well-formed supervisor id), the cursor file (round trip, refusal of a
-  foreign or broken file), and which graphs a command names. It also reads the sources to
-  check that the cell is one-way: no source names the Board's post facts, its `:round`
-  delivery or its readers, the only Board verbs called are `JOIN` and `POST`, and the
+  foreign or broken file, format 1, sessions, ledger, pending), when a cursor counts as kept
+  on another ledger, when an event is current (newest counted row reaching the folded
+  state, so not a pre-#167 stale row), paths outside the repository and with `\`, the
+  mention never cut, and which graphs a command names. It also reads the sources to check
+  that the cell is one-way: no source names the Board's post facts, its `:round` delivery
+  or its post readers, the only Board verbs called are `JOIN` and `POST`, and the
   projection asks meshloop only for `events` and `status`. Neither `cargo test` nor
   `xtask check` runs it.
 

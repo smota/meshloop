@@ -2170,8 +2170,9 @@ struct EventsRead {
 /// name, time, the attempt's worktree as meshloop recorded it), never a reason, note
 /// or worker output, so a projection such as the nodecode cell's Board can keep a
 /// cursor on `seq` and post each one once. The whole log is folded as every reader
-/// folds it (`replay_tasks`): `nodes` is each task's folded state, and a row the fold
-/// skips (a pre-#167 stale chain after `Cancel`) is marked `superseded`. `max_seq` and
+/// folds it (`replay_tasks`): `nodes` is each task's folded state, `latest` the seq
+/// of its newest counted row, and a row the fold skips (a pre-#167 stale chain after
+/// `Cancel`) is marked `superseded`. `max_seq` and
 /// `ledger_id` let a cursor see that the ledger was replaced.
 fn cmd_events(
     request: EventsRequest,
@@ -2305,6 +2306,14 @@ fn cmd_events(
             .iter()
             .map(|(task, state)| (task.0.to_string(), format!("{state:?}").into()))
             .collect();
+        // Each task's newest row the fold counted, over the whole log, so a reader of
+        // one page can tell whether an event is still its node's current state.
+        let mut latest = serde_json::Map::new();
+        for ((seq, e), skip) in read.all.iter().zip(&skipped) {
+            if !skip {
+                latest.insert(e.task_id.0.to_string(), (*seq).into());
+            }
+        }
         println!(
             "{}",
             json_out::ok(
@@ -2320,6 +2329,7 @@ fn cmd_events(
                     "max_seq": read.max_seq,
                     "more": read.more,
                     "nodes": nodes,
+                    "latest": latest,
                     "events": rows,
                 })
             )

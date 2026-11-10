@@ -318,7 +318,20 @@ define-cell) are nodecode's and are only read.")
 (pure-test::check "evidence: a path under the repository root is relative to it"
                   (and (equal ".meshloop/worktrees/g/t" (relative-to "/r/.meshloop/worktrees/g/t" "/r"))
                        (equal ".meshloop/worktrees/g/t" (relative-to "/r/.meshloop/worktrees/g/t" "/r/"))
-                       (equal "/elsewhere/t" (relative-to "/elsewhere/t" "/r"))))
+                       (equal ".meshloop/worktrees/g/t" (relative-to "C:\\r\\.meshloop\\worktrees\\g\\t" "C:\\r"))))
+(pure-test::check "evidence: a path outside the repository shows its last two components only"
+                  (and (equal "outside-repo/wt/task-1" (relative-to "/home/op/elsewhere/wt/task-1" "/r"))
+                       (equal "outside-repo/wt/task-1" (relative-to "D:\\x\\wt\\task-1\\" "C:\\r"))
+                       (equal "outside-repo/t" (relative-to "/t" "/r"))))
+(dolist (limit '(60 45 30 12))
+  (let ((text (event-post "graph-with-a-long-id" 123456 12 "AwaitingReview" "Verifying" "DeterministicChecksPassed"
+                          "/x/y" "s-SUPER" limit)))
+    (pure-test::check (format nil "event post: the mention is never cut (post_chars ~d)" limit)
+                      (and (<= (length text) limit)
+                           (or (suffix-p " @s-SUPER" text) (not (find #\@ text))))
+                      text)))
+(pure-test::check "event post: with room, a clipped head keeps the whole mention"
+                  (suffix-p " @s-SUPER" (event-post "graph-with-a-long-id" 1 1 "Blocked" "Pending" "DependencyFailedOrScopeRevoked" nil "s-SUPER" 30)))
 
 (pure-test::check "mention: wake_on_gates off mentions nobody, on every gate"
                   (every (lambda (state) (null (mention-of state t nil "s-SUPER"))) +gate-states+))
@@ -332,21 +345,44 @@ define-cell) are nodecode's and are only read.")
 (pure-test::check "mention: on, an empty or malformed supervisor names nobody"
                   (notany (lambda (who) (mention-of "Blocked" t t who)) '("" "s X" "@s-X" "s-X;rm" nil)))
 
-(let* ((entries '(("g2" 40 "PlanAccepted" 1) ("g1" 7 nil 0)))
-       (text (cursor-text "meshloop-abc" "/r" entries)))
-  (pure-test::check "cursor: written and read back"
-                    (equal (sort (parse-cursor text) #'string< :key #'first)
-                           '(("g1" 7 nil 0) ("g2" 40 "PlanAccepted" 1)))
+(let* ((entries '(("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil) ("g1" 7 nil 0 nil "e9")))
+       (text (cursor-text "meshloop-abc" "/r" entries '("s-OPS" "s-B"))))
+  (pure-test::check "cursor: written and read back, with the joined sessions"
+                    (multiple-value-bind (read sessions) (parse-cursor text)
+                      (and (equal (sort read #'string< :key #'first)
+                                  '(("g1" 7 nil 0 nil "e9") ("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil)))
+                           (equal (sort sessions #'string<) '("s-B" "s-OPS"))))
                     text)
   (pure-test::check "cursor: a graph with none starts at 0"
-                    (equal (cursor-entry (parse-cursor text) "g9") '("g9" 0 nil 0)))
+                    (equal (cursor-entry (parse-cursor text) "g9") '("g9" 0 nil 0 nil nil)))
   (pure-test::check "cursor: moving one graph keeps the others"
-                    (equal (sort (with-entry (parse-cursor text) '("g1" 9 "PlanAccepted" 1)) #'string< :key #'first)
-                           '(("g1" 9 "PlanAccepted" 1) ("g2" 40 "PlanAccepted" 1)))))
+                    (equal (sort (with-entry (parse-cursor text) (entry-with (cursor-entry (parse-cursor text) "g1") :seq 9 :pending nil))
+                                 #'string< :key #'first)
+                           '(("g1" 9 nil 0 nil nil) ("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil)))))
+(pure-test::check "cursor: a format-1 file reads, with no ledger, pending or session"
+                  (multiple-value-bind (read sessions)
+                      (parse-cursor (format nil "nodecode-meshloop board cursor 1~%board b~%repository /r~%graph g1 7 PlanAccepted 1~%"))
+                    (and (equal read '(("g1" 7 "PlanAccepted" 1 nil nil))) (null sessions))))
 (pure-test::check "cursor: a file this cell did not write is refused, not read as empty"
                   (pure-test::refuses (parse-cursor "something else")))
-(pure-test::check "cursor: a broken line is refused"
-                  (pure-test::refuses (parse-cursor (format nil "~a~%graph g1 x - 0~%" +board-cursor-header+))))
+(dolist (line '("graph g1 x - 0 - -" "graph g1 1 - 0 ledger! -" "graph g1 1 - 0 - x9" "session @s-X" "graph --all 1 - 0 - -"))
+  (pure-test::check (format nil "cursor: a broken line is refused: ~a" line)
+                    (pure-test::refuses (parse-cursor (format nil "~a~%~a~%" +board-cursor-header+ line)))))
+(pure-test::check "cursor: kept on another ledger, or past its newest event, starts over"
+                  (and (stale-ledger-p '("g" 5 nil 0 "aaaa" nil) "bbbb" 100)
+                       (stale-ledger-p '("g" 500 nil 0 "aaaa" nil) "aaaa" 100)
+                       (stale-ledger-p '("g" 500 nil 0 nil nil) "aaaa" 100)
+                       (not (stale-ledger-p '("g" 5 nil 0 "aaaa" nil) "aaaa" 100))
+                       (not (stale-ledger-p '("g" 5 nil 0 nil nil) "aaaa" 100))))
+(let ((nodes (make-hash-table :test #'equal)) (latest (make-hash-table :test #'equal)))
+  (setf (gethash "1" nodes) "Cancelled" (gethash "1" latest) 7
+        (gethash "2" nodes) "AwaitingReview" (gethash "2" latest) 9)
+  (pure-test::check "current: the newest counted row reaching the folded state"
+                    (current-p 9 2 "AwaitingReview" nodes latest))
+  (pure-test::check "current: an older row is history"
+                    (not (current-p 8 2 "AwaitingReview" nodes latest)))
+  (pure-test::check "current: a row whose state the fold does not show is not current (pre-#167 stale row)"
+                    (not (current-p 10 1 "Failed" nodes latest))))
 
 (pure-test::check "typed graphs: --graph, and a status, resume or cancel positional"
                   (and (equal '("g1") (typed-graphs "accept" '("--task" "1" "--as" "p" "--graph" "g1")))
@@ -362,7 +398,7 @@ define-cell) are nodecode's and are only read.")
        (all (format nil "~{~a~}" (mapcar #'pure-test::file-text pure-test::*files*))))
   (pure-test::check "one-way: no source names the Board's post facts, its delivery or its readers"
                     (notany (lambda (word) (search word all :test #'char-equal))
-                            '("board.posted" ":round" "\"POSTS\"" "\"RECENT\"" "\"DELIVER\"" "\"MEMBER-BOARD\""
+                            '("board.posted" ":round" "\"POSTS\"" "\"RECENT\"" "\"DELIVER\"" "\"CURSOR\"" "\"DUPLICATE-AT\""
                               "nodecode-board::" "board::")))
   (pure-test::check "one-way: the Board verbs called are JOIN and POST"
                     (loop for start = (search "(board-call " board) then (search "(board-call " board :start2 (1+ start))

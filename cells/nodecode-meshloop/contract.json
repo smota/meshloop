@@ -170,6 +170,7 @@
         { "path": "data.max_seq", "type": "integer" },
         { "path": "data.more", "type": "boolean" },
         { "path": "data.nodes", "type": "object" },
+        { "path": "data.latest", "type": "object" },
         { "path": "data.events", "type": "array" },
         { "path": "data.events[].seq", "type": "integer" },
         { "path": "data.events[].task", "type": "integer" },

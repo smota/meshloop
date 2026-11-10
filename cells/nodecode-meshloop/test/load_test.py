@@ -549,10 +549,21 @@ def board_section(answer, organism, home, work, meshloop, fixture_harness):
     # (b) On, wake_on_gates off: exactly one post per transition, no mention.
     write_config(home, {**base, "board": True})
     organism.restart_cell()
+    join_line = f"meshloop board: run /meshloop board-sync to put this session on {name} (it leaves its current board)"
+    # Only an explicit board-sync joins a session: a sync after a command, from a
+    # session board-sync never put on the board, posts nothing and says how to join.
+    for session in (OPERATOR, SUPERVISOR):
+        text = answer("/meshloop status", session)
+        check(f"board on, {session} not joined by board-sync: status posts nothing and says how", text.endswith("\n" + join_line), text)
+    check("nothing posted before board-sync", not projected(board_lines(home, name)))
     text = answer("/meshloop board-sync", OPERATOR)
     seqs, _ = log_seqs(meshloop, repo)
     lines = board_lines(home, name)
-    check("board-sync names the board and the run", text.startswith(f"meshloop board: {name}\n  {BOARD_GRAPH}: "), text)
+    check(
+        "board-sync joins this session, says so, and names the run",
+        text.startswith(f"meshloop board: {name}; this session is now on {name}; it left any board it was on\n  {BOARD_GRAPH}: "),
+        text,
+    )
     check("one post per event of the run, in order", event_seqs(lines) == seqs and len(seqs) >= 4, f"{event_seqs(lines)} vs {seqs}")
     check("one post for the plan state", sum(" plan 1: PlanAccepted" in l for l in projected(lines)) == 1, "\n".join(lines))
     check("wake_on_gates off: no post mentions anyone", not any("@" in l for l in projected(lines)), "\n".join(lines))
@@ -573,6 +584,15 @@ def board_section(answer, organism, home, work, meshloop, fixture_harness):
     cursor.write_text(kept.replace(f"graph {BOARD_GRAPH} {seqs[-1]} ", f"graph {BOARD_GRAPH} {seqs[-2]} "))
     text = answer("/meshloop board-sync", OPERATOR)
     check("a lost cursor write posts no duplicate", board_lines(home, name) == lines and f"cursor at event {seqs[-1]}" in text, text)
+    check("the cursor file records the session board-sync joined", f"\nsession {OPERATOR}\n" in cursor.read_text(), cursor.read_text())
+    # A joined session the operator moved to another board: a sync after a command
+    # posts nothing there; board-sync brings it back.
+    answer("/board elsewhere", OPERATOR)
+    text = answer("/meshloop status", OPERATOR)
+    check("a session moved off the board: status posts nothing and says how to rejoin", text.endswith("\n" + join_line), text)
+    check("nothing posted on the other board", not board_lines(home, "elsewhere"), "\n".join(board_lines(home, "elsewhere")))
+    text = answer("/meshloop board-sync", OPERATOR)
+    check("board-sync puts it back", f"this session is now on {name}" in text and f"{BOARD_GRAPH}: 0 posts" in text, text)
     check("nothing woke the supervising session", turns(organism, SUPERVISOR) == [], json.dumps(turns(organism, SUPERVISOR))[:400])
 
     # (c) One-way: a post saying accept is not acceptance.
@@ -664,10 +684,44 @@ def board_section(answer, organism, home, work, meshloop, fixture_harness):
         json.dumps(woken)[:600],
     )
 
+    # A crash after a gate post that woke the supervisor, before its cursor write:
+    # the post in flight is posted again at the next sync, without the mention,
+    # so the supervisor is not woken twice (at least once, never a second wake).
+    cursor = next(cursor_dir.glob(f"board/*/{name}.cursor"))
+    kept = cursor.read_text()
+    entry = next(l for l in kept.splitlines() if l.startswith(f"graph {BOARD_GRAPH} "))
+    words = entry.split()
+    words[2], words[6] = str(seqs[-2]), f"e{seqs[-1]}"
+    cursor.write_text(kept.replace(entry, " ".join(words)))
+    woken_before = len(turns(organism, SUPERVISOR))
+    text = answer("/meshloop board-sync", OPERATOR)
+    again = board_lines(home, name)
+    check(
+        "a post left in flight is posted again without its mention, waking no one",
+        len(again) == len(lines) + 1 and again[-1].endswith(gate_lines[-1].split(": ", 1)[1].rsplit(" @", 1)[0])
+        and "@" not in again[-1] and f"cursor at event {seqs[-1]}" in text and "woke" not in text,
+        "\n".join(again[-2:]) + "\n" + text,
+    )
+    time.sleep(2)
+    check("no second wake", len(turns(organism, SUPERVISOR)) == woken_before, json.dumps(turns(organism, SUPERVISOR))[-400:])
+    lines = again
+
     # (e) The cursor is the cell's file, not its memory: a restarted cell posts nothing again.
     organism.restart_cell()
     text = answer("/meshloop board-sync", OPERATOR)
     check("after the cell restarts a sync posts nothing", f"{BOARD_GRAPH}: 0 posts" in text and board_lines(home, name) == lines, text)
+
+    # (f) A cursor kept on another ledger (as after .meshloop/ was replaced) starts
+    # the graph over and says so, instead of skipping the new ledger's events.
+    kept = cursor.read_text()
+    entry = next(l for l in kept.splitlines() if l.startswith(f"graph {BOARD_GRAPH} "))
+    words = entry.split()
+    words[5] = "ffffffffffffffff"
+    cursor.write_text(kept.replace(entry, " ".join(words)))
+    text = answer("/meshloop board-sync", OPERATOR)
+    check("another ledger: the cursor resets and the answer says so", "cursor reset: it was kept on another ledger" in text, text)
+    real = next(l for l in cursor.read_text().splitlines() if l.startswith(f"graph {BOARD_GRAPH} ")).split()
+    check("the reset cursor is kept on this ledger and at its last event", real[5] != "ffffffffffffffff" and real[2] == str(seqs[-1]), " ".join(real))
     write_config(home, base)
     organism.restart_cell()
 

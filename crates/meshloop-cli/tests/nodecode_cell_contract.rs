@@ -635,6 +635,10 @@ fn events_mark_a_pre_167_stale_row_superseded_and_fold_as_status_does() {
         "{events:#}"
     );
     assert_eq!(events["data"]["nodes"]["1"], "Cancelled", "{events:#}");
+    assert_eq!(
+        events["data"]["latest"]["1"], cancel["seq"],
+        "the newest row the fold counts for #1 is the Cancel"
+    );
     let status = fixture.as_cell(&["status", "--graph", "gcell"].map(String::from));
     let node = status["data"]["nodes"]
         .as_array()
