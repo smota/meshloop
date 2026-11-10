@@ -47,6 +47,72 @@ Routing behavior for the local record:
   (`candidate_in_open_cooldown_is_filtered_out`).
 - A stale Open breaker whose cooldown has elapsed is selectable again.
 
+## Model selection
+
+Issue #134; ADR 0038 "Model selection". A `[harnesses.<name>]` entry names its models in
+one of two forms. Use one form per entry; setting both is a config error.
+
+- **Single model (unchanged):** `model_ref = "..."` with optional `model_tier`
+  (`"mid"` when omitted). Configs written before #134 load and route as before.
+- **List:** `models = [{ model_ref = "...", model_tier = "top" }, ...]`. `model_tier`
+  is `"top"`, `"mid"` (the default) or `"lightweight"`; any other value is a config
+  error. (The single-model `model_tier` keeps its old lenient parse, where an unknown
+  value means lightweight.) The list must be non-empty and hold at most 16 entries.
+  Each `model_ref` must be non-empty, unique within the entry, at most 256 bytes, free
+  of whitespace and control characters, and must not start with `-`. Unknown keys in an
+  entry are rejected.
+
+Routing expands every (harness, model) pair into its own candidate. The arm key is
+(harness, `model_ref`, task tier), so each model has its own `routing_feedback` row and
+its own tier filter. Probes, quota cooldown and headroom remain per harness.
+
+Retry and fallback decide what a failed attempt has used up:
+
+- A failure after the harness process started (a timeout, a collection fault, failed
+  checks) uses up only that (harness, model). A retry may pick another model of the
+  same harness.
+- A failure before any process started (an invoke or spawn error, or a worktree that
+  could not be created) is not about the model. It uses up every model of that harness.
+  The attempt is recorded either way and counts toward `max_retries`.
+- A failure that puts the harness into quota cooldown (`CapacityExhausted`) grants a
+  retry only if a candidate on another, available harness is left. Otherwise the task
+  ends `Failed` instead of waiting on a harness that routing filters out.
+
+At dispatch the chosen `model_ref` replaces `{model_ref}` in `invoke_args_template`.
+Arguments are a structured argv with no shell, so the model is one argument and is never
+interpreted. The attempt records that same `model_ref` in evidence, and its routing
+feedback uses it. `meshloop doctor` lists each configured pair under its harness with
+its parsed tier; `doctor --json` reports them as `data.harnesses[].models`, each with
+`model_ref`, the configured `model_tier` and the parsed `tier` (for example `TopTier`).
+
+Meshloop ships no model flag (ADR 0003): the shipped templates do not pass
+`{model_ref}`, so each CLI runs its own default model and `model_ref` remains a label.
+To select a model, the operator adds the CLI's own model flag to the template. The
+examples below were checked against each CLI's `--help` on 2026-11-10; they are not
+defaults, and live dispatch was not run.
+
+| Harness | Version checked | Help text | Example template |
+|---|---|---|---|
+| codex | `codex-cli 0.167.0` | `codex exec --help`: `-m, --model <MODEL>` "Model the agent should use" | `["exec", "--model", "{model_ref}", "-"]` with `prompt_via = "stdin"` |
+| grok | `grok 1.0.77 (50ca579fa996) [stable]` | `grok --help`: `-m, --model <MODEL>` "Model ID to use"; `grok models` lists IDs | `["--model", "{model_ref}", "--prompt-file", "{prompt_file}"]` |
+| claude | `2.1.322 (Claude Code)` | `claude --help`: `--model <model>` "Model for the current session", an alias or a full name | `["--print", "--model", "{model_ref}", "{prompt}"]` with `prompt_via = "arg"` |
+
+For example:
+
+```toml
+[harnesses.codex]
+kind = "codex"
+executable = "codex"
+prompt_via = "stdin"
+invoke_args_template = ["exec", "--model", "{model_ref}", "-"]
+models = [
+  { model_ref = "<fast-model-id>", model_tier = "mid" },
+  { model_ref = "<strongest-model-id>", model_tier = "top" },
+]
+```
+
+Model IDs change between CLI releases. Take them from the CLI, not from this page.
+
 ## Native dispatch support
 
 Accepted with ADR 0039 (2026-11-10); the table is empty until #152 records live evidence.

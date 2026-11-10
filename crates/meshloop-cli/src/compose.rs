@@ -99,6 +99,8 @@ pub struct Composed {
     pub planner: PlannerSelection,
 }
 
+/// `"top"`, `"mid"`; `"lightweight"` and, for the legacy `model_tier`, any other value
+/// mean lightweight. `config::load` restricts the `models` list to the three names.
 pub(crate) fn parse_model_tier(s: &str) -> ModelCapabilityTier {
     match s {
         "top" => ModelCapabilityTier::TopTier,
@@ -247,11 +249,12 @@ fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Comp
             DispatchHarness::Direct(cli)
         };
         harnesses.insert(name.clone(), dispatch);
-        candidates.push(Candidate {
+        // One routing candidate per configured model of this harness (issue #134).
+        candidates.extend(hc.model_entries().into_iter().map(|m| Candidate {
             harness: name.clone(),
-            model_ref: hc.model_ref.clone(),
-            model_tier: parse_model_tier(&hc.model_tier),
-        });
+            model_tier: parse_model_tier(&m.model_tier),
+            model_ref: m.model_ref,
+        }));
     }
 
     let git = GitWorktreeAdapter::new(req.repo_root.clone());
@@ -361,6 +364,126 @@ mod tests {
         for harness in composed.harnesses.values() {
             assert!(matches!(harness, DispatchHarness::Direct(_)));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_entry_with_two_models_composes_two_candidates_with_separate_feedback_rows() {
+        use meshloop_domain::capability::Compatibility;
+        use meshloop_engine::ports::{FeedbackKey, RoutingFeedbackStore, TierKey};
+        use meshloop_engine::router::{Router, RoutingContext};
+
+        let dir =
+            std::env::temp_dir().join(format!("meshloop-compose-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("meshloop.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+selected_harnesses = ["codex"]
+[limits]
+max_concurrent_workers = 1
+max_retries = 2
+task_timeout_seconds = 60
+[harnesses.codex]
+kind = "codex"
+executable = "codex"
+invoke_args_template = ["exec", "--model", "{model_ref}", "-"]
+prompt_via = "stdin"
+models = [
+  { model_ref = "gpt-fast", model_tier = "mid" },
+  { model_ref = "gpt-deep", model_tier = "top" },
+]
+"#,
+        )
+        .unwrap();
+        let config = load(&config_path).unwrap();
+        let mut composed = compose(ComposeRequest {
+            config: &config,
+            repo_root: dir.clone(),
+            db_path: Some(&dir.join("t.sqlite")),
+            worktree_base: None,
+            origin: Origin::default(),
+            fixture_only: true,
+        })
+        .unwrap();
+        // One harness adapter, two routing candidates.
+        assert_eq!(composed.harnesses.len(), 1);
+        assert_eq!(
+            composed.candidates,
+            vec![
+                Candidate {
+                    harness: "codex".into(),
+                    model_ref: "gpt-fast".into(),
+                    model_tier: ModelCapabilityTier::MidTier,
+                },
+                Candidate {
+                    harness: "codex".into(),
+                    model_ref: "gpt-deep".into(),
+                    model_tier: ModelCapabilityTier::TopTier,
+                },
+            ]
+        );
+
+        // Separate routing_feedback rows in the real store.
+        let key = |model: &str| FeedbackKey {
+            harness: "codex".into(),
+            model_ref: model.into(),
+            tier: TierKey::Tier2,
+        };
+        composed
+            .store
+            .record_outcome(&key("gpt-fast"), false)
+            .unwrap();
+        composed
+            .store
+            .record_outcome(&key("gpt-fast"), false)
+            .unwrap();
+        composed
+            .store
+            .record_outcome(&key("gpt-deep"), true)
+            .unwrap();
+        let fast = composed.store.counters(&key("gpt-fast")).unwrap();
+        let deep = composed.store.counters(&key("gpt-deep")).unwrap();
+        assert_eq!((fast.success, fast.failure), (0, 2));
+        assert_eq!((deep.success, deep.failure), (1, 0));
+
+        // The router returns both as candidates for a task both tiers fit.
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "codex".to_string(),
+            HarnessProfile {
+                harness: "codex".into(),
+                version: "test".into(),
+                compatibility: Compatibility::Compatible,
+                supports_noninteractive: true,
+                supports_structured_output: false,
+                supports_cancellation: true,
+                reason: None,
+            },
+        );
+        let headroom = HashMap::new();
+        let ctx = RoutingContext {
+            task_tier: meshloop_domain::task_graph::Tier::Tier2,
+            coupling_penalty: meshloop_domain::policy::CouplingPenalty(0),
+            preferred_harness: None,
+            headroom: &headroom,
+            feedback: &composed.store,
+            oracle: None,
+            spend: None,
+        };
+        let selected = Router::default().select(
+            &composed.candidates,
+            &profiles,
+            &HashMap::new(),
+            std::time::SystemTime::now(),
+            &ctx,
+        );
+        let mut models: Vec<&str> = selected.iter().map(|c| c.model_ref.as_str()).collect();
+        models.sort_unstable();
+        assert_eq!(models, ["gpt-deep", "gpt-fast"]);
+        drop(composed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

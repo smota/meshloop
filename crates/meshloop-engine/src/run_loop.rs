@@ -311,6 +311,48 @@ fn is_fixture(name: &str) -> bool {
     name == "fixture"
 }
 
+/// A routing arm as recorded on an attempt: (harness, model_ref). One harness can list
+/// several models, so retry and fallback track arms, not harness names (issue #134).
+/// With one model per harness this is the same set as the harness names.
+fn arm_of(c: &Candidate) -> (String, String) {
+    (c.harness.clone(), c.model_ref.clone())
+}
+
+/// Candidates a task has already spent. A failure after the harness process started
+/// (a timeout, a collection fault, failed checks) spends only its (harness, model) arm.
+/// A failure before any process or pane existed (an invoke or spawn error, or a
+/// worktree that could not be created) is not about the model, so it spends every
+/// model of that harness.
+struct Spent {
+    arms: HashSet<(String, String)>,
+    harnesses: HashSet<String>,
+}
+
+impl Spent {
+    fn from_attempts(attempts: &[AttemptRow]) -> Self {
+        let mut spent = Self {
+            arms: HashSet::new(),
+            harnesses: HashSet::new(),
+        };
+        for a in attempts {
+            let Some(harness) = a.harness.clone() else {
+                continue;
+            };
+            if a.pid.is_none() && a.pane_id.is_none() {
+                spent.harnesses.insert(harness.clone());
+            }
+            spent
+                .arms
+                .insert((harness, a.model_ref.clone().unwrap_or_default()));
+        }
+        spent
+    }
+
+    fn contains(&self, c: &Candidate) -> bool {
+        self.harnesses.contains(&c.harness) || self.arms.contains(&arm_of(c))
+    }
+}
+
 struct RepairTick {
     rows: Vec<Evidence>,
     lattice: Option<DiagnosticLattice>,
@@ -572,12 +614,17 @@ impl<'a> RunLoop<'a> {
         match &self.planner {
             PlannerSelection::Route(tier) => Ok((self.candidates.clone(), *tier)),
             PlannerSelection::Harness(name) => {
-                let c = self
+                // Every model the named harness lists stays a candidate (issue #134).
+                let pool: Vec<Candidate> = self
                     .candidates
                     .iter()
-                    .find(|c| &c.harness == name)
-                    .ok_or_else(|| OrchestratorError::UnknownHarness(name.clone()))?;
-                Ok((vec![c.clone()], Tier::Tier1))
+                    .filter(|c| &c.harness == name)
+                    .cloned()
+                    .collect();
+                if pool.is_empty() {
+                    return Err(OrchestratorError::UnknownHarness(name.clone()));
+                }
+                Ok((pool, Tier::Tier1))
             }
         }
     }
@@ -1495,15 +1542,10 @@ impl<'a> RunLoop<'a> {
                 reason: IdleReason::NoCapableCandidate,
             });
         }
-        let used: HashSet<String> = self
-            .store
-            .attempts_for_task(graph_id, task_id)?
-            .into_iter()
-            .filter_map(|a| a.harness)
-            .collect();
+        let spent = Spent::from_attempts(&self.store.attempts_for_task(graph_id, task_id)?);
         let candidate: crate::router::Candidate = selected
             .iter()
-            .find(|c| !used.contains(&c.harness))
+            .find(|c| !spent.contains(c))
             .cloned()
             .unwrap_or_else(|| selected[0].clone());
         self.require_dispatch_ok(&candidate.harness)?;
@@ -1601,6 +1643,11 @@ impl<'a> RunLoop<'a> {
         }
         drop(lease);
         if let Err(reason) = added {
+            // An owned run saved the row above. Record it here too, so the failed
+            // attempt counts toward the retry budget and spends its harness.
+            if !owned {
+                self.store.save_attempt(&attempt_row)?;
+            }
             let fail = self.append(
                 graph_id,
                 task_id,
@@ -2292,8 +2339,14 @@ impl<'a> RunLoop<'a> {
             });
         }
         let retry_count = attempts.len() as u32;
-        let used: HashSet<String> = attempts.into_iter().filter_map(|a| a.harness).collect();
-        let unused = selected.iter().any(|c| !used.contains(&c.harness));
+        let spent = Spent::from_attempts(&attempts);
+        // A harness that this failure put into quota cooldown is filtered out by the
+        // next routing pass, so its other models are not worth a retry.
+        let quotas = self.load_quotas();
+        let now = SystemTime::now();
+        let unused = selected.iter().any(|c| {
+            !spent.contains(c) && quotas.get(&c.harness).is_none_or(|q| q.is_available(now))
+        });
         if fail.to == TaskState::Failed && retry_count < self.limits.max_retries && unused {
             let rec = self.append(
                 graph_id,
@@ -4351,6 +4404,7 @@ mod tests {
         run: RunRow,
         events: Vec<TransitionRecord>,
         attempts: Vec<AttemptRow>,
+        quotas: HashMap<String, QuotaState>,
     }
 
     impl DispatchStore {
@@ -4368,6 +4422,7 @@ mod tests {
                 },
                 events: Vec::new(),
                 attempts: Vec::new(),
+                quotas: HashMap::new(),
             }
         }
     }
@@ -4404,10 +4459,11 @@ mod tests {
         }
     }
     impl crate::ports::QuotaStore for DispatchStore {
-        fn load_quota(&self, _harness: &str) -> Result<QuotaState, StoreError> {
-            Ok(QuotaState::default())
+        fn load_quota(&self, harness: &str) -> Result<QuotaState, StoreError> {
+            Ok(self.quotas.get(harness).cloned().unwrap_or_default())
         }
-        fn save_quota(&mut self, _harness: &str, _state: &QuotaState) -> Result<(), StoreError> {
+        fn save_quota(&mut self, harness: &str, state: &QuotaState) -> Result<(), StoreError> {
+            self.quotas.insert(harness.into(), state.clone());
             Ok(())
         }
     }
@@ -4416,7 +4472,7 @@ mod tests {
             Ok((self.run.graph_id == graph_id).then(|| self.run.clone()))
         }
         fn next_attempt_id(&self) -> Result<AttemptId, StoreError> {
-            Ok(AttemptId(1))
+            Ok(AttemptId(self.attempts.len() as u32 + 1))
         }
         fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError> {
             if let Some(existing) = self
@@ -4633,6 +4689,339 @@ mod tests {
                 .iter()
                 .all(|event| event.event != Event::HarnessCrashedOrTimeout)
         );
+    }
+
+    /// How a scripted model behaves when dispatched (issue #134 fallback tests).
+    #[derive(Clone)]
+    enum ModelScript {
+        /// `invoke` fails: no process ever starts.
+        InvokeFails(HarnessError),
+        /// The process starts (a pid is recorded), then collection fails.
+        CollectFails(HarnessError),
+    }
+
+    /// One harness key whose behaviour is chosen by the dispatched `model_ref`.
+    struct ScriptedModels {
+        name: &'static str,
+        scripts: HashMap<&'static str, ModelScript>,
+        dispatched: std::sync::Mutex<HashMap<u32, String>>,
+    }
+
+    impl ScriptedModels {
+        fn new(name: &'static str, scripts: &[(&'static str, ModelScript)]) -> Self {
+            Self {
+                name,
+                scripts: scripts.iter().cloned().collect(),
+                dispatched: std::sync::Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl HarnessCapabilities for ScriptedModels {
+        fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
+            Ok(meshloop_domain::capability::HarnessProfile {
+                harness: self.name.into(),
+                version: "0".into(),
+                compatibility: meshloop_domain::capability::Compatibility::Compatible,
+                supports_noninteractive: true,
+                supports_structured_output: true,
+                supports_cancellation: true,
+                reason: None,
+            })
+        }
+        fn invoke(&self, spec: &crate::agent::AgentSpec) -> Result<HarnessHandle, HarnessError> {
+            match self.scripts.get(spec.model_ref.as_str()) {
+                Some(ModelScript::InvokeFails(e)) => Err(e.clone()),
+                Some(ModelScript::CollectFails(_)) => {
+                    self.dispatched
+                        .lock()
+                        .unwrap()
+                        .insert(spec.attempt_id.0, spec.model_ref.clone());
+                    Ok(HarnessHandle {
+                        attempt_id: spec.attempt_id,
+                        pid: Some(44900),
+                        pane_id: None,
+                    })
+                }
+                None => Ok(HarnessHandle {
+                    attempt_id: spec.attempt_id,
+                    pid: Some(44901),
+                    pane_id: None,
+                }),
+            }
+        }
+        fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn collect(
+            &self,
+            _handle: &HarnessHandle,
+        ) -> Result<crate::ports::HarnessOutcome, HarnessError> {
+            Err(HarnessError::Unsupported)
+        }
+        fn try_collect(
+            &self,
+            handle: &HarnessHandle,
+        ) -> Result<Option<crate::ports::HarnessOutcome>, HarnessError> {
+            let model = self
+                .dispatched
+                .lock()
+                .unwrap()
+                .get(&handle.attempt_id.0)
+                .cloned();
+            match model.and_then(|m| self.scripts.get(m.as_str()).cloned()) {
+                Some(ModelScript::CollectFails(e)) => Err(e),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    fn top(harness: &str, model: &str) -> Candidate {
+        Candidate {
+            harness: harness.into(),
+            model_ref: model.into(),
+            model_tier: meshloop_domain::policy::ModelCapabilityTier::TopTier,
+        }
+    }
+
+    /// Dispatches task 1 until a tick is not a retry. Returns the final tick, the
+    /// (harness, model) of every attempt in order, and whether any retry was granted.
+    fn dispatch_until_settled(
+        harnesses: &[&ScriptedModels],
+        candidates: Vec<Candidate>,
+        max_retries: u32,
+    ) -> (Tick, Vec<(String, String)>, usize) {
+        dispatch_until_settled_in(&QuietWorkspace, harnesses, candidates, max_retries)
+    }
+
+    fn dispatch_until_settled_in(
+        workspace: &dyn WorkspacePort,
+        harnesses: &[&ScriptedModels],
+        candidates: Vec<Candidate>,
+        max_retries: u32,
+    ) -> (Tick, Vec<(String, String)>, usize) {
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        let mut run = RunLoop {
+            harnesses: harnesses
+                .iter()
+                .map(|h| (h.name.to_string(), *h as &dyn HarnessCapabilities))
+                .collect(),
+            candidates,
+            workspace,
+            store: &mut store,
+            processes: &other,
+            checks: &other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries,
+                task_timeout: Duration::from_secs(30),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: false,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+            micro_repair: None,
+            ownership: None,
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![gate_node(None, AcceptanceGate::Human)],
+        };
+        let mut tick = run
+            .dispatch_ready("g", &graph, TaskId(1))
+            .expect("dispatch");
+        for _ in 0..8 {
+            match tick {
+                Tick::Transition {
+                    event: Event::RetryAuthorized,
+                    ..
+                } => tick = run.dispatch_ready("g", &graph, TaskId(1)).expect("retry"),
+                _ => break,
+            }
+        }
+        drop(run);
+        let arms = store
+            .attempts
+            .iter()
+            .map(|a| {
+                (
+                    a.harness.clone().unwrap_or_default(),
+                    a.model_ref.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let retries = store
+            .events
+            .iter()
+            .filter(|e| e.event == Event::RetryAuthorized)
+            .count();
+        (tick, arms, retries)
+    }
+
+    fn ended_failed(tick: &Tick) -> bool {
+        matches!(
+            tick,
+            Tick::Transition {
+                to: TaskState::Failed,
+                event: Event::HarnessCrashedOrTimeout,
+                ..
+            }
+        )
+    }
+
+    fn arms(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(h, m)| (h.to_string(), m.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn capacity_exhausted_harness_spends_no_retry_on_its_other_model() {
+        // Review of #134: the cooldown this failure opens filters the sibling model out
+        // of the next routing pass, so a retry would only idle the task.
+        let exhausted = HarnessError::CapacityExhausted {
+            retry_after: Duration::from_secs(3600),
+        };
+        let h = ScriptedModels::new("h", &[("a", ModelScript::CollectFails(exhausted))]);
+        let (tick, tried, retries) =
+            dispatch_until_settled(&[&h], vec![top("h", "a"), top("h", "b")], 2);
+        assert!(ended_failed(&tick), "{tick:?}");
+        assert_eq!(retries, 0);
+        assert_eq!(tried, arms(&[("h", "a")]));
+    }
+
+    #[test]
+    fn timeout_spends_only_its_model_and_falls_back_to_a_sibling() {
+        let h = ScriptedModels::new(
+            "h",
+            &[("a", ModelScript::CollectFails(HarnessError::Timeout))],
+        );
+        let (tick, tried, retries) =
+            dispatch_until_settled(&[&h], vec![top("h", "a"), top("h", "b")], 2);
+        assert_eq!(retries, 1);
+        assert_eq!(tried, arms(&[("h", "a"), ("h", "b")]));
+        assert!(
+            matches!(
+                tick,
+                Tick::Transition {
+                    event: Event::AttemptStarted,
+                    ..
+                }
+            ),
+            "{tick:?}"
+        );
+    }
+
+    #[test]
+    fn invoke_failure_spends_every_model_of_the_harness() {
+        // Architect decision on #134: a failure before any process starts is not about
+        // the model. Alone, the harness has no untried candidate left.
+        let fault = || HarnessError::ProcessFault {
+            detail: "spawn failed".into(),
+        };
+        let h = ScriptedModels::new("h", &[("a", ModelScript::InvokeFails(fault()))]);
+        let (tick, tried, retries) =
+            dispatch_until_settled(&[&h], vec![top("h", "a"), top("h", "b")], 3);
+        assert!(ended_failed(&tick), "{tick:?}");
+        assert_eq!(retries, 0);
+        assert_eq!(tried, arms(&[("h", "a")]));
+
+        // With another harness configured, the retry skips the sibling model.
+        let h = ScriptedModels::new("h", &[("a", ModelScript::InvokeFails(fault()))]);
+        let k = ScriptedModels::new("k", &[]);
+        let (_, tried, retries) = dispatch_until_settled(
+            &[&h, &k],
+            vec![top("h", "a"), top("h", "b"), top("k", "c")],
+            3,
+        );
+        assert_eq!(retries, 1);
+        assert_eq!(tried, arms(&[("h", "a"), ("k", "c")]));
+    }
+
+    /// `QuietWorkspace` whose first `add_worktree_from` fails.
+    struct FirstWorktreeFails(std::cell::Cell<bool>);
+
+    impl WorkspacePort for FirstWorktreeFails {
+        fn worktree_exists(&self, path: &Path) -> bool {
+            QuietWorkspace.worktree_exists(path)
+        }
+        fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError> {
+            QuietWorkspace.branch_exists(branch)
+        }
+        fn add_worktree_from(
+            &self,
+            _path: &Path,
+            _branch: &str,
+            _start_point: &str,
+        ) -> Result<(), WorkspaceError> {
+            if self.0.replace(false) {
+                return Err(WorkspaceError::Io("worktree add failed".into()));
+            }
+            Ok(())
+        }
+        forbidden_port_calls! {
+            fn repo_root(&self) -> &Path;
+            fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
+            fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
+            fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
+            fn prune(&self) -> Result<(), WorkspaceError>;
+            fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, WorkspaceError>;
+            fn checkout_ref(&self, git_ref: &str) -> Result<(), WorkspaceError>;
+            fn merge_ff_only(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn merge_no_ff(&self, from: &str) -> Result<(), WorkspaceError>;
+            fn current_head(&self) -> Result<String, WorkspaceError>;
+            fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError>;
+            fn remove_file(&self, worktree: &Path, rel: &str) -> Result<(), WorkspaceError>;
+            fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
+            fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
+            fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
+        }
+    }
+
+    #[test]
+    fn worktree_failure_spends_every_model_of_the_harness_and_is_recorded() {
+        // Architect decision on #134: a worktree that cannot be created is not about
+        // the model. The failed attempt is recorded, so it counts toward the budget.
+        let h = ScriptedModels::new("h", &[]);
+        let (tick, tried, retries) = dispatch_until_settled_in(
+            &FirstWorktreeFails(std::cell::Cell::new(true)),
+            &[&h],
+            vec![top("h", "a"), top("h", "b")],
+            3,
+        );
+        assert!(ended_failed(&tick), "{tick:?}");
+        assert_eq!(retries, 0);
+        assert_eq!(tried, arms(&[("h", "a")]));
+
+        let h = ScriptedModels::new("h", &[]);
+        let k = ScriptedModels::new("k", &[]);
+        let (_, tried, retries) = dispatch_until_settled_in(
+            &FirstWorktreeFails(std::cell::Cell::new(true)),
+            &[&h, &k],
+            vec![top("h", "a"), top("h", "b"), top("k", "c")],
+            3,
+        );
+        assert_eq!(retries, 1);
+        assert_eq!(tried, arms(&[("h", "a"), ("k", "c")]));
+    }
+
+    #[test]
+    fn retry_budget_caps_attempts_across_models_of_one_harness() {
+        let timeout = || ModelScript::CollectFails(HarnessError::Timeout);
+        let h = ScriptedModels::new("h", &[("a", timeout()), ("b", timeout()), ("c", timeout())]);
+        let (tick, tried, retries) =
+            dispatch_until_settled(&[&h], vec![top("h", "a"), top("h", "b"), top("h", "c")], 2);
+        assert!(ended_failed(&tick), "{tick:?}");
+        assert_eq!(retries, 1);
+        assert_eq!(tried, arms(&[("h", "a"), ("h", "b")]));
     }
 
     struct GateWorkspace {
