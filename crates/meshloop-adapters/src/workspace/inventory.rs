@@ -42,8 +42,15 @@ pub fn graph_outcomes(ledger: &Path) -> BTreeMap<String, GraphOutcome> {
     else {
         return outcomes;
     };
-    let Ok(mut statement) =
-        connection.prepare("SELECT graph_id, to_state FROM events ORDER BY graph_id, event_id")
+    // History a run-loop restart moved into an earlier generation is not the
+    // run's outcome. Ledgers older than the scope columns use every event.
+    let Ok(mut statement) = connection
+        .prepare(
+            "SELECT graph_id, to_state FROM events WHERE generation_id IS NULL OR graph_id IN (SELECT graph_id FROM workspace_run_bindings) ORDER BY graph_id, event_id",
+        )
+        .or_else(|_| {
+            connection.prepare("SELECT graph_id, to_state FROM events ORDER BY graph_id, event_id")
+        })
     else {
         return outcomes;
     };
@@ -60,6 +67,108 @@ pub fn graph_outcomes(ledger: &Path) -> BTreeMap<String, GraphOutcome> {
         outcome.landed |= row.1 == "Integrated" || row.1 == "Accepted";
     }
     outcomes
+}
+
+/// A run the run loop owns (issue #142): its binding generation (run directory
+/// and base branch), the current outcome of its tasks, and its live attempt
+/// artifacts that never reached `Integrated`.
+#[derive(Debug, Clone)]
+pub(crate) struct RunLoopRun {
+    pub generation: GenerationRecord,
+    pub outcome: meshloop_domain::cleanup::RunOutcome,
+    pub failed_attempts: BTreeSet<LifecycleId>,
+}
+
+/// Read run-loop runs without creating or migrating a ledger. A ledger that
+/// exists but cannot be read is an error, so callers fail closed. A run whose
+/// tasks cannot be replayed is `Incomplete`, so cleanup retains it.
+pub(crate) fn run_loop_runs(ledger: &Path) -> Result<BTreeMap<String, RunLoopRun>, StoreError> {
+    use meshloop_domain::cleanup::RunOutcome;
+    use meshloop_domain::state::TaskState;
+    use meshloop_engine::ports::{EventLog, RunStore};
+    use meshloop_engine::workspace::RuntimeLedger;
+    let mut runs = BTreeMap::new();
+    match std::fs::symlink_metadata(ledger) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+        Err(_) => return Err(StoreError::Io("ledger unreadable".into())),
+        Ok(_) => {}
+    }
+    let Some(store) = SqliteStore::open_read_only(ledger)? else {
+        return Ok(runs);
+    };
+    let firsts = payloads::<GenerationRecord>(
+        &store.conn,
+        "SELECT payload_json FROM workspace_generations WHERE ordinal=1 ORDER BY id",
+    )
+    .map_err(|()| StoreError::Corrupt("generation records unreadable".into()))?;
+    for first in firsts
+        .into_iter()
+        .filter(GenerationRecord::is_run_loop_binding)
+    {
+        // Same rule as the store: unbound, unmarked, bound by this generation.
+        let Some(generation) = store
+            .run_loop_generation(&first.graph_id)?
+            .filter(|binding| *binding == first)
+        else {
+            continue;
+        };
+        let graph = generation.graph_id.clone();
+        let records = store.records_for_graph(graph.as_str()).ok();
+        let states = records
+            .as_ref()
+            .and_then(|records| meshloop_engine::recovery::replay_tasks(records).ok());
+        let plan = store.graph_from_run(graph.as_str()).ok();
+        let outcome = match (plan, states) {
+            (Some(plan), Some(states)) => {
+                let finals: Vec<TaskState> = plan
+                    .nodes
+                    .iter()
+                    .map(|node| states.get(&node.id).copied().unwrap_or(TaskState::Pending))
+                    .collect();
+                if finals
+                    .iter()
+                    .any(|state| matches!(state, TaskState::Failed | TaskState::Blocked))
+                {
+                    RunOutcome::Failed
+                } else if finals.contains(&TaskState::Cancelled) {
+                    RunOutcome::Cancelled
+                } else if !finals.is_empty()
+                    && finals.iter().all(|state| *state == TaskState::Integrated)
+                {
+                    RunOutcome::Landed
+                } else {
+                    RunOutcome::Incomplete
+                }
+            }
+            _ => RunOutcome::Incomplete,
+        };
+        let integrated: BTreeSet<u32> = records
+            .iter()
+            .flatten()
+            .filter(|record| record.to == TaskState::Integrated)
+            .filter_map(|record| record.attempt_id.map(|id| id.0))
+            .collect();
+        let failed_attempts = store
+            .run_loop_artifacts(&graph)?
+            .into_iter()
+            .filter(|(artifact, retired)| {
+                !retired
+                    && artifact
+                        .attempt_id
+                        .is_some_and(|id| !integrated.contains(&id.0))
+            })
+            .map(|(artifact, _)| artifact.id)
+            .collect();
+        runs.insert(
+            graph.as_str().to_string(),
+            RunLoopRun {
+                generation,
+                outcome,
+                failed_attempts,
+            },
+        );
+    }
+    Ok(runs)
 }
 
 struct AttemptSeen {
@@ -79,6 +188,8 @@ struct LedgerView {
     legacy_runs: BTreeSet<String>,
     legacy_attempts: BTreeSet<String>,
     attempts: Vec<AttemptSeen>,
+    /// Artifact ids a reclamation fact retired (issue #142).
+    retired: BTreeSet<String>,
 }
 
 pub fn discover_inventory(scope: InventoryScope<'_>) -> InventoryFacts {
@@ -137,13 +248,23 @@ pub(crate) fn discover_inventory_with(
     if conflict {
         push(&mut blockers, BlockerCode::IdentityConflict);
     }
+    let confirmed = identity_confirmed && !conflict;
+    let owned = Owned {
+        registry,
+        keys: if confirmed {
+            ledger.as_ref().map(owned_keys).unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        },
+    };
     if let Some(view) = ledger.as_ref() {
         push_ledger_observations(
             view,
             registry,
-            identity_confirmed && !conflict,
+            confirmed,
             scope.checkout,
             scope.configured_root,
+            &owned,
             &mut observations,
         );
     }
@@ -151,7 +272,8 @@ pub(crate) fn discover_inventory_with(
         scope.checkout,
         scope.configured_root,
         registry,
-        identity_confirmed && !conflict,
+        confirmed,
+        &owned,
         &mut observations,
         &mut blockers,
     );
@@ -159,11 +281,64 @@ pub(crate) fn discover_inventory_with(
         scope.checkout,
         scope.configured_root,
         registry,
-        identity_confirmed && !conflict,
+        confirmed,
+        &owned,
         &mut observations,
         &mut blockers,
     );
     finish(blockers, observations)
+}
+
+/// Ledger record locations, keyed by root alias and relative path, used to report
+/// a path the ledger owns under its ledger location from every discovery source.
+/// Without this, one worktree would appear once as an owned artifact and again as
+/// an unowned Git worktree or configured-root child.
+struct Owned<'a> {
+    registry: Option<&'a RegistryView>,
+    keys: BTreeSet<(RootAlias, RelativePath)>,
+}
+
+impl Owned<'_> {
+    fn location(&self, path: &Path) -> Option<InventoryLocation> {
+        if self.keys.is_empty() {
+            return None;
+        }
+        let registry = self.registry?;
+        for (alias, root) in &registry.roots {
+            if native_identity(&root.path).ok().as_ref() != Some(&root.identity) {
+                continue;
+            }
+            if let Some(relative_path) = contained_relative(&root.path, path)
+                && self.keys.contains(&(alias.clone(), relative_path.clone()))
+            {
+                return Some(InventoryLocation {
+                    scope: LocationScope::LedgerRoot,
+                    root_alias: Some(alias.clone()),
+                    relative_path,
+                });
+            }
+        }
+        None
+    }
+}
+
+fn owned_keys(view: &LedgerView) -> BTreeSet<(RootAlias, RelativePath)> {
+    view.generations
+        .iter()
+        .map(|g| (g.root_alias.clone(), g.relative_path.clone()))
+        .chain(
+            view.artifacts
+                .iter()
+                .filter(|a| !view.retired.contains(a.id.as_str()))
+                .map(|a| (a.root_alias.clone(), a.relative_path.clone())),
+        )
+        .chain(view.provisionals.iter().map(|p| {
+            (
+                p.location.root_alias.clone(),
+                p.location.relative_path.clone(),
+            )
+        }))
+        .collect()
 }
 
 fn finish(blockers: Vec<BlockerCode>, observations: Vec<Observation>) -> InventoryFacts {
@@ -338,7 +513,31 @@ fn load_ledger(conn: &Connection) -> Result<LedgerView, ()> {
         legacy_runs,
         legacy_attempts,
         attempts: load_attempts(conn)?,
+        retired: load_retired(conn)?,
     })
+}
+
+fn load_retired(conn: &Connection) -> Result<BTreeSet<String>, ()> {
+    let facts: Vec<LifecycleFact> = payloads(
+        conn,
+        "SELECT payload_json FROM workspace_facts ORDER BY rowid",
+    )?;
+    Ok(facts
+        .into_iter()
+        .filter(|f| matches!(f.fact, Fact::Reclamation(how) if how.retires()))
+        .map(|f| f.artifact_id.as_str().to_string())
+        .collect())
+}
+
+/// True when `graph` is a run-loop run: unbound, unmarked, and bound by a run-loop
+/// first generation.
+fn run_loop_graph(view: &LedgerView, graph: &str) -> bool {
+    !view.bindings.contains(graph)
+        && !view.legacy_runs.contains(graph)
+        && view
+            .generations
+            .iter()
+            .any(|g| g.graph_id.as_str() == graph && g.is_run_loop_binding())
 }
 
 fn column_strings(conn: &Connection, sql: &str) -> Result<Vec<String>, ()> {
@@ -378,6 +577,7 @@ fn push_ledger_observations(
     identity_confirmed: bool,
     checkout: &Path,
     configured_root: &Path,
+    owned: &Owned<'_>,
     observations: &mut Vec<Observation>,
 ) {
     let generation_by_id: BTreeMap<&str, &GenerationRecord> = view
@@ -386,12 +586,30 @@ fn push_ledger_observations(
         .map(|generation| (generation.id.as_str(), generation))
         .collect();
     for generation in &view.generations {
+        let run_loop = run_loop_graph(view, generation.graph_id.as_str());
+        // A run-loop run is reported once, by its binding: later generations share
+        // its directory and pin only a plan.
+        if run_loop && generation.ordinal > 1 {
+            continue;
+        }
         let (location, presence, withheld) = resolve_record(
             &generation.root_alias,
             &generation.relative_path,
             registry,
             identity_confirmed,
         );
+        // A fully reclaimed run-loop run leaves nothing to report.
+        if run_loop
+            && presence == Presence::Missing
+            && !view.artifacts.iter().any(|artifact| {
+                !view.retired.contains(artifact.id.as_str())
+                    && generation_by_id
+                        .get(artifact.generation_id.as_str())
+                        .is_some_and(|g| g.graph_id == generation.graph_id)
+            })
+        {
+            continue;
+        }
         observations.push(ledger_observation(
             identity_confirmed,
             LedgerObservation {
@@ -406,7 +624,11 @@ fn push_ledger_observations(
             },
         ));
     }
-    for artifact in &view.artifacts {
+    for artifact in view
+        .artifacts
+        .iter()
+        .filter(|artifact| !view.retired.contains(artifact.id.as_str()))
+    {
         let legacy = generation_by_id
             .get(artifact.generation_id.as_str())
             .is_some_and(|generation| view.legacy_runs.contains(generation.graph_id.as_str()));
@@ -485,23 +707,35 @@ fn push_ledger_observations(
         if attempt.path.is_none() && (legacy_run(view, &attempt.graph_id) || !marked) {
             continue;
         }
+        // The attempt's worktree was retired with its artifact record.
+        if view.artifacts.iter().any(|artifact| {
+            artifact
+                .attempt_id
+                .is_some_and(|id| id.0.to_string() == attempt.id)
+                && view.retired.contains(artifact.id.as_str())
+        }) {
+            continue;
+        }
         let Ok(graph_id) = GraphId::new(attempt.graph_id.clone()) else {
             continue;
         };
-        let (location, presence, withheld) = attempt
+        let owned_location = attempt
             .path
             .as_deref()
-            .map(|path| {
-                observe_persisted_path(
-                    Path::new(path),
-                    checkout,
-                    configured_root,
-                    registry,
-                    identity_confirmed,
-                )
-            })
-            .unwrap_or((None, Presence::NotApplicable, false));
-        observations.push(ledger_observation(
+            .and_then(|path| owned.location(Path::new(path)));
+        let artifact_backed = owned_location.is_some();
+        let (location, presence, withheld) = match (owned_location, attempt.path.as_deref()) {
+            (Some(location), Some(path)) => (Some(location), probe(Path::new(path)), false),
+            (_, Some(path)) => observe_persisted_path(
+                Path::new(path),
+                checkout,
+                configured_root,
+                registry,
+                identity_confirmed,
+            ),
+            (_, None) => (None, Presence::NotApplicable, false),
+        };
+        let mut observation = ledger_observation(
             identity_confirmed,
             LedgerObservation {
                 source: if marked {
@@ -517,7 +751,14 @@ fn push_ledger_observations(
                 legacy_marker: marked,
                 driver_active: false,
             },
-        ));
+        );
+        // An unmarked attempt path that no artifact record owns proves nothing about
+        // ownership (issue #142): it stays unresolved and cleanup never selects it.
+        if !marked && !artifact_backed {
+            observation.ledger_record = false;
+            observation.identity_confirmed = false;
+        }
+        observations.push(observation);
     }
     for driver in &view.drivers {
         if !driver_is_active(driver.phase) {
@@ -636,6 +877,7 @@ fn push_git_worktrees(
     configured_root: &Path,
     registry: Option<&RegistryView>,
     identity_confirmed: bool,
+    owned: &Owned<'_>,
     observations: &mut Vec<Observation>,
     blockers: &mut Vec<BlockerCode>,
 ) {
@@ -655,13 +897,15 @@ fn push_git_worktrees(
             continue;
         }
         let presence = probe(&path);
-        let (location, withheld) = match relative_location(
-            &path,
-            checkout,
-            configured_root,
-            registry,
-            identity_confirmed,
-        ) {
+        let (location, withheld) = match owned.location(&path).or_else(|| {
+            relative_location(
+                &path,
+                checkout,
+                configured_root,
+                registry,
+                identity_confirmed,
+            )
+        }) {
             Some(location) => (Some(location), false),
             None => (None, true),
         };
@@ -687,6 +931,7 @@ fn push_configured_children(
     configured_root: &Path,
     registry: Option<&RegistryView>,
     identity_confirmed: bool,
+    owned: &Owned<'_>,
     observations: &mut Vec<Observation>,
     blockers: &mut Vec<BlockerCode>,
 ) {
@@ -696,6 +941,7 @@ fn push_configured_children(
         None,
         None,
         checkout,
+        owned,
         observations,
         blockers,
     );
@@ -707,6 +953,7 @@ fn push_configured_children(
             None,
             Some(Path::new(".meshloop/worktrees")),
             checkout,
+            owned,
             observations,
             blockers,
         );
@@ -725,6 +972,7 @@ fn push_configured_children(
                 Some(alias),
                 None,
                 checkout,
+                owned,
                 observations,
                 blockers,
             );
@@ -732,12 +980,14 @@ fn push_configured_children(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn list_children(
     root: &Path,
     scope: LocationScope,
     alias: Option<&RootAlias>,
     prefix: Option<&Path>,
     checkout: &Path,
+    owned: &Owned<'_>,
     observations: &mut Vec<Observation>,
     blockers: &mut Vec<BlockerCode>,
 ) {
@@ -766,6 +1016,10 @@ fn list_children(
             continue;
         };
         let presence = probe(&entry.path());
+        if let Some(location) = owned.location(&entry.path()) {
+            observations.push(configured_observation(Some(location), presence, false));
+            continue;
+        }
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             observations.push(configured_observation(None, presence, true));

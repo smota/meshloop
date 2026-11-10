@@ -224,6 +224,8 @@ fn seed(repo: &Path, db: &Path) -> Result<(), String> {
         root_alias: alias.clone(),
         relative_path: RelativePath::new("kept.txt").map_err(|error| format!("{error:?}"))?,
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     let missing = GenerationRecord {
         id: LifecycleId::new("missing-generation").map_err(|error| format!("{error:?}"))?,
@@ -234,6 +236,8 @@ fn seed(repo: &Path, db: &Path) -> Result<(), String> {
         root_alias: alias,
         relative_path: RelativePath::new("missing.txt").map_err(|error| format!("{error:?}"))?,
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     store
         .insert_generation(&lease, &kept)

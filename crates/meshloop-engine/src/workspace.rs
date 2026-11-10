@@ -118,6 +118,26 @@ pub trait LifecycleAccess {
     fn resolve(&self, location: &PortableLocation) -> Result<std::path::PathBuf, StoreError>;
     fn bootstrap_root(&mut self, alias: RootAlias, path: &Path) -> Result<RootRecord, StoreError>;
 }
+/// Repository fence held for one run-loop ownership write. Dropping releases it.
+pub trait RunOwnershipLease {
+    fn fence(&self) -> &dyn RepositoryFence;
+    /// Registered root alias whose native identity is this run loop's worktree base;
+    /// a new run is bound under it. Resolved on first use, which may register (or
+    /// create) that root; only binding a new run needs it.
+    fn root_alias(&mut self) -> Result<RootAlias, StoreError>;
+    /// True when `alias` is registered for this run loop's worktree base. Several
+    /// aliases may name one directory.
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError>;
+    fn new_id(&mut self) -> Result<LifecycleId, StoreError>;
+}
+/// Writer capability for run-loop ownership. Each acquisition is short: the fence is
+/// exclusive, and a run must not block planning or cleanup while workers run.
+pub trait RunOwnership {
+    fn acquire(&self) -> Result<Box<dyn RunOwnershipLease + '_>, StoreError>;
+    /// Read-only `RunOwnershipLease::is_base_root`, without taking the fence or
+    /// registering anything.
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError>;
+}
 pub struct ReadOnlyLifecycleAccess;
 impl LifecycleAccess for ReadOnlyLifecycleAccess {
     fn new_id(&mut self) -> Result<LifecycleId, StoreError> {
@@ -176,6 +196,70 @@ pub trait RuntimeLedger: WorkspaceLedger {
         binding: &RunBinding,
     ) -> Result<(), StoreError>;
     fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError>;
+    /// Bind a run the run loop creates (issue #142) by inserting its first generation
+    /// (`Producer::RunLoop`). Only an accepted run with no binding, marker, generation
+    /// or attempt qualifies. A later ordinal advances an owned run to a re-accepted
+    /// plan: it must be the next ordinal and keep the binding's root, location, layout
+    /// and base branch. Either way the store checks the accepted plan bytes against
+    /// the generation hash.
+    fn register_run_loop_run(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _binding: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::ReadOnly)
+    }
+    /// The binding generation of a run-loop run: unbound, unmarked, and bound by a
+    /// first generation with the run-loop layout. `None` for every other run.
+    fn run_loop_generation(
+        &self,
+        _graph: &GraphId,
+    ) -> Result<Option<GenerationRecord>, StoreError> {
+        Ok(None)
+    }
+    /// The highest-ordinal generation of a run-loop run: the one new artifacts join.
+    fn run_loop_current_generation(
+        &self,
+        _graph: &GraphId,
+    ) -> Result<Option<GenerationRecord>, StoreError> {
+        Ok(None)
+    }
+    /// Every artifact of a run-loop run, with `true` when a reclamation fact retired it.
+    fn run_loop_artifacts(
+        &self,
+        _graph: &GraphId,
+    ) -> Result<Vec<(ArtifactRecord, bool)>, StoreError> {
+        Ok(Vec::new())
+    }
+    /// Retire artifacts with reclamation facts. Records are never deleted.
+    fn retire_run_loop_artifacts(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _facts: &[LifecycleFact],
+    ) -> Result<(), StoreError> {
+        Err(StoreError::ReadOnly)
+    }
+    /// Restart a run-loop run in one transaction: move the current events and
+    /// attempts into the current generation's history, retire `retire`, and insert
+    /// `next` (ordinal + 1). Nothing is deleted.
+    fn restart_run_loop_run(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _retire: &[LifecycleFact],
+        _next: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::ReadOnly)
+    }
+    /// Insert one worktree artifact into the current generation of a run-loop run,
+    /// whose hash must match the accepted plan. Registering the same kind at the
+    /// location of a live (unretired) artifact returns that artifact's id.
+    fn register_run_loop_artifact(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _record: &ArtifactRecord,
+    ) -> Result<LifecycleId, StoreError> {
+        Err(StoreError::ReadOnly)
+    }
     fn create_provisional(
         &mut self,
         fence: &dyn RepositoryFence,

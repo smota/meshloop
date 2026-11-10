@@ -101,6 +101,8 @@ fn generation(lease: &RepositoryLease, n: u32) -> GenerationRecord {
         root_alias: alias(),
         relative_path: RelativePath::new(format!("run/generation-{n}")).unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     }
 }
 fn artifact(name: &str, generation: &GenerationRecord, kind: ArtifactKind) -> ArtifactRecord {
@@ -1040,6 +1042,8 @@ fn seeded_v5(path: &Path) -> Connection {
         root_alias: alias(),
         relative_path: RelativePath::new("retained/run").unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     conn.execute(
         "INSERT INTO workspace_generations VALUES(?1,?2,?3,1,?4,?5,?6)",
@@ -2049,6 +2053,7 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
         planner: meshloop_engine::run_loop::PlannerSelection::Harness("fixture".into()),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     assert!(loop_.plan("fixture", "fixture", &mut lease).is_ok());
     let request = harness.request.lock().unwrap().clone().unwrap();
@@ -2640,4 +2645,358 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
         assert!(f.repo.join(".git").is_dir());
         assert!(f.ledger.is_file());
     }
+}
+
+/// Issue #142: the run loop binds only a fresh, accepted, unmarked run, and each
+/// artifact it registers is a direct child of that run's location.
+#[test]
+fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
+    use meshloop_engine::workspace::RuntimeLedger;
+    let f = Fixture::new();
+    let (mut store, lease) = bound(&f);
+    let graph = GraphId::new("graph-alpha").unwrap();
+    let plan_hash = PlanHash::new(meshloop_domain::digest::sha256_hex(b"{}")).unwrap();
+    let binding = GenerationRecord {
+        id: id("run-loop-generation"),
+        repository_id: lease.repository().id.clone(),
+        graph_id: graph.clone(),
+        ordinal: 1,
+        accepted_plan_hash: plan_hash,
+        root_alias: alias(),
+        relative_path: RelativePath::new("graph-alpha").unwrap(),
+        layout_version: RUN_LOOP_LAYOUT_VERSION,
+        producer: Some(Producer::RunLoop),
+        base_ref: Some(GitRef::new("refs/heads/main").unwrap()),
+    };
+    let mut wrong_hash = binding.clone();
+    wrong_hash.accepted_plan_hash = hash();
+    let mut wrong_path = binding.clone();
+    wrong_path.relative_path = RelativePath::new("elsewhere").unwrap();
+    let mut wrong_layout = binding.clone();
+    wrong_layout.layout_version = 1;
+    // Ownership is the explicit producer marker, not the layout number.
+    let mut no_producer = binding.clone();
+    no_producer.producer = None;
+    let mut own_branch = binding.clone();
+    own_branch.base_ref = Some(GitRef::new("refs/heads/meshloop/graph-alpha/integrate").unwrap());
+    for refused in [
+        &wrong_hash,
+        &wrong_path,
+        &wrong_layout,
+        &no_producer,
+        &own_branch,
+    ] {
+        assert!(store.register_run_loop_run(&lease, refused).is_err());
+    }
+    // An unaccepted plan is not bound.
+    let mut pending = run();
+    pending.plan_state = PlanState::AwaitingPlanReview;
+    store.save_run(&pending).unwrap();
+    assert!(store.register_run_loop_run(&lease, &binding).is_err());
+    store.save_run(&run()).unwrap();
+    // A migration-marked run is refused and never reported as run-loop owned.
+    let conn = Connection::open(&f.ledger).unwrap();
+    conn.execute(
+        "INSERT INTO workspace_legacy_unbound VALUES('runs','graph-alpha','Unresolved')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store.register_run_loop_run(&lease, &binding),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    conn.execute("DELETE FROM workspace_legacy_unbound", [])
+        .unwrap();
+    assert_eq!(store.run_loop_generation(&graph).unwrap(), None);
+
+    store.register_run_loop_run(&lease, &binding).unwrap();
+    assert_eq!(
+        store.run_loop_generation(&graph).unwrap(),
+        Some(binding.clone())
+    );
+    // Not fresh any more.
+    let mut again = binding.clone();
+    again.id = id("second-generation");
+    assert!(store.register_run_loop_run(&lease, &again).is_err());
+    // Legacy-table writes stay admitted: there is no run binding row.
+    assert!(store.reject_bound_graph("graph-alpha").is_ok());
+
+    let integrate =
+        |name: &str, path: &str, kind: ArtifactKind, attempt: Option<u32>| ArtifactRecord {
+            id: id(name),
+            generation_id: binding.id.clone(),
+            kind,
+            root_alias: alias(),
+            relative_path: RelativePath::new(path).unwrap(),
+            attempt_id: attempt.map(AttemptId),
+        };
+    let first = integrate(
+        "integrate-1",
+        "graph-alpha/integrate",
+        ArtifactKind::Integration,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &first).unwrap(),
+        first.id
+    );
+    // Same kind at the same location is idempotent and keeps the first id.
+    let repeat = integrate(
+        "integrate-2",
+        "graph-alpha/integrate",
+        ArtifactKind::Integration,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &repeat).unwrap(),
+        first.id
+    );
+    for refused in [
+        integrate(
+            "clash",
+            "graph-alpha/integrate",
+            ArtifactKind::Deliverable,
+            None,
+        ),
+        integrate(
+            "outside",
+            "other/integrate",
+            ArtifactKind::Integration,
+            None,
+        ),
+        integrate("nested", "graph-alpha/a/b", ArtifactKind::Integration, None),
+        integrate("plan", "graph-alpha/plan", ArtifactKind::Plan, None),
+        integrate(
+            "no-attempt",
+            "graph-alpha/task-1-attempt-1",
+            ArtifactKind::Attempt,
+            None,
+        ),
+        integrate(
+            "ghost",
+            "graph-alpha/task-1-attempt-9",
+            ArtifactKind::Attempt,
+            Some(9),
+        ),
+    ] {
+        assert!(
+            store.register_run_loop_artifact(&lease, &refused).is_err(),
+            "{refused:?}"
+        );
+    }
+    store
+        .save_attempt(&meshloop_engine::ports::AttemptRow {
+            attempt_id: AttemptId(1),
+            graph_id: "graph-alpha".into(),
+            task_id: meshloop_domain::task_graph::TaskId(1),
+            harness: None,
+            model_ref: None,
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: None,
+            ended_at: None,
+            outcome: None,
+        })
+        .unwrap();
+    let attempt = integrate(
+        "attempt-1",
+        "graph-alpha/task-1-attempt-1",
+        ArtifactKind::Attempt,
+        Some(1),
+    );
+    store.register_run_loop_artifact(&lease, &attempt).unwrap();
+
+    // Plan pinning: a changed accepted plan is refused until a generation pins it.
+    let mut changed = run();
+    changed.plan_json = r#"{"changed":true}"#.into();
+    store.save_run(&changed).unwrap();
+    let late = integrate(
+        "late",
+        "graph-alpha/integrate-docs",
+        ArtifactKind::Deliverable,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &late),
+        Err(StoreError::PlanRevisionMismatch)
+    );
+    let second = GenerationRecord {
+        id: id("run-loop-generation-2"),
+        ordinal: 2,
+        accepted_plan_hash: PlanHash::new(meshloop_domain::digest::sha256_hex(
+            br#"{"changed":true}"#,
+        ))
+        .unwrap(),
+        ..binding.clone()
+    };
+    let mut skipped = second.clone();
+    skipped.ordinal = 3;
+    let mut moved = second.clone();
+    moved.base_ref = None;
+    for refused in [&skipped, &moved] {
+        assert!(store.register_run_loop_run(&lease, refused).is_err());
+    }
+    store.register_run_loop_run(&lease, &second).unwrap();
+    assert_eq!(
+        store.run_loop_generation(&graph).unwrap(),
+        Some(binding.clone())
+    );
+    assert_eq!(
+        store.run_loop_current_generation(&graph).unwrap(),
+        Some(second.clone())
+    );
+    // Artifacts join the current generation only.
+    assert!(store.register_run_loop_artifact(&lease, &late).is_err());
+    let late = ArtifactRecord {
+        generation_id: second.id.clone(),
+        ..late
+    };
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &late).unwrap(),
+        late.id
+    );
+
+    // Retired records are kept and never reused.
+    store
+        .retire_run_loop_artifacts(
+            &lease,
+            &[LifecycleFact {
+                id: id("retire-late"),
+                artifact_id: late.id.clone(),
+                fact: Fact::Reclamation(Reclamation::NotCreated),
+            }],
+        )
+        .unwrap();
+    assert!(store.artifact(&late.id).unwrap().is_some());
+    let again = ArtifactRecord {
+        id: id("late-2"),
+        ..late.clone()
+    };
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &again).unwrap(),
+        again.id
+    );
+    let listed = store.run_loop_artifacts(&graph).unwrap();
+    assert!(listed.contains(&(late.clone(), true)));
+    assert!(listed.contains(&(again.clone(), false)));
+
+    // Restart never deletes: the legacy reset is refused, and the restart moves
+    // history into the current generation and pins the next one.
+    assert_eq!(
+        store.reset_graph_execution("graph-alpha"),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    let third = GenerationRecord {
+        id: id("run-loop-generation-3"),
+        ordinal: 3,
+        ..second.clone()
+    };
+    store
+        .restart_run_loop_run(
+            &lease,
+            &[LifecycleFact {
+                id: id("retire-attempt"),
+                artifact_id: attempt.id.clone(),
+                fact: Fact::Reclamation(Reclamation::Reclaimed),
+            }],
+            &third,
+        )
+        .unwrap();
+    assert!(store.artifact(&attempt.id).unwrap().is_some());
+    assert!(store.attempts_for_graph("graph-alpha").unwrap().is_empty());
+    assert!(store.load_attempt(AttemptId(1)).unwrap().is_some());
+    assert_eq!(store.next_attempt_id().unwrap(), AttemptId(2));
+    assert_eq!(
+        store.run_loop_current_generation(&graph).unwrap(),
+        Some(third)
+    );
+}
+
+#[test]
+fn fence_contention_is_busy_and_other_io_errors_stay_hard() {
+    use std::io::{Error, ErrorKind};
+    assert!(is_contention(&Error::from(ErrorKind::WouldBlock)));
+    assert!(matches!(
+        contended_or_io(Error::from(ErrorKind::WouldBlock)),
+        StoreError::FenceBusy
+    ));
+    for kind in [
+        ErrorKind::NotFound,
+        ErrorKind::PermissionDenied,
+        ErrorKind::Other,
+    ] {
+        assert!(!is_contention(&Error::from(kind)), "{kind:?}");
+        assert!(matches!(
+            contended_or_io(Error::from(kind)),
+            StoreError::Io(_)
+        ));
+    }
+    // ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33) are contention
+    // only on Windows; elsewhere those raw codes are unrelated errors.
+    for code in [32, 33] {
+        assert_eq!(
+            is_contention(&Error::from_raw_os_error(code)),
+            cfg!(windows),
+            "{code}"
+        );
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED (5) is not contention.
+        assert!(!is_contention(&Error::from_raw_os_error(5)));
+    }
+}
+
+#[test]
+fn retry_busy_bounds_the_wait_and_passes_other_results_through() {
+    let mut calls = 0;
+    let busy: Result<(), _> = retry_busy(|| {
+        calls += 1;
+        Err(StoreError::FenceBusy)
+    });
+    assert!(matches!(busy, Err(StoreError::FenceBusy)));
+    assert_eq!(calls, 20);
+    let mut calls = 0;
+    let done = retry_busy(|| {
+        calls += 1;
+        if calls < 3 {
+            Err(StoreError::FenceBusy)
+        } else {
+            Ok(calls)
+        }
+    });
+    assert_eq!(done.unwrap(), 3);
+    let mut calls = 0;
+    let hard: Result<(), _> = retry_busy(|| {
+        calls += 1;
+        Err(StoreError::Io("x".into()))
+    });
+    assert!(matches!(hard, Err(StoreError::Io(_))));
+    assert_eq!(calls, 1);
+}
+
+/// A second acquire against a held fence is busy, never a generic I/O error. The
+/// unfenced registry read succeeds where locks are advisory and is busy where they
+/// are mandatory (Windows).
+#[test]
+fn held_fence_reports_busy_to_other_acquirers_and_readers() {
+    let f = Fixture::new();
+    let held = f.lease();
+    let second = GitRepositoryIdentity::new("git").acquire(&f.repo, &f.ledger);
+    assert!(matches!(second, Err(StoreError::FenceBusy)));
+    let read = read_registry(&held.registry_path);
+    if cfg!(windows) {
+        assert!(matches!(read, Err(StoreError::FenceBusy)));
+    } else {
+        assert!(read.unwrap().is_some());
+    }
+    drop(held);
+    assert!(
+        read_registry(&f.repo.join(".git").join(REGISTRY))
+            .unwrap()
+            .is_some()
+    );
+    drop(f.lease());
 }

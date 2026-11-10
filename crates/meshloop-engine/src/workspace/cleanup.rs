@@ -2,7 +2,7 @@
 //! There is no apply path and this module does not remove anything.
 
 use meshloop_domain::cleanup::{
-    CleanupCandidateFacts, CleanupFacts, CleanupPreview, cleanup_policy,
+    CleanupCandidateFacts, CleanupFacts, CleanupPreview, RunOutcome, cleanup_policy,
 };
 use meshloop_domain::workspace::{DeliveryReceipt, GitRef, InventoryEntry, LifecycleId, ObjectId};
 
@@ -23,6 +23,15 @@ pub struct CleanupObservation {
     pub missing_dependency: bool,
     pub missing_recovery_object: bool,
     pub receipt: Option<DeliveryReceipt>,
+    /// Outcome of the owning run-loop run. Defaults keep older journal tokens readable.
+    #[serde(default)]
+    pub run_outcome: Option<RunOutcome>,
+    #[serde(default)]
+    pub run_container: bool,
+    #[serde(default)]
+    pub attempt_failed: bool,
+    #[serde(default)]
+    pub base_unknown: bool,
 }
 
 /// Retained identity plus one observation per inventory entry, in that order.
@@ -65,6 +74,10 @@ pub fn cleanup_preview(
                 missing_dependency: observed.missing_dependency,
                 missing_recovery_object: observed.missing_recovery_object,
                 receipt: observed.receipt,
+                run_outcome: observed.run_outcome,
+                run_container: observed.run_container,
+                attempt_failed: observed.attempt_failed,
+                base_unknown: observed.base_unknown,
             }
         })
         .collect();
@@ -95,5 +108,9 @@ fn fail_closed() -> CleanupObservation {
         missing_dependency: true,
         missing_recovery_object: true,
         receipt: None,
+        run_outcome: None,
+        run_container: false,
+        attempt_failed: false,
+        base_unknown: false,
     }
 }

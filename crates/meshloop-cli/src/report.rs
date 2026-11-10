@@ -50,6 +50,11 @@ pub fn format_idle(reason: IdleReason, status: Option<&RunStatus>) -> String {
                 .into()
         }
         IdleReason::FailedTerminal => format_failed_terminal(status),
+        IdleReason::FenceBusy => {
+            "Stopped: another Meshloop command holds the repository fence. Nothing was recorded.\n\
+             Run `meshloop resume` once it finishes.\n"
+                .into()
+        }
         IdleReason::WaitingOnLiveWorker => {
             "A direct-CLI worker is still live. Meshloop is waiting on that worker, not the 5s stall gate.\n\
              `meshloop status` shows pane_id/live. Do not retry while it is working.\n"

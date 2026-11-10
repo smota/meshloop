@@ -10,6 +10,7 @@
 - Approval evidence: Samuel explicitly stated "ok, now ADR033 is accepted" on 2026-10-28 after reviewing this concrete decision
 - Supersedes: only ADR 0021's worktree placement and destructive history-reset semantics; narrowly amends runtime-design §4's prohibition on persisted paths outside the repository for a protected local operational root registry
 - Superseded by: none
+- Amended: 2026-11-10, decided by the repository owner (run-loop ownership and run reclamation, [#142](https://github.com/smota/meshloop/issues/142)); see the amendment section at the end
 - Tracking: [#71](https://github.com/smota/meshloop/issues/71), S1 [#72](https://github.com/smota/meshloop/issues/72)
 
 ## Context and constraints
@@ -120,3 +121,106 @@ The human placement decision is resolved by the acceptance recorded above, subje
 to the measured Windows limits and mandatory capability preflight. Acceptance is
 not runtime verification. S2 begins the identity/fence and durable generation
 contract from #71; no S2 or later product implementation is claimed here.
+
+## Amendment 2026-11-10: run-loop ownership and run reclamation (issue #142)
+
+- Decision owner: Samuel. Decided 2026-11-10 by the repository owner, as recorded in
+  [#142](https://github.com/smota/meshloop/issues/142).
+- Builder: Claude Code (Claude Opus 5.5). An independent fresh-context review (round 1)
+  requested changes; this revision addresses its required items. No approval is claimed.
+
+Problem: runs created by the shipped run loop were legacy-unbound by construction.
+They had no generation, artifact or fence records, so cleanup, which requires
+verified ownership, could never select their worktrees or branches.
+
+Decided by the repository owner:
+
+1. One cleanup call reclaims a whole landed run: every task worktree, `integrate`,
+   deliverable worktrees and their `meshloop/<graph>/` branches. It stays digest-bound
+   and never uses `--force`.
+2. Automatic reclamation: once a run is fully integrated and its result is reachable
+   from the base branch, the run loop reclaims it. A config switch controls this and
+   defaults to on. When it is off, the final `resume` prints the exact cleanup command.
+   Automatic reclamation uses the same eligibility rules as manual cleanup and never
+   touches failed, cancelled, unowned or dirty artifacts.
+
+Decided 2026-11-10 by the chief architect under delegated repository-owner authority,
+after the independent review of the first implementation (issue #142, review round 1):
+
+3. No `workspace_run_bindings` or `workspace_artifact_bindings` rows are written for
+   run-loop runs, and the ledger stays at schema version 8, so installed 0.3.0
+   binaries keep working. The run's binding is its first generation; its artifact
+   records are the artifact bindings. That table stays reserved for scoped runs,
+   whose schema-v8 triggers require generation and revision scope on every event and
+   attempt; the run loop keeps writing its history to the run tables.
+4. Ownership is an explicit marker: `producer = "run-loop"` on the generation record.
+   Layout version 2 (`RUN_LOOP_LAYOUT_VERSION`) only names the placement
+   `<root>/<graph>/{integrate, task-<n>-attempt-<m>, integrate-<tag>}`. The marker and
+   the base branch are optional payload fields that older records and binaries omit
+   or ignore.
+5. Plan pinning is real. The binding generation is pinned to the SHA-256 of the
+   accepted plan. A re-accepted plan (review or an accepted mutation) and every
+   restart add the next generation, pinned to the new hash. Registering an artifact
+   requires the current generation's hash to equal the accepted plan's; a mismatch
+   is refused.
+6. Restart never deletes records. It moves the run's events and attempts into the
+   generation they ran in (readers of the run tables skip them for run-loop runs),
+   retires attempt artifacts whose worktree is confirmed gone, and adds the next
+   generation, in one transaction. Attempt ids are therefore never reused.
+7. Landing is judged against the base branch recorded when the run was bound
+   (`refs/heads/<name>`, never under `refs/heads/meshloop/`), not against the
+   checkout's current HEAD. A run bound on a detached HEAD or a Meshloop branch has
+   no base branch and is never judged landed (`base-ref-unknown`). Each `git branch -d`
+   is preceded by a fresh `merge-base --is-ancestor` check against that branch.
+8. Worktrees that are gone retire their artifact records with a reclamation fact
+   (`Reclaimed` after cleanup or restart, `NotCreated` after a failed add, `Absent`
+   when recovery finds neither directory nor Git registration). Retired records are
+   kept, never reported, never selected and never reused.
+9. A failed attempt inside a landed run is reclaimable only when its task was
+   integrated through another attempt, its worktree is clean and its commits are on
+   the base branch; otherwise it is retained as `attempt-failed`. Failed or cancelled
+   tasks keep their whole run retained.
+
+Implementation (builder: Claude Code, Claude Opus 5.5):
+
+- A run this version creates registers ownership before its first worktree: the
+  repository fence (`meshloop-workspace-registry.json`), its worktree root alias, the
+  binding generation, and one artifact record for `integrate`, for every attempt and
+  for every deliverable worktree. A run is bound only when it is accepted, unmarked,
+  and has no attempt, generation, run binding, integrate worktree, branch or
+  directory. An artifact is registered only when nothing is at its path yet; a
+  rebuilt deliverable reuses its live record.
+- The fence is held across each registration and the worktree add, not for the whole
+  run. A busy fence is `FenceBusy` (public code `fence-busy`): an attempt stops with
+  the idle reason `FenceBusy` before it records anything, and can be resumed later.
+  Acquisition retries only on a busy fence, for at most one second. A bound run is
+  pinned to its root: entry points that derive worktree paths refuse another
+  worktree base before they change anything.
+- Inventory reports a path the ledger owns once, under its ledger location, whether
+  it is discovered as a Git worktree, a configured-root child or an attempt row. An
+  attempt path with no live artifact record stays unresolved and is never selected.
+  A fully reclaimed run is not reported at all.
+- Cleanup adds `run-failed`, `run-cancelled` and `run-incomplete`,
+  `attempt-failed`, `base-ref-unknown`, and `run-container` for the run directory,
+  which is never passed to `git worktree remove` and is removed with `remove_dir`
+  only once empty. An unreadable ledger retains every entry of every graph.
+- After a run-loop worktree is removed, its record is retired and its branch is
+  deleted with `git branch -d`, never `-D`: only when the worktree's HEAD was
+  `meshloop/<graph>/...` at the digest-bound commit and that commit is still on the
+  base branch. `git branch -d` also deletes the branch's reflog; the commits stay
+  reachable from the base branch. A retained branch or an empty run directory that
+  cannot be removed makes the apply `partial` (reasons `branch-retained`,
+  `run-dir-retained`), never `completed`.
+- The switch is `[workspace] auto_reclaim`, default `true`. Reclamation runs after a
+  `run` or `resume` that completes the graph and after `integrate --into`. It applies
+  only when every entry of the run is eligible; otherwise nothing is removed and the
+  reasons and the cleanup command are printed. `workspace apply --cleanup --graph <id>`
+  limits a digest-bound apply to one run. `resume` and `integrate --into` first
+  reconcile the run's records with its worktrees.
+- Runs created before this version keep their legacy state. They are never bound
+  later and still need explicit `workspace adopt`.
+
+Limits: a run whose worktree root is outside the repository is not reclaimed, because
+cleanup treats paths outside the checkout as unsafe. A crash between `git worktree
+remove` and `git branch -d` leaves the branch, with no cleanup candidate for it.
+Windows evidence comes from the CI `windows-latest` job; it was not run locally.

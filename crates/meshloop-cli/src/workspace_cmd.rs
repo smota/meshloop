@@ -1,6 +1,7 @@
 //! `workspace inventory` and `workspace preview` print JSON and do not write.
 //! `preview --cleanup` is a read-only verdict and does not remove artifacts.
-//! `apply --cleanup --digest` removes only eligible registered worktrees.
+//! `apply --cleanup --digest` removes only eligible registered worktrees, plus the
+//! merged `meshloop/<graph>/` branch of each removed run-loop worktree.
 //! `adopt` pins verified legacy generations. `maintain` selects at most one
 //! opt-in cleanup candidate and does not remove anything unless `--apply` matches.
 
@@ -30,6 +31,8 @@ pub struct WorkspaceInvocation {
     pub cleanup: bool,
     pub apply: bool,
     pub digest: Option<String>,
+    /// `apply --cleanup` only: remove just this graph's eligible entries.
+    pub graph: Option<String>,
     pub config: Option<PathBuf>,
     pub db: Option<PathBuf>,
     pub worktree_base: Option<PathBuf>,
@@ -42,6 +45,7 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
         cleanup,
         apply,
         digest,
+        graph,
         config,
         db,
         worktree_base,
@@ -96,16 +100,19 @@ pub fn cmd_workspace(invocation: WorkspaceInvocation) -> ExitCode {
             serde_json::to_value(&inventory).unwrap_or(serde_json::Value::Null)
         }
         WorkspaceReport::Apply => {
-            match meshloop_adapters::workspace::apply_cleanup(
-                InventoryScope {
-                    checkout: &checkout,
-                    ledger: &ledger,
-                    configured_root: &configured_root,
-                },
-                digest.as_deref().unwrap_or(""),
-                None,
-                None,
-            ) {
+            let scope = InventoryScope {
+                checkout: &checkout,
+                ledger: &ledger,
+                configured_root: &configured_root,
+            };
+            let digest = digest.as_deref().unwrap_or("");
+            let applied = match graph.as_deref() {
+                Some(graph) => {
+                    meshloop_adapters::workspace::apply_cleanup_for_graph(scope, digest, graph)
+                }
+                None => meshloop_adapters::workspace::apply_cleanup(scope, digest, None, None),
+            };
+            match applied {
                 Ok(result) => {
                     if result.status == "git-remove-failed" {
                         println!(
@@ -310,6 +317,7 @@ fn public_store_error(error: &StoreError) -> &'static str {
         StoreError::LegacyOwnershipUnresolved => "legacy-ownership-unresolved",
         StoreError::PlanRevisionMismatch => "plan-revision-mismatch",
         StoreError::LifecycleBusy => "lifecycle-busy",
+        StoreError::FenceBusy => "fence-busy",
         StoreError::Io(_) => "io",
         StoreError::Corrupt(_) => "corrupt",
     }

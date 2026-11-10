@@ -448,6 +448,15 @@ impl WorkspacePort for GitWorktreeAdapter {
         self.head(&self.repo_root)
     }
 
+    fn current_branch(&self) -> Result<Option<String>, WorkspaceError> {
+        // `symbolic-ref --quiet` exits 1 on a detached HEAD: that is `None`.
+        Ok(self
+            .run_in(&self.repo_root, &["symbolic-ref", "--quiet", "HEAD"])
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()))
+    }
+
     fn reset_hard(&self, worktree: &Path, rev: &str) -> Result<(), WorkspaceError> {
         self.run_in(worktree, &["reset", "--hard", rev])
             .map(|_| ())

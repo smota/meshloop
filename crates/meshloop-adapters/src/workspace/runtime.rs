@@ -420,6 +420,64 @@ impl SqliteStore {
         }
         Ok(())
     }
+    /// Every run-loop generation of an unbound, unmarked run, by ordinal. Empty
+    /// unless the first generation is a run-loop binding.
+    pub(crate) fn run_loop_generations(
+        &self,
+        graph: &GraphId,
+    ) -> Result<Vec<GenerationRecord>, StoreError> {
+        let bound: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=?1)",
+                [graph.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if bound || self.legacy_ownership_unresolved(graph)? {
+            return Ok(Vec::new());
+        }
+        let all: Vec<GenerationRecord> = list(
+            &self.conn,
+            "SELECT payload_json FROM workspace_generations WHERE graph_id=?1 ORDER BY ordinal",
+            graph.as_str(),
+        )?;
+        let owned = all
+            .first()
+            .is_some_and(|g| g.is_run_loop_binding() && g.graph_id == *graph);
+        if !owned {
+            return Ok(Vec::new());
+        }
+        // Every later generation must be the run loop's too; anything else fails closed.
+        if all.iter().any(|g| !g.is_run_loop() || g.graph_id != *graph) {
+            return Err(refused());
+        }
+        Ok(all)
+    }
+    /// The next generation of a run-loop run: next ordinal, same binding facts.
+    fn check_advance(
+        &self,
+        f: &dyn RepositoryFence,
+        current: &GenerationRecord,
+        next: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        if !next.is_run_loop()
+            || next.ordinal != current.ordinal + 1
+            || next.repository_id != f.repository().id
+            || next.repository_id != current.repository_id
+            || next.graph_id != current.graph_id
+            || next.root_alias != current.root_alias
+            || next.relative_path != current.relative_path
+            || next.layout_version != current.layout_version
+            || next.base_ref != current.base_ref
+        {
+            return Err(refused());
+        }
+        if !accepted_plan(&self.conn, &next.graph_id, &next.accepted_plan_hash)? {
+            return Err(StoreError::PlanRevisionMismatch);
+        }
+        Ok(())
+    }
     pub(crate) fn reject_legacy_attempt(
         &self,
         attempt: meshloop_domain::evidence::AttemptId,
@@ -447,6 +505,71 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
+/// True when `graph`'s plan is accepted and its exact bytes hash to `hash`.
+fn accepted_plan(c: &Connection, graph: &GraphId, hash: &PlanHash) -> Result<bool, StoreError> {
+    let plan: Option<(String, String)> = c
+        .query_row(
+            "SELECT plan_state,plan_json FROM runs WHERE graph_id=?1",
+            [graph.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(plan.is_some_and(|(state, json)| {
+        state == "PlanAccepted" && format!("{:x}", Sha256::digest(json.as_bytes())) == hash.as_str()
+    }))
+}
+/// True when a reclamation fact retired `artifact`.
+pub(crate) fn retired(c: &Connection, artifact: &LifecycleId) -> Result<bool, StoreError> {
+    let facts: Vec<LifecycleFact> = list(
+        c,
+        "SELECT payload_json FROM workspace_facts WHERE artifact_id=?1 ORDER BY rowid",
+        artifact.as_str(),
+    )?;
+    Ok(facts
+        .iter()
+        .any(|f| matches!(f.fact, Fact::Reclamation(how) if how.retires())))
+}
+fn insert_retirements(
+    c: &Connection,
+    f: &dyn RepositoryFence,
+    facts: &[LifecycleFact],
+) -> Result<(), StoreError> {
+    for fact in facts {
+        let owned: bool = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_artifacts WHERE id=?1 AND repo_id=?2)",
+                params![fact.artifact_id.as_str(), f.repository().id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if !owned || !matches!(fact.fact, Fact::Reclamation(how) if how.retires()) {
+            return Err(refused());
+        }
+        c.execute(
+            "INSERT INTO workspace_facts VALUES(?1,?2,?3)",
+            params![fact.id.as_str(), fact.artifact_id.as_str(), json(fact)?],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
+fn insert_generation_row(c: &Connection, g: &GenerationRecord) -> Result<(), StoreError> {
+    c.execute(
+        "INSERT INTO workspace_generations VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            g.id.as_str(),
+            g.repository_id.as_str(),
+            g.graph_id.as_str(),
+            g.ordinal,
+            g.root_alias.as_str(),
+            g.accepted_plan_hash.as_str(),
+            json(g)?
+        ],
+    )
+    .map_err(error)?;
+    Ok(())
 }
 impl RuntimeLedger for SqliteStore {
     fn legacy_ownership_unresolved(&self, graph: &GraphId) -> Result<bool, StoreError> {
@@ -620,6 +743,231 @@ impl RuntimeLedger for SqliteStore {
     }
     fn run_binding(&self, g: &GraphId) -> Result<Option<RunBinding>, StoreError> {
         get(&self.conn, "workspace_run_bindings", "graph_id", g.as_str())
+    }
+    fn run_loop_generation(&self, graph: &GraphId) -> Result<Option<GenerationRecord>, StoreError> {
+        Ok(self
+            .run_loop_generations(graph)?
+            .into_iter()
+            .find(|g| g.ordinal == 1))
+    }
+    fn run_loop_current_generation(
+        &self,
+        graph: &GraphId,
+    ) -> Result<Option<GenerationRecord>, StoreError> {
+        Ok(self.run_loop_generations(graph)?.into_iter().last())
+    }
+    fn run_loop_artifacts(
+        &self,
+        graph: &GraphId,
+    ) -> Result<Vec<(ArtifactRecord, bool)>, StoreError> {
+        if self.run_loop_generation(graph)?.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT a.payload_json FROM workspace_artifacts a JOIN workspace_generations g ON g.id=a.generation_id WHERE g.graph_id=?1 ORDER BY a.rowid",
+            )
+            .map_err(error)?;
+        let records: Vec<ArtifactRecord> = stmt
+            .query_map([graph.as_str()], |r| r.get::<_, String>(0))
+            .map_err(error)?
+            .map(|row| parse(row.map_err(error)?))
+            .collect::<Result<_, _>>()?;
+        records
+            .into_iter()
+            .map(|record| {
+                let retired = retired(&self.conn, &record.id)?;
+                Ok((record, retired))
+            })
+            .collect()
+    }
+    fn retire_run_loop_artifacts(
+        &mut self,
+        f: &dyn RepositoryFence,
+        facts: &[LifecycleFact],
+    ) -> Result<(), StoreError> {
+        self.validate_fence(f, true)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        insert_retirements(&tx, f, facts)?;
+        tx.commit().map_err(error)
+    }
+    fn restart_run_loop_run(
+        &mut self,
+        f: &dyn RepositoryFence,
+        retire: &[LifecycleFact],
+        next: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        self.validate_fence(f, true)?;
+        let current = self
+            .run_loop_current_generation(&next.graph_id)?
+            .ok_or_else(refused)?;
+        self.check_advance(f, &current, next)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        // History is kept: the run's current rows move into the generation they ran
+        // in, which the run tables' readers skip for a run-loop run.
+        tx.execute(
+            "UPDATE events SET generation_id=?1 WHERE graph_id=?2 AND generation_id IS NULL",
+            params![current.id.as_str(), next.graph_id.as_str()],
+        )
+        .map_err(error)?;
+        tx.execute(
+            "UPDATE attempts SET generation_id=?1 WHERE graph_id=?2 AND generation_id IS NULL",
+            params![current.id.as_str(), next.graph_id.as_str()],
+        )
+        .map_err(error)?;
+        insert_retirements(&tx, f, retire)?;
+        insert_generation_row(&tx, next)?;
+        tx.commit().map_err(error)
+    }
+    fn register_run_loop_run(
+        &mut self,
+        f: &dyn RepositoryFence,
+        g: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        self.validate_fence(f, true)?;
+        f.root(&g.root_alias)?;
+        if g.ordinal > 1 {
+            let current = self
+                .run_loop_current_generation(&g.graph_id)?
+                .ok_or_else(refused)?;
+            self.check_advance(f, &current, g)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(error)?;
+            insert_generation_row(&tx, g)?;
+            return tx.commit().map_err(error);
+        }
+        if !g.is_run_loop_binding()
+            || g.repository_id != f.repository().id
+            || g.relative_path.as_str() != g.graph_id.as_str()
+            || g.base_ref
+                .as_ref()
+                .is_some_and(|base| run_loop_base_ref(base.as_str()).is_none())
+        {
+            return Err(refused());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let marked: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id=?1)
+                 OR EXISTS(SELECT 1 FROM workspace_legacy_unbound m JOIN attempts a ON m.source_table='attempts' AND m.source_id=CAST(a.attempt_id AS TEXT) WHERE a.graph_id=?1)",
+                [g.graph_id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if marked {
+            return Err(StoreError::LegacyOwnershipUnresolved);
+        }
+        // Only a fresh, accepted run is bound: no binding, generation or attempt yet.
+        let fresh: bool = tx
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM workspace_generations WHERE graph_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM attempts WHERE graph_id=?1)",
+                [g.graph_id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if !fresh || !accepted_plan(&tx, &g.graph_id, &g.accepted_plan_hash)? {
+            return Err(refused());
+        }
+        insert_generation_row(&tx, g)?;
+        tx.commit().map_err(error)
+    }
+    fn register_run_loop_artifact(
+        &mut self,
+        f: &dyn RepositoryFence,
+        a: &ArtifactRecord,
+    ) -> Result<LifecycleId, StoreError> {
+        self.validate_fence(f, true)?;
+        f.root(&a.root_alias)?;
+        let g: GenerationRecord = self.generation(&a.generation_id)?.ok_or_else(refused)?;
+        let current = self.run_loop_current_generation(&g.graph_id)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let contained = a
+            .relative_path
+            .as_str()
+            .strip_prefix(g.relative_path.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|leaf| !leaf.is_empty() && !leaf.contains('/'));
+        if current.as_ref() != Some(&g)
+            || g.repository_id != f.repository().id
+            || a.root_alias != g.root_alias
+            || !contained
+            || (a.kind == ArtifactKind::Attempt) != a.attempt_id.is_some()
+            || a.kind == ArtifactKind::Plan
+        {
+            return Err(refused());
+        }
+        // Plan pinning: the generation must hold the accepted plan.
+        if !accepted_plan(&tx, &g.graph_id, &g.accepted_plan_hash)? {
+            return Err(StoreError::PlanRevisionMismatch);
+        }
+        if let Some(attempt) = a.attempt_id {
+            let valid: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attempts WHERE attempt_id=?1 AND graph_id=?2 AND generation_id IS NULL)",
+                    params![attempt.0, g.graph_id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            if !valid {
+                return Err(refused());
+            }
+        }
+        // A live (unretired) record at this location of the run is reused; a
+        // retired one never is.
+        let mut stmt = tx
+            .prepare(
+                "SELECT a.payload_json FROM workspace_artifacts a JOIN workspace_generations g ON g.id=a.generation_id WHERE g.graph_id=?1 ORDER BY a.rowid",
+            )
+            .map_err(error)?;
+        let existing: Vec<ArtifactRecord> = stmt
+            .query_map([g.graph_id.as_str()], |r| r.get::<_, String>(0))
+            .map_err(error)?
+            .map(|row| parse(row.map_err(error)?))
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        for same in existing
+            .iter()
+            .filter(|record| record.relative_path == a.relative_path)
+        {
+            if retired(&tx, &same.id)? {
+                continue;
+            }
+            if same.kind == a.kind && same.attempt_id == a.attempt_id {
+                return Ok(same.id.clone());
+            }
+            return Err(refused());
+        }
+        tx.execute(
+            "INSERT INTO workspace_artifacts VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                a.id.as_str(),
+                a.generation_id.as_str(),
+                g.repository_id.as_str(),
+                a.root_alias.as_str(),
+                a.attempt_id.map(|id| id.0),
+                json(a)?
+            ],
+        )
+        .map_err(error)?;
+        tx.commit().map_err(error)?;
+        Ok(a.id.clone())
     }
     fn create_provisional(
         &mut self,

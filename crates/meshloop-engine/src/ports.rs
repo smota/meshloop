@@ -117,6 +117,8 @@ pub enum StoreError {
     LegacyOwnershipUnresolved,
     PlanRevisionMismatch,
     LifecycleBusy,
+    /// The exclusive repository fence is held by another writer. Retry later.
+    FenceBusy,
     Io(String),
     Corrupt(String),
 }
@@ -203,6 +205,11 @@ pub trait WorkspacePort {
     fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError>;
     fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError>;
     fn delete_branch(&self, branch: &str) -> Result<(), WorkspaceError>;
+    /// Symbolic ref the main checkout is on (`refs/heads/<name>`), or `None` when
+    /// HEAD is detached or unreadable. Read-only.
+    fn current_branch(&self) -> Result<Option<String>, WorkspaceError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -148,6 +148,8 @@ pub enum Command {
         cleanup: bool,
         apply: bool,
         digest: Option<String>,
+        /// `apply --cleanup` only: limit removal to this graph's eligible entries.
+        graph: Option<String>,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
@@ -338,6 +340,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (false, "--cleanup"),
             (false, "--apply"),
             (true, "--digest"),
+            (true, "--graph"),
             (true, "--config"),
             (true, "--db"),
             (true, "--worktree-base"),
@@ -720,6 +723,17 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                         .into(),
                 );
             }
+            let graph = flag_value(rest, "--graph");
+            if has_flag(rest, "--graph")
+                && (report != WorkspaceReport::Apply
+                    || graph
+                        .as_deref()
+                        .is_none_or(|g| !meshloop_domain::task_graph::graph_id_is_legal(g)))
+            {
+                return Err(
+                    "meshloop:workspace --graph <graph-id> requires apply --cleanup".into(),
+                );
+            }
             if matches!(report, WorkspaceReport::Adopt | WorkspaceReport::Maintain)
                 && apply
                 && !digest_ok
@@ -734,6 +748,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 cleanup,
                 apply,
                 digest,
+                graph,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
@@ -770,7 +785,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
-     \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
