@@ -1,0 +1,2385 @@
+{
+  "schema": "meshloop.bench.learning-plane.v1",
+  "task_set_version": "lp-2",
+  "mode": "live",
+  "learning_plane": "absent (no learning-plane code exists at this commit)",
+  "started_unix": 1794334243,
+  "started_utc": "2026-11-10T18:10:43Z",
+  "finished_unix": 1794334859,
+  "meshloop": {
+    "binary_sha256": "cb8a912a7871bbba5ee16a6d7e8ad6d95cc34430a53887544ea6fcfa8115b135",
+    "commit": "f0691d9",
+    "version": "meshloop 0.3.0"
+  },
+  "host_os": "linux",
+  "config_file": "benches/learning-plane/meshloop.toml",
+  "config_sha256": "9cf1307c86179d7ea7ef1287c9b4f2eb85343d56e813a72028cf559fbcdf4923",
+  "harnesses": [
+    {
+      "dispatchable": true,
+      "models": [
+        {
+          "model_ref": "gpt-6-luna",
+          "model_tier": "lightweight",
+          "tier": "Lightweight"
+        },
+        {
+          "model_ref": "gpt-6.1-sol",
+          "model_tier": "top",
+          "tier": "TopTier"
+        }
+      ],
+      "name": "codex",
+      "version": "codex-cli 0.167.0"
+    },
+    {
+      "dispatchable": true,
+      "models": [
+        {
+          "model_ref": "haiku",
+          "model_tier": "lightweight",
+          "tier": "Lightweight"
+        },
+        {
+          "model_ref": "sonnet",
+          "model_tier": "mid",
+          "tier": "MidTier"
+        }
+      ],
+      "name": "claude",
+      "version": "2.1.322 (Claude Code)"
+    },
+    {
+      "dispatchable": true,
+      "models": [
+        {
+          "model_ref": "openai-codex/gpt-5.6-luna",
+          "model_tier": "lightweight",
+          "tier": "Lightweight"
+        },
+        {
+          "model_ref": "openai-codex/gpt-6.1-terra",
+          "model_tier": "mid",
+          "tier": "MidTier"
+        }
+      ],
+      "name": "pi",
+      "version": "1.5.0"
+    }
+  ],
+  "tier_candidates": {
+    "Tier1": [
+      "codex/gpt-6-luna",
+      "codex/gpt-6.1-sol",
+      "claude/haiku",
+      "claude/sonnet",
+      "pi/openai-codex/gpt-5.6-luna",
+      "pi/openai-codex/gpt-6.1-terra"
+    ],
+    "Tier2": [
+      "codex/gpt-6.1-sol",
+      "claude/sonnet",
+      "pi/openai-codex/gpt-6.1-terra"
+    ],
+    "Tier3": [
+      "codex/gpt-6.1-sol"
+    ]
+  },
+  "plan_tiers": {
+    "py-calc": "Tier3",
+    "py-intervals": "Tier2",
+    "py-lru": "Tier2",
+    "py-median-bugfix": "Tier1",
+    "py-roman": "Tier2",
+    "py-semver": "Tier3",
+    "py-wordfreq": "Tier1",
+    "rs-brackets": "Tier2"
+  },
+  "protocol": "Fixed automated protocol, no human in the loop: review-plan --accept of a one-node plan with the task's planned tier, run, then resume --retry while the node is Failed and attempts remain (up to max_retries), accept --task 1 only when Meshloop's own checks passed (node AwaitingReview), resume, integrate --into main --accept-integrate; success is the exit code of the task's hidden tests run on main after integration. The plan is never adjusted or declined, so Adjust/Decline = 0 by protocol, not by measurement of a human.",
+  "state_carried": "Each task x repetition runs in a new disposable Git repository with a new Meshloop store, so routing_feedback, quota_state, attempts and events start empty for every task (checked and recorded per run as routing_feedback_before). Nothing Meshloop stores carries across tasks or repetitions. Not controlled: vendor-side state outside the repository (harness CLI login, user-level config and instruction files, vendor caches and account quota windows).",
+  "reps_requested": 3,
+  "tasks": [
+    "py-median-bugfix",
+    "py-wordfreq",
+    "py-lru",
+    "py-intervals",
+    "py-roman",
+    "rs-brackets",
+    "py-calc",
+    "py-semver"
+  ],
+  "run_timeout_seconds": 1560,
+  "stopped_early": null,
+  "runs": [
+    {
+      "task_id": "py-median-bugfix",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "bugfix",
+      "rep": 1,
+      "graph_id": "lp-py-median-bugfix-r1",
+      "seed_commit": "fa46c67863cb429098026a7a8a86544f6aba3451",
+      "started_unix": 1794334243,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 18.51,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 18,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 18,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 15534,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 18.51,
+      "total_wall_seconds": 20.29,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-wordfreq",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-wordfreq-r1",
+      "seed_commit": "c7594b6b8cb91374f63a9f160ac6def4bdad1f2a",
+      "started_unix": 1794334263,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 18.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 18,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 18,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 12126,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 18.76,
+      "total_wall_seconds": 20.79,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-lru",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-lru-r1",
+      "seed_commit": "e8520de038e175eaabc3b5c609369d7d54d9a4b7",
+      "started_unix": 1794334284,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 13.51,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 13,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 13,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 159733,
+            "input": 10,
+            "output": 1210,
+            "cache_read": 136866,
+            "cache_creation": 21647,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 13.51,
+      "total_wall_seconds": 16.04,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-intervals",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-intervals-r1",
+      "seed_commit": "bd6bb4aed7059aa7b19dbbe5f7f5070e48445356",
+      "started_unix": 1794334300,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 11.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 11,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 11,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156244,
+            "input": 10,
+            "output": 1093,
+            "cache_read": 133875,
+            "cache_creation": 21266,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 11.76,
+      "total_wall_seconds": 14.28,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-roman",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-roman-r1",
+      "seed_commit": "52f45848a2ba3fe2456c1ded6c4cf812f08d2760",
+      "started_unix": 1794334314,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 12.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 12,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 12,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 157078,
+            "input": 10,
+            "output": 1218,
+            "cache_read": 134191,
+            "cache_creation": 21659,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 12.76,
+      "total_wall_seconds": 15.28,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "rs-brackets",
+      "language": "rust",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-rs-brackets-r1",
+      "seed_commit": "8f8e1d4dc6a7b6a2926f92d77957099aae240095",
+      "started_unix": 1794334330,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 11.26,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 11,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 11,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156956,
+            "input": 10,
+            "output": 1160,
+            "cache_read": 134308,
+            "cache_creation": 21478,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 11.26,
+      "total_wall_seconds": 14.04,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-calc",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-calc-r1",
+      "seed_commit": "c5e25903d8579d676934a36d091d2dadd62aa941",
+      "started_unix": 1794334344,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 45.52,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 45,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 45,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 22195,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 45.52,
+      "total_wall_seconds": 47.3,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-semver",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 1,
+      "graph_id": "lp-py-semver-r1",
+      "seed_commit": "e2c1ac0b06c3759515becca4fe633610e7c902e7",
+      "started_unix": 1794334391,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 58.03,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 57,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 57,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 33585,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 58.03,
+      "total_wall_seconds": 59.81,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-median-bugfix",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "bugfix",
+      "rep": 2,
+      "graph_id": "lp-py-median-bugfix-r2",
+      "seed_commit": "a1bad0dbc961c14cf353e06c952f71536cade8e1",
+      "started_unix": 1794334451,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 13.26,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 13,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 13,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 7395,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 13.26,
+      "total_wall_seconds": 15.29,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-wordfreq",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-wordfreq-r2",
+      "seed_commit": "a9aec3aef1f7bdb89333a0cf044060441b4baf25",
+      "started_unix": 1794334466,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 23.01,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 22,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 22,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 13112,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 23.01,
+      "total_wall_seconds": 25.05,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-lru",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-lru-r2",
+      "seed_commit": "e6b83cf8fdabf353349710619259eb424346fb15",
+      "started_unix": 1794334491,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 10.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 10,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 10,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156395,
+            "input": 10,
+            "output": 1177,
+            "cache_read": 133888,
+            "cache_creation": 21320,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 10.76,
+      "total_wall_seconds": 13.54,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-intervals",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-intervals-r2",
+      "seed_commit": "3553efaf584011f4dc89a1741face3194345ee98",
+      "started_unix": 1794334505,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 13.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 14,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 14,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 190562,
+            "input": 12,
+            "output": 1278,
+            "cache_read": 167380,
+            "cache_creation": 21892,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 13.76,
+      "total_wall_seconds": 16.29,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-roman",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-roman-r2",
+      "seed_commit": "f6739d534eed4d2035cc4d0592ea31f57eec2eae",
+      "started_unix": 1794334521,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 11.26,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 10,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 10,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156202,
+            "input": 10,
+            "output": 1169,
+            "cache_read": 133779,
+            "cache_creation": 21244,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 11.26,
+      "total_wall_seconds": 14.03,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "rs-brackets",
+      "language": "rust",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-rs-brackets-r2",
+      "seed_commit": "525155b8f3cd03ac1393308f96310668870bf320",
+      "started_unix": 1794334535,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 11.01,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 10,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 10,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 157795,
+            "input": 10,
+            "output": 1180,
+            "cache_read": 134710,
+            "cache_creation": 21895,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 11.01,
+      "total_wall_seconds": 14.29,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-calc",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-calc-r2",
+      "seed_commit": "e27adbf25ebca5ba40db60ce6edf2af22e1693a4",
+      "started_unix": 1794334549,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 44.27,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 44,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 44,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 31177,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 44.27,
+      "total_wall_seconds": 46.05,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-semver",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 2,
+      "graph_id": "lp-py-semver-r2",
+      "seed_commit": "87bd2a638fad08c7f1982cfbdf0ea2facdbe5d3b",
+      "started_unix": 1794334595,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 58.78,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 58,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 58,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 32892,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 58.78,
+      "total_wall_seconds": 60.56,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-median-bugfix",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "bugfix",
+      "rep": 3,
+      "graph_id": "lp-py-median-bugfix-r3",
+      "seed_commit": "b8c69daeb63697866e1dba162338cdc98696d569",
+      "started_unix": 1794334656,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 18.76,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 18,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 18,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 15100,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 18.76,
+      "total_wall_seconds": 20.54,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-wordfreq",
+      "language": "python",
+      "difficulty": "easy",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-wordfreq-r3",
+      "seed_commit": "f8568b074a4314e77954b4e1cb201d229fe5ad97",
+      "started_unix": 1794334677,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier1",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 14.01,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 14,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "duration_s": 14,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 14706,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 14.01,
+      "total_wall_seconds": 15.78,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6-luna",
+          "tier": "Tier1",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-lru",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-lru-r3",
+      "seed_commit": "1910f3969202c9f0403c56891bbca12a05205577",
+      "started_unix": 1794334692,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 10.51,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 10,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 10,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156371,
+            "input": 10,
+            "output": 1174,
+            "cache_read": 133876,
+            "cache_creation": 21311,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 10.51,
+      "total_wall_seconds": 13.04,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-intervals",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-intervals-r3",
+      "seed_commit": "5c00fb92d382c5662bce2eec951246a2ebf56994",
+      "started_unix": 1794334705,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 12.26,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 12,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 12,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156273,
+            "input": 10,
+            "output": 1110,
+            "cache_read": 133881,
+            "cache_creation": 21272,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 12.26,
+      "total_wall_seconds": 14.79,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-roman",
+      "language": "python",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-roman-r3",
+      "seed_commit": "ed94ece59c1e1eafd5be208f3f52b7434530b632",
+      "started_unix": 1794334720,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 13.51,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 13,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 13,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156522,
+            "input": 10,
+            "output": 1300,
+            "cache_read": 133872,
+            "cache_creation": 21340,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 13.51,
+      "total_wall_seconds": 16.29,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "rs-brackets",
+      "language": "rust",
+      "difficulty": "medium",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-rs-brackets-r3",
+      "seed_commit": "efa3201142efe12741c068a0dbd201ebd439a7d7",
+      "started_unix": 1794334736,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier2",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 11.26,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 10,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "duration_s": 10,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported (recovered from truncated evidence)",
+            "source": "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation",
+            "total": 156944,
+            "input": 10,
+            "output": 1163,
+            "cache_read": 134296,
+            "cache_creation": 21475,
+            "reported_models": [
+              "claude-sonnet-5-5"
+            ]
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 11.26,
+      "total_wall_seconds": 18.29,
+      "routing_feedback_after": [
+        {
+          "harness": "claude",
+          "model_ref": "sonnet",
+          "tier": "Tier2",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-calc",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-calc-r3",
+      "seed_commit": "73a382ac5317bbcf8cbc1d027e23031b9fae5bc3",
+      "started_unix": 1794334755,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 44.02,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 43,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 43,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 43212,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 44.02,
+      "total_wall_seconds": 46.34,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    },
+    {
+      "task_id": "py-semver",
+      "language": "python",
+      "difficulty": "hard",
+      "kind": "implement",
+      "rep": 3,
+      "graph_id": "lp-py-semver-r3",
+      "seed_commit": "56ad315eb9207ed0548c0e0f174b78e38223e724",
+      "started_unix": 1794334801,
+      "routing_feedback_before": [],
+      "store_existed_before": false,
+      "review_exit": 0,
+      "run_exit": 0,
+      "run_timed_out": false,
+      "run_idle": "AwaitingHumanAcceptance",
+      "node_state_after_run": "AwaitingReview",
+      "node_state_after_dispatch": "AwaitingReview",
+      "plan_tier": "Tier3",
+      "retry_resumes": [],
+      "dispatch_wall_seconds": 55.78,
+      "attempts_count": 1,
+      "retries": 0,
+      "worker_wall_seconds": 55,
+      "attempts": [
+        {
+          "index": 1,
+          "attempt_id": 1,
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "duration_s": 55,
+          "outcome": "DeterministicChecksPassed",
+          "worker_exit": 0,
+          "diff_exit": 0,
+          "verify_exit": 0,
+          "verify_exit_last": 0,
+          "repair_rounds": null,
+          "repair_stop": null,
+          "checks_passed": true,
+          "tokens": {
+            "status": "reported",
+            "source": "codex-cli final `tokens used` line",
+            "total": 19328,
+            "input": null,
+            "output": null,
+            "cache_read": null,
+            "cache_creation": null,
+            "reported_models": []
+          },
+          "quota_signal": false
+        }
+      ],
+      "accept_exit": 0,
+      "resume_exit": 0,
+      "integrate_exit": 0,
+      "final_verify_exit": 0,
+      "success": true,
+      "first_attempt_success": true,
+      "adjust_count": 0,
+      "decline_count": 0,
+      "run_wall_seconds": 55.78,
+      "total_wall_seconds": 57.56,
+      "routing_feedback_after": [
+        {
+          "harness": "codex",
+          "model_ref": "gpt-6.1-sol",
+          "tier": "Tier3",
+          "success": 1,
+          "failure": 0
+        }
+      ],
+      "quota_state_after": [],
+      "quota_hit": null,
+      "repo_removed": true,
+      "errors": []
+    }
+  ],
+  "summary": {
+    "by_harness_model": [
+      {
+        "attempt_checks_passed": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        },
+        "attempts": 6,
+        "duration_seconds_p50": 18.0,
+        "duration_seconds_p95": 22.0,
+        "first_dispatches": 6,
+        "harness": "codex",
+        "harness_reported_models": [],
+        "model_ref": "gpt-6-luna",
+        "tokens_reported_attempts": 6,
+        "tokens_total_mean": 12995.5,
+        "tokens_total_median": 13909.0,
+        "tokens_total_sum": 77973.0
+      },
+      {
+        "attempt_checks_passed": {
+          "n": 12,
+          "rate": 1.0,
+          "successes": 12,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.7575
+        },
+        "attempts": 12,
+        "duration_seconds_p50": 11.0,
+        "duration_seconds_p95": 14.0,
+        "first_dispatches": 12,
+        "harness": "claude",
+        "harness_reported_models": [
+          "claude-sonnet-5-5"
+        ],
+        "model_ref": "sonnet",
+        "tokens_reported_attempts": 12,
+        "tokens_total_mean": 159756.25,
+        "tokens_total_median": 156733.0,
+        "tokens_total_sum": 1917075.0
+      },
+      {
+        "attempt_checks_passed": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        },
+        "attempts": 6,
+        "duration_seconds_p50": 45.0,
+        "duration_seconds_p95": 58.0,
+        "first_dispatches": 6,
+        "harness": "codex",
+        "harness_reported_models": [],
+        "model_ref": "gpt-6.1-sol",
+        "tokens_reported_attempts": 6,
+        "tokens_total_mean": 30398.17,
+        "tokens_total_median": 32034.5,
+        "tokens_total_sum": 182389.0
+      }
+    ],
+    "by_plan_tier": {
+      "Tier1": {
+        "dispatch_wall_seconds_p50": 18.51,
+        "dispatch_wall_seconds_p95": 23.01,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 6,
+        "success": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        }
+      },
+      "Tier2": {
+        "dispatch_wall_seconds_p50": 11.26,
+        "dispatch_wall_seconds_p95": 13.76,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 12,
+          "rate": 1.0,
+          "successes": 12,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.7575
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 12,
+        "success": {
+          "n": 12,
+          "rate": 1.0,
+          "successes": 12,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.7575
+        }
+      },
+      "Tier3": {
+        "dispatch_wall_seconds_p50": 45.52,
+        "dispatch_wall_seconds_p95": 58.78,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 6,
+        "success": {
+          "n": 6,
+          "rate": 1.0,
+          "successes": 6,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6097
+        }
+      }
+    },
+    "by_rep": {
+      "rep1": {
+        "dispatch_wall_seconds_p50": 13.51,
+        "dispatch_wall_seconds_p95": 58.03,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 8,
+        "success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        }
+      },
+      "rep2": {
+        "dispatch_wall_seconds_p50": 13.26,
+        "dispatch_wall_seconds_p95": 58.78,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 8,
+        "success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        }
+      },
+      "rep3": {
+        "dispatch_wall_seconds_p50": 13.51,
+        "dispatch_wall_seconds_p95": 55.78,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        },
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 8,
+        "success": {
+          "n": 8,
+          "rate": 1.0,
+          "successes": 8,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.6756
+        }
+      }
+    },
+    "by_task": {
+      "py-calc": {
+        "difficulty": "hard",
+        "dispatch_wall_seconds_p50": 44.27,
+        "dispatch_wall_seconds_p95": 45.52,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier3",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-intervals": {
+        "difficulty": "medium",
+        "dispatch_wall_seconds_p50": 12.26,
+        "dispatch_wall_seconds_p95": 13.76,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier2",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-lru": {
+        "difficulty": "medium",
+        "dispatch_wall_seconds_p50": 10.76,
+        "dispatch_wall_seconds_p95": 13.51,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier2",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-median-bugfix": {
+        "difficulty": "easy",
+        "dispatch_wall_seconds_p50": 18.51,
+        "dispatch_wall_seconds_p95": 18.76,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier1",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-roman": {
+        "difficulty": "medium",
+        "dispatch_wall_seconds_p50": 12.76,
+        "dispatch_wall_seconds_p95": 13.51,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier2",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-semver": {
+        "difficulty": "hard",
+        "dispatch_wall_seconds_p50": 58.03,
+        "dispatch_wall_seconds_p95": 58.78,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier3",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "py-wordfreq": {
+        "difficulty": "easy",
+        "dispatch_wall_seconds_p50": 18.76,
+        "dispatch_wall_seconds_p95": 23.01,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier1",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      },
+      "rs-brackets": {
+        "difficulty": "medium",
+        "dispatch_wall_seconds_p50": 11.26,
+        "dispatch_wall_seconds_p95": 11.26,
+        "fallback_successes": 0,
+        "first_attempt_success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        },
+        "plan_tier": "Tier2",
+        "retries_mean": 0.0,
+        "retries_median": 0.0,
+        "runs": 3,
+        "success": {
+          "n": 3,
+          "rate": 1.0,
+          "successes": 3,
+          "wilson95_high": 1.0,
+          "wilson95_low": 0.4385
+        }
+      }
+    },
+    "first_dispatch_distribution": {
+      "claude/sonnet": 12,
+      "codex/gpt-6-luna": 6,
+      "codex/gpt-6.1-sol": 6
+    },
+    "overall": {
+      "adjust_count": 0,
+      "adjust_decline_note": "0 by protocol (fixed automated acceptance), not a human measurement",
+      "attempts_mean": 1.0,
+      "attempts_with_repair_loop": 0,
+      "decline_count": 0,
+      "dispatch_wall_seconds_p50": 13.51,
+      "dispatch_wall_seconds_p95": 58.03,
+      "failed_runs_without_fallback": 0,
+      "fallback_successes": 0,
+      "first_attempt_success": {
+        "n": 24,
+        "rate": 1.0,
+        "successes": 24,
+        "wilson95_high": 1.0,
+        "wilson95_low": 0.862
+      },
+      "quota_hits": 0,
+      "repair_rounds_total": 0,
+      "retries_max": 0.0,
+      "retries_mean": 0.0,
+      "retries_median": 0.0,
+      "runs": 24,
+      "success": {
+        "n": 24,
+        "rate": 1.0,
+        "successes": 24,
+        "wilson95_high": 1.0,
+        "wilson95_low": 0.862
+      },
+      "timed_out_runs": 0,
+      "total_wall_seconds_p50": 16.29,
+      "total_wall_seconds_p95": 59.81,
+      "worker_wall_seconds_p50": 13.0,
+      "worker_wall_seconds_p95": 57.0
+    },
+    "runs_by_retries": {
+      "0": 24
+    },
+    "success_rate_by_rep": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "success_rate_rep_range_pp": 0.0
+  }
+}

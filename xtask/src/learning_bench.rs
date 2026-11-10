@@ -1309,7 +1309,11 @@ fn parse_tokens(harness: &str, transcript: &str) -> TokenReport {
         },
         "claude" => match parse_claude_usage(transcript) {
             Some(mut t) => {
-                t.status = "reported".into();
+                t.status = if truncated {
+                    "reported (recovered from truncated evidence)".into()
+                } else {
+                    "reported".into()
+                };
                 t.source = Some(
                     "claude --output-format json modelUsage: input+output+cacheRead+cacheCreation"
                         .into(),
@@ -1372,7 +1376,11 @@ fn parse_claude_usage(text: &str) -> Option<TokenReport> {
             return Some(fill_claude(t, i, o, cr, cc));
         }
     }
-    let idx = text.find("\"modelUsage\":{")?;
+    // camelCase counters appear only inside `modelUsage` (`usage` is snake_case), so
+    // when truncation cut the `modelUsage` key itself, start at the first counter.
+    let idx = text
+        .find("\"modelUsage\":{")
+        .or_else(|| text.find("\"inputTokens\":"))?;
     let rest = &text[idx..];
     let sum = |key: &str| -> Option<u64> {
         let pat = format!("\"{key}\":");
@@ -1635,7 +1643,7 @@ fn summarize(runs: &[RunRecord]) -> Value {
                 .collect();
             let tok: Vec<f64> = atts
                 .iter()
-                .filter(|a| a.tokens.status == "reported")
+                .filter(|a| a.tokens.status.starts_with("reported"))
                 .filter_map(|a| a.tokens.total.map(|t| t as f64))
                 .collect();
             let mut models: Vec<String> = atts
@@ -1828,6 +1836,10 @@ mod tests {
         let r = parse_tokens("claude", t);
         assert_eq!(r.total, Some(15));
         assert_eq!(r.reported_models, vec!["claude-sonnet-5-5".to_string()]);
+        let cut = "exit=0\nstdout:\n…[truncated 2791 bytes]…laude-sonnet-5-5\":{\"inputTokens\":10,\"outputTokens\":1300,\"cacheReadInputTokens\":5,\"cacheCreationInputTokens\":2,\"webSearchRequests\":0},\"result\":\"x\"}\nstderr:\n";
+        let r = parse_tokens("claude", cut);
+        assert_eq!(r.total, Some(1317));
+        assert_eq!(r.status, "reported (recovered from truncated evidence)");
         let gone = parse_tokens(
             "claude",
             "…[truncated 9000 bytes]…\"result\":\"x\"}\nstderr:\n",
