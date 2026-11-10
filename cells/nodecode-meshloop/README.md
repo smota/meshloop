@@ -5,7 +5,9 @@ switches it on, drives them: plan, review-plan, run, resume, cancel, accept and 
 is the first step of the learning plane in
 [ADR 0038](../../docs/architecture/adr/0038-nodecode-learning-plane-and-harness.md)
 ([#135](https://github.com/smota/meshloop/issues/135) read-only,
-[#136](https://github.com/smota/meshloop/issues/136) driving). Background and nodecode facts
+[#136](https://github.com/smota/meshloop/issues/136) driving,
+[#137](https://github.com/smota/meshloop/issues/137) an optional one-way projection onto a
+nodecode Board). Background and nodecode facts
 are in [learning-plane.md](../../docs/architecture/learning-plane.md).
 
 The cell runs the `meshloop` binary as `meshloop <verb> --json --origin-harness nodecode
@@ -65,6 +67,7 @@ Read-only, in the shell and through eval:
 | `/meshloop report [GRAPH]` | `(meshloop:report "GRAPH")` | The run report: harnesses and `model_ref`s dispatched, selected harnesses not exercised, one line per node |
 | `/meshloop review-plan [--plan FILE]` | none | The plan file's nodes and where its review stands |
 | `/meshloop hook-check FORM` | none | Whether the `:tool` veto refuses an eval call whose form is FORM |
+| `/meshloop board-sync [GRAPH]` | none | Posts the runs' new events to the repository's nodecode board, when `board` is on ([The Board projection](#the-board-projection)). It writes nothing to meshloop |
 
 Commands that write. These are slash commands only: they are not eval verbs or tools, and no
 hook, timer or Board post calls them. Each refuses in one line while `write_commands` is off,
@@ -203,6 +206,94 @@ diff. It read the node's "do not create any other file" wording as conflicting w
 task, so the node failed. `/meshloop cancel` then left no process and kept only ledger-owned
 worktrees.
 
+### The Board projection
+
+Off by default. With `board` on, the cell turns meshloop's event log into pointer posts on
+a [nodecode Board](../../docs/architecture/learning-plane.md#board-spike-2026-11-10).
+Sessions on that board read the posts at their next model request, so a supervising
+session does not have to poll `status`. The projection is one-way. The meshloop event log
+is still the only authority. No Board post changes meshloop state, and nothing in this cell
+reads a post.
+
+- **One board per repository.** The board is named `meshloop-` plus 12 hex digits of the
+  SHA-256 of the repository root's real path, for example `meshloop-b9a29b1a6412`.
+  Nodecode lets a session sit on one board, so this name is the same for every run in
+  the repository. Every post names its run (graph). The session that types the command is
+  put on that board (`board:join`), leaving any other board it was on, and every post is
+  that session's (`board:post`). A supervising session joins the board itself, with
+  `/board meshloop-...`. `/meshloop board-sync` prints the name.
+- **The source.** `meshloop events --graph G --after N --json` is a read-only verb (ADR
+  0034) added for this projection. It returns the graph's events in log order, each with
+  `seq`, the event log's own id. The id is unique and increasing and is never renumbered.
+  Each event carries the task, attempt, states, event name and the attempt's worktree. It
+  never carries a reason, a note or worker output. `watch` was not enough: it polls
+  status and sees only the transitions between two polls.
+- **The post.** Each post is one line from a fixed template made of meshloop's own words:
+
+  ```text
+  meshloop g137 event 4: node #1 AwaitingReview (from Verifying, DeterministicChecksPassed); evidence .meshloop/worktrees/g137/task-1-attempt-1
+  meshloop g137 plan 1: PlanAccepted; evidence none
+  ```
+
+  The fields are the graph id, the event's `seq`, the node, its new state, the state it
+  left, the event name, and the evidence path: the attempt's worktree relative to the
+  repository root, or `none`. A plan line is posted when the run's plan state changes,
+  numbered by plan change. No description, note, reason, diff, log or worker output goes
+  in a post. States and event names must be ASCII letters and digits or they become `?`.
+  An `@` in a path is written `%40`, so a post can never mention a session by accident.
+  A post fits the board's `board.post_chars` (1000 by default). The evidence path is
+  shortened from the left first.
+- **Exactly once.** A cursor holds, for each graph, the `seq` of the last posted event and
+  the last posted plan state. It is a file of this cell's own under the nodecode home,
+  `meshloop/board/<store>/<board>.cursor`, and never in meshloop's store. The cell writes
+  it with one rename after each post. A second sync, a `resume`, a restarted cell or a sync
+  after an interrupted run therefore posts nothing twice. The `seq` in the text keeps
+  posts distinct for the Board's 60-second same-words refusal. That refusal is read as
+  "already posted", which covers a crash between a post and its cursor write when the next
+  sync comes within 60 s. One gap is left: a crash in that window with the next sync more
+  than 60 s later posts that one event again. If the cursor file is not one this cell
+  wrote, the cell refuses to post. It does not start over silently.
+- **When it runs.** Only inside a `/meshloop` command the operator typed. `/meshloop
+  board-sync [GRAPH]` runs it. While `board_after_commands` is on, which is the default
+  when `board` is on, `run`, `resume`, `accept`, `cancel` and `status` also sync afterwards
+  and add a `meshloop board:` line to their answer. The graphs synced are the graph the
+  command named, the newest run and every run waiting for acceptance. There is no timer,
+  thread or hook point, so meshloop and this cell add no daemon (ADR 0022). A transition
+  made by a detached driver reaches the board at the next such command. Eval verbs never
+  post, so a model turn does not drive the projection. One sync posts at most 200 events
+  for each graph and says how many are left.
+- **No mentions by default.** A post mentions no one. With `wake_on_gates` on, a post about
+  a gate (`AwaitingPlanReview`, `AwaitingReview`, `Blocked`, `Failed`) ends with
+  `@<supervisor_session>`, and only when that state is still the node's current state, so
+  replayed history wakes no one. The mention is the template's last word and comes with
+  no instruction. The Board wakes the named session if it is idle, on the board, and
+  within `board.hops` (4 by default; 0 never wakes). It answers `woke ID` or why not, and
+  the cell repeats that answer.
+- **What a wake costs.** A wake starts a model turn in the supervising session with that
+  session's full host authority. The [Board spike](../../docs/architecture/learning-plane.md#board-spike-2026-11-10)
+  showed that the fixed wake template does not bound it: a woken session ran 30 model
+  requests and 29 shell calls and read files outside its folder. That turn could run
+  `meshloop accept --as` itself. The `:tool` veto is defence in depth, not a boundary. Turn
+  `wake_on_gates` on only for a supervising session whose own budget you have bounded with
+  the organism's turn budget settings, and expect one turn for each gate post that
+  mentions it.
+- **Acceptance stays typed.** A post that says `accept`, or `/meshloop accept --task 1 --as
+  x`, is text on a board. Acceptance is `/meshloop accept --as <identity>`, or `meshloop
+  accept`, typed by a person (ADR 0038, invariant 5).
+- **No relay.** The nodecode release has no code that relays Board posts to a channel, and
+  this cell adds none, following the owner's decision in #137.
+- **Workers.** `board_workers` is reserved for nodecode-harness workers ([#138](https://github.com/smota/meshloop/issues/138),
+  not built) joining the board. Nothing joins a worker, whether the setting is on or
+  off. When it is on, `board-sync` says so. Board text that reaches a worker is untrusted
+  input outside meshloop's evidence.
+
+A sync answers like this:
+
+```text
+meshloop board: meshloop-b9a29b1a6412
+  g137: 4 posts, cursor at event 13; the board said: woke s-MESHLOOPSUPER
+```
+
 ## Settings
 
 The `meshloop` section of the home's `config.jsonc`:
@@ -214,6 +305,11 @@ The `meshloop` section of the home's `config.jsonc`:
 | `plan_timeout_seconds` | integer, at least 1 | `600` | How long `plan` and `review-plan --adjust`, which run the planner in the foreground, may run |
 | `write_commands` | boolean | `false` | Lets the commands that write run. Off, each refuses in one line |
 | `enabled` | boolean | `true` when the section is present | `false` switches the cell off |
+| `board` | boolean | `false` | Projects run events onto the repository's nodecode board ([The Board projection](#the-board-projection)). Needs the `nodecode-board` cell, which ships with nodecode. Off, `board-sync` refuses in one line and no other command runs anything more |
+| `board_after_commands` | boolean | `true` | With `board` on, also syncs after `/meshloop run`, `resume`, `accept`, `cancel` and `status` |
+| `wake_on_gates` | boolean | `false` | With `board` on, a post about a current gate mentions `supervisor_session`, which wakes it when idle: a model turn with full host authority |
+| `supervisor_session` | string | empty | The session id a gate post mentions, for example `s-ABC123`. Empty, or anything other than letters, digits, `-` and `_`, mentions no one |
+| `board_workers` | boolean | `false` | Reserved for nodecode-harness workers joining the board (#138, not built). No worker joins either way |
 
 ## Failures
 
@@ -240,7 +336,8 @@ Every failure is one line that starts with `meshloop <verb>:`, never a Lisp cond
 with its type, for each case: the envelope (`ok`, `command`), `error` when `ok` is false,
 `doctor`, `status` with and without a run, `inspect`, `inspect --attempts` (the report and
 accept's read-back), the integrate worktree, `plan`, `review-plan`, `run --detach`,
-`resume --detach`, `cancel` and `workspace inventory`, and the fields of a plan file. `accept`
+`resume --detach`, `cancel`, `workspace inventory` and `events` (the Board projection), and
+the fields of a plan file. `accept`
 and `integrate` answer text, so the cell reads their exit code and then what they recorded. The cell loads it at start and
 checks every answer against it. That check produces the "older binary" line.
 [`crates/meshloop-cli/tests/nodecode_cell_contract.rs`](../../crates/meshloop-cli/tests/nodecode_cell_contract.rs)
@@ -265,8 +362,24 @@ list. To read a new field, add it to `contract.json` first.
   review-plan and integrate in several spellings and lets read verbs through (through
   `hook-check`, because a real tool call needs a model turn); a fixture graph goes plan,
   review-plan, run, accept, resume, integrate, with auto-reclaim leaving no worktree or
-  branch; and cancel leaves no process in the repository and only worktrees meshloop owns. It
-  never touches the operator's nodecode home. `--work` must sit inside the repository's
+  branch; and cancel leaves no process in the repository and only worktrees meshloop owns.
+  For the Board projection (#137), on a fixture repository of its own with the
+  `nodecode-board` cell on and a supervising session on the board, it checks the
+  following. With `board` off, `board-sync` refuses and `status` posts nothing. The
+  board's name matches one computed independently from the repository path. With `board`
+  on, the board file holds exactly one post per event `meshloop events` lists, in order,
+  and one post for the plan state. No post holds `@`, the run's text, or more than
+  `post_chars`. A second sync posts nothing. A cursor rewound to before its last post posts
+  no duplicate, because the Board refuses the same words. Three posts saying `accept`,
+  including `/meshloop accept --task 1 --as x`, leave the event log, the meshloop store and
+  the node unchanged and start no process. With `wake_on_gates` on, it kills the run's
+  driver and worker during an attempt and resumes, with a retry. It then checks that every
+  event of the whole run was posted exactly once and that only gate posts mention the
+  supervising session. It checks that the Board woke that session once for each such
+  post, read from its timeline, and that a restarted cell posts nothing again. The
+  throwaway home has no model, so a woken turn ends at once ("no model is chosen yet")
+  with no model call: the wake is delivered and nothing is spent. It never touches the
+  operator's nodecode home. `--work` must sit inside the repository's
   `.agent-runs/`, the temp directory or `$RUNNER_TEMP`; it is removed when every check
   passes.
 
@@ -289,7 +402,17 @@ list. To read a new field, add it to `contract.json` first.
   packages and fails on a full compiler warning, then tests the functions that need nothing
   of nodecode: the `:tool` veto's reading of a call (every spelling above, the pass-throughs,
   and a command assembled at run time, which it cannot see) and the argument checks of the commands that write (identity, task, graph,
-  branch, plan path, flags). Neither `cargo test` nor `xtask check` runs it.
+  branch, plan path, flags). For the Board projection it tests the board name (its form,
+  and that it is the same for a path with or without a trailing `/`), the post template
+  (exact text, `none` evidence, the mention as the last word, distinct text per event, no
+  `@` or free text from any field, every post within `post_chars` down to 40, a long path
+  shortened from the left), when a post mentions (`wake_on_gates` off: never; on: only a
+  current gate, only a well-formed supervisor id), the cursor file (round trip, refusal of a
+  foreign or broken file), and which graphs a command names. It also reads the sources to
+  check that the cell is one-way: no source names the Board's post facts, its `:round`
+  delivery or its readers, the only Board verbs called are `JOIN` and `POST`, and the
+  projection asks meshloop only for `events` and `status`. Neither `cargo test` nor
+  `xtask check` runs it.
 
 - **Optional CI:** the `nodecode-cell` job in `.github/workflows/ci.yml` installs a pinned
   nodecode release on a throwaway `HOME` and runs the load test. It checks `install.sh`
