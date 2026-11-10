@@ -42,9 +42,19 @@ pub fn replay(records: &[TransitionRecord]) -> HashMap<AttemptKey, TaskState> {
 pub fn replay_tasks(
     records: &[TransitionRecord],
 ) -> Result<HashMap<TaskId, TaskState>, StoreError> {
+    replay_tasks_marked(records).map(|(projection, _)| projection)
+}
+
+/// [`replay_tasks`], and for each record whether the fold skipped it: `true` for a row
+/// of a pre-#167 stale chain after `Cancel`, which no reader counts as a transition
+/// (#137, so a projection posts only the transitions status shows).
+pub fn replay_tasks_marked(
+    records: &[TransitionRecord],
+) -> Result<(HashMap<TaskId, TaskState>, Vec<bool>), StoreError> {
     let mut projection: HashMap<TaskId, TaskState> = HashMap::new();
     let mut stale: HashMap<TaskId, StaleChain> = HashMap::new();
-    for record in records {
+    let mut skipped = vec![false; records.len()];
+    for (index, record) in records.iter().enumerate() {
         let from = projection
             .get(&record.task_id)
             .copied()
@@ -53,6 +63,7 @@ pub fn replay_tasks(
             && let Some(chain) = stale.get_mut(&record.task_id)
             && chain.continues_with(record)
         {
+            skipped[index] = true;
             continue;
         }
         match transition(from, record.event) {
@@ -84,7 +95,7 @@ pub fn replay_tasks(
             }
         }
     }
-    Ok(projection)
+    Ok((projection, skipped))
 }
 
 /// The issue #167 signature after a `Cancel`: the driver's own view of the cancelled

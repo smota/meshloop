@@ -93,6 +93,7 @@ pub enum Command {
     Events {
         graph: Option<String>,
         after: i64,
+        limit: i64,
         config: Option<PathBuf>,
         db: Option<PathBuf>,
     },
@@ -302,6 +303,7 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
         "events" => &[
             (true, "--graph"),
             (true, "--after"),
+            (true, "--limit"),
             (true, "--config"),
             (true, "--db"),
         ],
@@ -593,9 +595,20 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 })?,
                 None => 0,
             };
+            let limit = match flag_value(rest, "--limit") {
+                Some(raw) => raw
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| (1..=10_000).contains(n))
+                    .ok_or_else(|| {
+                        format!("meshloop:events --limit expects 1 to 10000 events, got {raw}")
+                    })?,
+                None => 1000,
+            };
             Ok(Command::Events {
                 graph: flag_value(rest, "--graph"),
                 after,
+                limit,
                 config: flag_value(rest, "--config").map(PathBuf::from),
                 db: flag_value(rest, "--db").map(PathBuf::from),
             })
@@ -821,7 +834,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
-     \x20 meshloop events [--graph <id>] [--after <event id>] [--config <path>] [--db <path>] [--json]\n\
+     \x20 meshloop events [--graph <id>] [--after <event id>] [--limit <n, default 1000>] [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
      \x20 meshloop roles [--json]\n\
@@ -878,6 +891,18 @@ mod tests {
             );
         }
         assert!(parse(&["events", "--task", "1"].map(String::from)).is_err());
+        let parsed = parse(&["events", "--limit", "200"].map(String::from)).unwrap();
+        assert!(matches!(parsed.command, Command::Events { limit: 200, .. }));
+        assert!(matches!(
+            parse(&["events"].map(String::from)).unwrap().command,
+            Command::Events { limit: 1000, .. }
+        ));
+        for bad in ["0", "10001", "-5", "x"] {
+            assert!(
+                parse(&["events", "--limit", bad].map(String::from)).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -274,9 +274,20 @@ fn dispatch(inv: Invocation) -> ExitCode {
         Command::Events {
             graph,
             after,
+            limit,
             config,
             db,
-        } => cmd_events(graph, after, config, db, inv.json, inv.origin),
+        } => cmd_events(
+            EventsRequest {
+                graph,
+                after,
+                limit,
+            },
+            config,
+            db,
+            inv.json,
+            inv.origin,
+        ),
         Command::Watch {
             graph,
             session_id,
@@ -2135,21 +2146,47 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
     None
 }
 
-/// `meshloop events`: a graph's run-table events in append order with their stable
-/// `event_id` as `seq`, after `--after` (#137). Read-only under ADR 0034: the same
-/// read-only composition as status, inspect and watch, one SELECT, no writes. Each
-/// event is a pointer (task, attempt, states, event name, time, the attempt's worktree
-/// as meshloop recorded it), never a reason, note or worker output, so a projection
-/// such as the nodecode cell's Board can keep a cursor on `seq` and post each one once.
-fn cmd_events(
+/// What `meshloop events` was asked for.
+struct EventsRequest {
     graph: Option<String>,
     after: i64,
+    limit: i64,
+}
+
+/// One snapshot of what `meshloop events` reads.
+struct EventsRead {
+    run: meshloop_engine::ports::RunRow,
+    all: Vec<(i64, meshloop_engine::ports::TransitionRecord)>,
+    window: Vec<(i64, meshloop_engine::ports::TransitionRecord)>,
+    more: bool,
+    max_seq: i64,
+    worktrees: HashMap<u32, String>,
+}
+
+/// `meshloop events`: a graph's run-table events in append order with their stable
+/// `event_id` as `seq`, after `--after`, at most `--limit` (#137). Read-only under ADR
+/// 0034: the same read-only composition as status, inspect and watch, SELECTs in one
+/// read snapshot, no writes. Each event is a pointer (task, attempt, states, event
+/// name, time, the attempt's worktree as meshloop recorded it), never a reason, note
+/// or worker output, so a projection such as the nodecode cell's Board can keep a
+/// cursor on `seq` and post each one once. The whole log is folded as every reader
+/// folds it (`replay_tasks`): `nodes` is each task's folded state, and a row the fold
+/// skips (a pre-#167 stale chain after `Cancel`) is marked `superseded`. `max_seq` and
+/// `ledger_id` let a cursor see that the ledger was replaced.
+fn cmd_events(
+    request: EventsRequest,
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     json: bool,
     origin: meshloop_engine::origin::Origin,
 ) -> ExitCode {
+    use meshloop_engine::workspace::RuntimeLedger;
     const COMMAND: &str = "meshloop:events";
+    let EventsRequest {
+        graph,
+        after,
+        limit,
+    } = request;
     let (cfg, _) = match load_cfg(config) {
         Ok(v) => v,
         Err(c) => return c,
@@ -2173,39 +2210,82 @@ fn cmd_events(
         Err(e) => return read_error(COMMAND, origin, json, e),
     };
     let store = &composed.store;
-    let run = match graph.as_deref() {
-        Some(id) => store.load_run(id),
-        None => store.latest_run(),
+    let read = || -> Result<Option<EventsRead>, String> {
+        let run = match graph.as_deref() {
+            Some(id) => store.load_run(id),
+            None => store.latest_run(),
+        }
+        .map_err(|e| format!("{e:?}"))?;
+        let Some(run) = run else {
+            return Ok(None);
+        };
+        let all = store
+            .event_log(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?;
+        let (window, more) = store
+            .event_window(&run.graph_id, after, limit)
+            .map_err(|e| format!("{e:?}"))?;
+        let max_seq = store.max_event_id().map_err(|e| format!("{e:?}"))?;
+        let worktrees = store
+            .attempts_for_graph(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?
+            .into_iter()
+            .filter_map(|a| {
+                a.worktree_path
+                    .map(|p| (a.attempt_id.0, p.display().to_string()))
+            })
+            .collect();
+        Ok(Some(EventsRead {
+            run,
+            all,
+            window,
+            more,
+            max_seq,
+            worktrees,
+        }))
     };
-    let run = match run {
-        Ok(Some(run)) => run,
-        Ok(None) => {
+    let mut result = None;
+    if let Err(e) = store.with_read_snapshot(&mut || result = Some(read())) {
+        return read_error(COMMAND, origin, json, format!("{e:?}"));
+    }
+    let read = match result {
+        Some(Ok(Some(read))) => read,
+        Some(Ok(None)) => {
             let message = graph.as_deref().map_or_else(
                 || "graph not found: no runs".to_string(),
                 |id| format!("graph '{id}' not found"),
             );
             return read_error(COMMAND, origin, json, message);
         }
+        Some(Err(e)) => return read_error(COMMAND, origin, json, e),
+        None => return read_error(COMMAND, origin, json, "read snapshot did not run"),
+    };
+    let records: Vec<_> = read.all.iter().map(|(_, r)| r.clone()).collect();
+    let (folded, skipped) = match meshloop_engine::recovery::replay_tasks_marked(&records) {
+        Ok(v) => v,
         Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
     };
-    let events = match store.event_log(&run.graph_id) {
-        Ok(events) => events,
-        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
-    };
-    let worktrees: HashMap<u32, String> = match store.attempts_for_graph(&run.graph_id) {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|a| {
-                a.worktree_path
-                    .map(|p| (a.attempt_id.0, p.display().to_string()))
-            })
-            .collect(),
-        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
-    };
-    let shown: Vec<_> = events.iter().filter(|(seq, _)| *seq > after).collect();
-    let last_seq = shown.last().map_or(after, |(seq, _)| *seq);
+    let superseded: std::collections::HashSet<i64> = read
+        .all
+        .iter()
+        .zip(&skipped)
+        .filter(|(_, skip)| **skip)
+        .map(|((seq, _), _)| *seq)
+        .collect();
+    let mut nodes: Vec<_> = folded.into_iter().collect();
+    nodes.sort_by_key(|(task, _)| task.0);
+    let last_seq = read.window.last().map_or(after, |(seq, _)| *seq);
+    let ledger_id = meshloop_domain::digest::sha256_hex(
+        format!(
+            "meshloop-ledger\0{}\0{}",
+            read.run.graph_id, read.run.created_at
+        )
+        .as_bytes(),
+    )[..16]
+        .to_string();
     if json {
-        let rows: Vec<serde_json::Value> = shown
+        let rows: Vec<serde_json::Value> = read
+            .window
             .iter()
             .map(|(seq, e)| {
                 serde_json::json!({
@@ -2216,9 +2296,14 @@ fn cmd_events(
                     "to": format!("{:?}", e.to),
                     "event": format!("{:?}", e.event),
                     "occurred_at": e.occurred_at,
-                    "evidence_path": e.attempt_id.and_then(|a| worktrees.get(&a.0)),
+                    "superseded": superseded.contains(seq),
+                    "evidence_path": e.attempt_id.and_then(|a| read.worktrees.get(&a.0)),
                 })
             })
+            .collect();
+        let nodes: serde_json::Map<String, serde_json::Value> = nodes
+            .iter()
+            .map(|(task, state)| (task.0.to_string(), format!("{state:?}").into()))
             .collect();
         println!(
             "{}",
@@ -2226,25 +2311,39 @@ fn cmd_events(
                 COMMAND,
                 origin,
                 serde_json::json!({
-                    "graph_id": run.graph_id,
-                    "plan_state": format!("{:?}", run.plan_state),
+                    "graph_id": read.run.graph_id,
+                    "plan_state": format!("{:?}", read.run.plan_state),
+                    "ledger_id": ledger_id,
                     "after": after,
+                    "limit": limit,
                     "last_seq": last_seq,
+                    "max_seq": read.max_seq,
+                    "more": read.more,
+                    "nodes": nodes,
                     "events": rows,
                 })
             )
         );
     } else {
         println!(
-            "graph {} (plan {:?}): {} event(s) after {after}",
-            run.graph_id,
-            run.plan_state,
-            shown.len()
+            "graph {} (plan {:?}): {} event(s) after {after}{}",
+            read.run.graph_id,
+            read.run.plan_state,
+            read.window.len(),
+            if read.more { ", more follow" } else { "" }
         );
-        for (seq, e) in &shown {
+        for (seq, e) in &read.window {
             println!(
-                "  {seq} #{} {:?} -> {:?} ({:?})",
-                e.task_id.0, e.from, e.to, e.event
+                "  {seq} #{} {:?} -> {:?} ({:?}){}",
+                e.task_id.0,
+                e.from,
+                e.to,
+                e.event,
+                if superseded.contains(seq) {
+                    " superseded"
+                } else {
+                    ""
+                }
             );
         }
     }

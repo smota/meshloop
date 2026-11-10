@@ -141,7 +141,31 @@ impl SqliteStore {
     /// with its `event_id` (#137). Read-only: one SELECT, the same visibility as
     /// `records_for_graph`. The id is stable, so a projection can keep a cursor on it.
     pub fn event_log(&self, graph_id: &str) -> Result<Vec<(i64, TransitionRecord)>, StoreError> {
-        visible_rows(&self.conn, graph_id, None)
+        visible_rows(&self.conn, graph_id, None, None, None)
+    }
+
+    /// At most `limit` of `event_log`'s rows with an id above `after`, filtered in SQL,
+    /// and whether more follow (#137).
+    pub fn event_window(
+        &self,
+        graph_id: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<(Vec<(i64, TransitionRecord)>, bool), StoreError> {
+        let mut rows = visible_rows(&self.conn, graph_id, None, Some(after), Some(limit + 1))?;
+        let more = rows.len() as i64 > limit;
+        rows.truncate(limit.max(0) as usize);
+        Ok((rows, more))
+    }
+
+    /// The highest event id this ledger holds, 0 when it holds none (#137): a cursor
+    /// above it was kept on another ledger.
+    pub fn max_event_id(&self) -> Result<i64, StoreError> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(event_id), 0) FROM events", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| StoreError::Io(e.to_string()))
     }
 
     pub fn all_evidence(&self) -> Result<Vec<Evidence>, StoreError> {
@@ -196,7 +220,7 @@ fn visible_records(
     graph_id: &str,
     task: Option<TaskId>,
 ) -> Result<Vec<TransitionRecord>, StoreError> {
-    Ok(visible_rows(conn, graph_id, task)?
+    Ok(visible_rows(conn, graph_id, task, None, None)?
         .into_iter()
         .map(|(_, record)| record)
         .collect())
@@ -204,19 +228,22 @@ fn visible_records(
 
 /// `visible_records` with each record's `event_id`: the log position SQLite assigned
 /// at append, unique and increasing, never reused or renumbered.
+/// `after` and `limit`, when given, keep the rows with a greater id and at most that many.
 fn visible_rows(
     conn: &Connection,
     graph_id: &str,
     task: Option<TaskId>,
+    after: Option<i64>,
+    limit: Option<i64>,
 ) -> Result<Vec<(i64, TransitionRecord)>, StoreError> {
     let mut stmt = conn
         .prepare(
             "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at, event_id
-             FROM events WHERE graph_id = ?1 AND (?2 IS NULL OR task_id = ?2) AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) ORDER BY event_id ASC",
+             FROM events WHERE graph_id = ?1 AND (?2 IS NULL OR task_id = ?2) AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) AND (?3 IS NULL OR event_id > ?3) ORDER BY event_id ASC LIMIT COALESCE(?4, -1)",
         )
         .map_err(|e| StoreError::Io(e.to_string()))?;
     let rows = stmt
-        .query_map(params![graph_id, task.map(|t| t.0)], |r| {
+        .query_map(params![graph_id, task.map(|t| t.0), after, limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, u32>(1)?,
@@ -1264,6 +1291,18 @@ mod tests {
         let records: Vec<TransitionRecord> = log.into_iter().map(|(_, r)| r).collect();
         assert_eq!(records, store.records_for_graph("g").unwrap());
         assert!(store.event_log("missing").unwrap().is_empty());
+        let (window, more) = store.event_window("g", 0, 1).unwrap();
+        assert_eq!(
+            (window.iter().map(|(id, _)| *id).collect::<Vec<_>>(), more),
+            (vec![1], true)
+        );
+        let (window, more) = store.event_window("g", 1, 1).unwrap();
+        assert_eq!(
+            (window.iter().map(|(id, _)| *id).collect::<Vec<_>>(), more),
+            (vec![3], false)
+        );
+        assert!(store.event_window("g", 3, 10).unwrap().0.is_empty());
+        assert_eq!(store.max_event_id().unwrap(), 3);
     }
 
     #[test]
