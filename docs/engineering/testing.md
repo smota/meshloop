@@ -94,6 +94,12 @@ Packages all five publishable crates (`meshloop-domain`, `meshloop-context`, `me
 cargo run -p xtask -- publish-dry
 ```
 
+### 2.7 Optional nodecode cell (`cells/nodecode-meshloop`)
+The read-only nodecode cell (ADR 0038, #135) is Common Lisp, and the workspace never builds it. It is tested at two levels:
+
+- **Blocking, offline contract.** [`cells/nodecode-meshloop/contract.json`](../../cells/nodecode-meshloop/contract.json) names every `--json` field the cell reads. `crates/meshloop-cli/tests/nodecode_cell_contract.rs` runs `doctor`, `status` and `inspect` on a fixture repository with the cell's arguments and asserts each field and its type. It runs inside `cargo test --workspace --locked --offline`, needs no nodecode and opens no socket. The cell checks every answer against the same file.
+- **Load test, non-blocking.** `cells/nodecode-meshloop/test/load_test.py` loads the cell into `nodecode serve` on a throwaway `HOME` and runs the commands through the gateway, with no model turn. It checks the summaries, the one-line failures and that nothing in the repository or `.meshloop/` changed. It also checks that switching the cell off leaves meshloop's answers unchanged. The `nodecode-cell` CI job runs it on Linux with `continue-on-error`; `xtask` never calls it. Usage is in the [cell README](../../cells/nodecode-meshloop/README.md#tests).
+
 ---
 
 ## 3. Real Fault Injection & Negative Controls
