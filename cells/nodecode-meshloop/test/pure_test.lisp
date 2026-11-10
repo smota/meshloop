@@ -127,7 +127,12 @@ define-cell) are nodecode's and are only read.")
           when (and (consp form) (member (first form) *kept*)
                     (not (member (first form) '(defpackage in-package))))
             do (let ((*package* package))
-                 (handler-case (funcall (compile nil `(lambda () ,form)))
+                 (handler-case
+                     (multiple-value-bind (function warned failed) (compile nil `(lambda () ,form))
+                       (declare (ignore warned))
+                       (when failed
+                         (push (format nil "~s failed to compile" (second form)) warnings))
+                       (funcall function))
                    (error (condition)
                      (push (format nil "~s: ~a" (second form) condition) warnings))))))
   (check "every defun, defparameter and defvar compiles without a full warning"
@@ -162,7 +167,11 @@ define-cell) are nodecode's and are only read.")
                 ("cargo run -p" "(sh \"cargo run -q -p meshloop-cli -- review-plan --accept\")")
                 ("find-symbol by name" "(funcall (find-symbol \"ACCEPT-OF\" \"MESHLOOP\") \"s\" \"\")")
                 ("intern in the cell's package" "(funcall (intern \"RUN-SLASH\" :nodecode-meshloop) \"accept\" \"s\")")
-                ("in-package" "(in-package #:meshloop) (run-slash \"accept --task 1\" \"s\")")))
+                ("in-package" "(in-package #:meshloop) (run-slash \"accept --task 1\" \"s\")")
+                ;; Review round 2: a word spliced from quoted pieces holds the command.
+                ("sh -c with a spliced verb" "sh -c 'meshloop acce''pt --task 1'")
+                ("eval of spliced pieces" "eval \"mesh\"\"loop acc\"\"ept --task 1\"")
+                ("a wrapper's command" "(sh \"sudo -u me timeout 5 env A=1 meshloop integrate --graph g\")")))
   (check (format nil "veto refuses: ~a" (first case)) (veto (second case)) (second case)))
 
 (dolist (case '(("a read verb" "(sh \"meshloop status --json\")")
@@ -172,6 +181,11 @@ define-cell) are nodecode's and are only read.")
                 ("meshloop doctor then git" "(sh \"meshloop doctor && git status\")")
                 ("a status line, then a commit" "(sh \"meshloop status; git commit -m accept\")")
                 ("find-package of another package" "(sh \"meshloop status\") (find-package :uiop)")
+                ;; Review round 2: a folder named meshloop is no command.
+                ("git -C a folder named meshloop" "git -C /home/sam/code/meshloop log --grep accept")
+                ("git -C, in a form" "(sh \"git -C /home/sam/code/meshloop log --grep accept\")")
+                ("ls a folder named meshloop" "ls ~/code/meshloop | grep integrate")
+                ("ls, in a form" "(sh \"ls ~/code/meshloop | grep integrate\")")
                 ;; A known gap, kept here so it is not mistaken for coverage: a
                 ;; command assembled from pieces at run time. The veto reads text.
                 ("KNOWN GAP: a command assembled at run time" "(sh (format nil \"meshloop ~a --task 1\" \"accept\"))")))

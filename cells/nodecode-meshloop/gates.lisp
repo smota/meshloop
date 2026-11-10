@@ -30,9 +30,11 @@
 ;;;;    words joined across quotes with backslashes dropped (m""eshloop is
 ;;;;    meshloop), commands cut at ; && || & and newlines, a | pipeline kept
 ;;;;    whole. A command whose words hold a gated verb anywhere and a meshloop
-;;;;    runner (the executable, a $VARIABLE in command position, or
-;;;;    meshloop-cli after -p) is refused: `echo accept | xargs meshloop' and
-;;;;    `B=meshloop; $B accept' among them.
+;;;;    runner (the executable or a $VARIABLE in command position, which a
+;;;;    wrapper such as xargs, env, sudo or timeout passes on, or meshloop-cli
+;;;;    after -p) is refused: `echo accept | xargs meshloop' and `B=meshloop;
+;;;;    $B accept' among them. A word that still holds a blank once its quotes
+;;;;    are joined is read again as a line (sh -c 'meshloop acce''pt').
 ;;;;
 ;;;; The meshloop binary takes its verb as the first argument and refuses a
 ;;;; flag there, so `meshloop --task 1 accept' is no way around it. A command
@@ -109,9 +111,7 @@ list's elements, at any depth."
 (defun executable-p (token)
   "Whether TOKEN names the meshloop executable: its last path segment is
 meshloop or meshloop.exe (so /meshloop, the slash line, is one too)."
-  (let* ((slash (position-if (lambda (c) (find c "/\\")) token :from-end t))
-         (base (if slash (subseq token (1+ slash)) token)))
-    (member base '("meshloop" "meshloop.exe") :test #'string-equal)))
+  (member (base-name token) '("meshloop" "meshloop.exe") :test #'string-equal))
 
 (defun verb-of (token)
   "TOKEN as a meshloop verb: a leading / and a meshloop: prefix taken off."
@@ -250,37 +250,64 @@ dropped, a backslash is dropped and the character after it kept, and ; && ||
     (and eq (plusp eq)
          (every (lambda (c) (or (alphanumericp c) (char= c #\_))) (subseq word 0 eq)))))
 
+(defparameter +wrappers+ '("xargs" "exec" "env" "command" "nice" "timeout" "sudo" "nohup" "time")
+  "Commands that run the command after them: its first word is in command position too.")
+
+(defun base-name (word)
+  "WORD's last path segment."
+  (let ((slash (position-if (lambda (c) (find c "/\\")) word :from-end t)))
+    (if slash (subseq word (1+ slash)) word)))
+
 (defun command-heads (words)
   "The words in command position: the first of each command of a pipeline,
-assignments before it stepped over."
-  (let ((heads '()) (expect t))
+assignments before it stepped over, and the command a wrapper (xargs, env,
+sudo, timeout ...) runs, the wrapper's options, numbers and timeout's duration
+stepped over."
+  (let ((heads '()) (expect t) (wrapped nil) (duration nil))
     (dolist (word words (nreverse heads))
-      (cond ((string= word "|") (setf expect t))
-            ((and expect (assignment-p word)))
-            (expect (push word heads) (setf expect nil))))))
+      (cond ((string= word "|") (setf expect t wrapped nil duration nil))
+            ((not expect))
+            ((assignment-p word))
+            ((and wrapped (or (char= #\- (char word 0)) (every #'digit-char-p word))))
+            (duration (setf duration nil))
+            (t (push word heads)
+               (let ((wrapper (find (string-downcase (base-name word)) +wrappers+ :test #'string=)))
+                 (setf expect (and wrapper t)
+                       wrapped (and wrapper t)
+                       duration (equal wrapper "timeout"))))))))
 
 (defun meshloop-runner (words)
-  "What in WORDS runs meshloop: the executable, a $VARIABLE in command
-position, or meshloop-cli after cargo's -p; NIL when nothing does."
-  (or (find-if #'executable-p words)
-      (find-if (lambda (head) (and (plusp (length head)) (char= #\$ (char head 0))))
-               (command-heads words))
-      (loop for (flag value) on words
-            thereis (cond ((and (member flag '("-p" "--package") :test #'string=)
-                                (string-equal value "meshloop-cli"))
-                           (format nil "~a ~a" flag value))
-                          ((member flag '("-pmeshloop-cli" "--package=meshloop-cli") :test #'string-equal)
-                           flag)))))
+  "What in WORDS runs meshloop: the executable or a $VARIABLE in command
+position, or meshloop-cli after cargo's -p; NIL when nothing does. The
+executable elsewhere in a command (a folder named meshloop that git or ls
+reads) runs nothing."
+  (let ((heads (command-heads words)))
+    (or (find-if #'executable-p heads)
+        (find-if (lambda (head) (char= #\$ (char head 0))) heads)
+        (loop for (flag value) on words
+              thereis (cond ((and (member flag '("-p" "--package") :test #'string=)
+                                  (string-equal value "meshloop-cli"))
+                             (format nil "~a ~a" flag value))
+                            ((member flag '("-pmeshloop-cli" "--package=meshloop-cli") :test #'string-equal)
+                             flag))))))
 
-(defun shell-reading (text)
-  "Why TEXT, read as shell lines, runs a gated meshloop verb, or NIL."
+(defun shell-reading (text &optional (depth 3))
+  "Why TEXT, read as shell lines, runs a gated meshloop verb, or NIL. A word
+that still holds a blank once its quotes are joined (sh -c 'meshloop acce''pt',
+eval \"mesh\"\"loop ...\") is read again as a line of its own, DEPTH deep."
   (loop for line in (cons text (double-quoted text))
         thereis (loop for command in (shell-commands line)
                       for words = (remove "" (mapcar #'word-core command) :test #'string=)
                       for verb = (find-if #'gated-verb-p words)
                       for runner = (and verb (meshloop-runner words))
                       when runner
-                        return (format nil "it runs ~a with ~a in one command" runner (verb-of verb)))))
+                        return (format nil "it runs ~a with ~a in one command" runner (verb-of verb))
+                      when (plusp depth)
+                        do (let ((inner (loop for word in words
+                                              for blank = (find-if (lambda (c) (find c '(#\Space #\Tab #\Newline))) word)
+                                              for reason = (and blank (shell-reading word (1- depth)))
+                                              when reason return reason)))
+                             (when inner (return inner))))))
 
 (defun gated-in-text (text)
   "Why TEXT runs a gated meshloop verb, or NIL."
