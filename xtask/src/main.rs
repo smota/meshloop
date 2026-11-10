@@ -1803,7 +1803,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         graph_id: graph_id.into(),
         task_id: TaskId(2),
         attempt_id: Some(AttemptId(1)),
-        from: TaskState::Pending,
+        from: TaskState::Ready,
         to: TaskState::Running,
         event: Event::AttemptStarted,
         reason: Some("active test".into()),
@@ -2442,7 +2442,7 @@ fn bench(root: &Path) -> ExitCode {
             graph_id: "bench_g".to_string(),
             task_id: TaskId((i + 1) as u32),
             attempt_id: Some(AttemptId((i + 1) as u32)),
-            from: TaskState::Pending,
+            from: TaskState::Ready,
             to: TaskState::Running,
             event: Event::AttemptStarted,
             reason: Some("bench".to_string()),
@@ -2488,7 +2488,7 @@ fn bench(root: &Path) -> ExitCode {
                 graph_id: "conc_g".to_string(),
                 task_id: TaskId((i + 1) as u32),
                 attempt_id: Some(AttemptId((i + 1) as u32)),
-                from: TaskState::Pending,
+                from: TaskState::Ready,
                 to: TaskState::Running,
                 event: Event::AttemptStarted,
                 reason: Some("t1".to_string()),
@@ -2508,7 +2508,7 @@ fn bench(root: &Path) -> ExitCode {
                 graph_id: "conc_g".to_string(),
                 task_id: TaskId((i + 1) as u32),
                 attempt_id: Some(AttemptId((i + 1) as u32)),
-                from: TaskState::Pending,
+                from: TaskState::Ready,
                 to: TaskState::Running,
                 event: Event::AttemptStarted,
                 reason: Some("t2".to_string()),
@@ -2810,17 +2810,26 @@ fn bench(root: &Path) -> ExitCode {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let out = Command::new("pgrep")
-                .args(["-f", "fixture_harness"])
+            let out = Command::new("ps")
+                .args(["-A", "-o", "pid=,stat=,comm=,args="])
                 .output();
-            out.ok()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .count()
-                })
-                .unwrap_or(0)
+            match out {
+                Ok(o) if o.status.success() => {
+                    let survivors = live_processes_named(
+                        &String::from_utf8_lossy(&o.stdout),
+                        "fixture_harness",
+                    );
+                    for line in &survivors {
+                        eprintln!("bench: orphan fixture_harness process: {line}");
+                    }
+                    survivors.len()
+                }
+                // Fail closed: an unreadable process table cannot prove zero orphans.
+                _ => {
+                    eprintln!("bench: cannot list processes with `ps`; counting as an orphan");
+                    1
+                }
+            }
         }
     };
 
@@ -3236,9 +3245,49 @@ Process exit follows invariants. A performance miss is recorded and does not by 
     world_d_exit(invariants_pass)
 }
 
+/// Lines of `ps -A -o pid=,stat=,comm=,args=` output for live processes whose image is
+/// exactly `name`. Zombies (`Z`) have exited and only await reaping, so they are not
+/// running survivors. Matching the image rather than the command line (`pgrep -f`) keeps
+/// shells, editors or `cargo build --bin <name>` from counting as orphans. Linux
+/// truncates `comm` to 15 bytes; macOS reports a path.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn live_processes_named(ps_output: &str, name: &str) -> Vec<String> {
+    ps_output
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split_whitespace();
+            let (Some(_pid), Some(stat), Some(comm)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return false;
+            };
+            let comm = comm.rsplit('/').next().unwrap_or(comm);
+            let name_matches = comm == name || (comm.len() == 15 && name.starts_with(comm));
+            name_matches && !stat.starts_with('Z')
+        })
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orphan_count_matches_live_images_not_command_lines_or_zombies() {
+        let ps = "\
+  101 S    fixture_harness /w/target/debug/fixture_harness --hang
+  102 Z    fixture_harness [fixture_harness] <defunct>
+  103 S    bash            bash -c pgrep -f fixture_harness
+  104 R    cargo           cargo build --bin fixture_harness
+  105 S    /Users/x/target/debug/fixture_harness /Users/x/target/debug/fixture_harness --hang
+  106 S    fixture_harnessX other
+";
+        let live = live_processes_named(ps, "fixture_harness");
+        assert_eq!(live.len(), 2, "{live:?}");
+        assert!(live[0].starts_with("101 "));
+        assert!(live[1].starts_with("105 "));
+    }
 
     #[test]
     fn wal_artifact_preserves_chronology_and_canonical_p95() {
