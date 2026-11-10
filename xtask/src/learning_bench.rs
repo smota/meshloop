@@ -45,10 +45,11 @@ const USAGE: &str = "Usage: cargo run -p xtask -- bench-learning \
 (--live [--reps N] [--out DIR] [--bin PATH] [--bin-commit SHA] [--tasks a,b] \
 [--run-timeout SECS] [--results PATH] [--as IDENTITY] | --validate | --aggregate RESULTS.json [--results PATH])";
 
-const PROTOCOL: &str = "Fixed automated protocol, no human in the loop: review-plan --accept, \
-run, accept --task 1 only when Meshloop's own checks passed (node AwaitingReview), resume, \
-integrate --into main --accept-integrate; success is the exit code of the task's hidden tests \
-run on main after integration. The plan is never adjusted or declined, so Adjust/Decline = 0 \
+const PROTOCOL: &str = "Fixed automated protocol, no human in the loop: review-plan --accept \
+of a one-node plan with the task's planned tier, run, then resume --retry while the node is \
+Failed and attempts remain (up to max_retries), accept --task 1 only when Meshloop's own \
+checks passed (node AwaitingReview), resume, integrate --into main --accept-integrate; success \
+is the exit code of the task's hidden tests run on main after integration. The plan is never adjusted or declined, so Adjust/Decline = 0 \
 by protocol, not by measurement of a human.";
 
 const STATE_CARRIED: &str = "Each task x repetition runs in a new disposable Git repository \
@@ -62,6 +63,9 @@ account quota windows).";
 struct TaskSet {
     version: String,
     tasks: Vec<String>,
+    /// The tier a plan reviewer sets per task (lp-2). Absent: `tier = null` (lp-1).
+    #[serde(default)]
+    plan_tiers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +186,16 @@ fn load_tasks(lp: &Path, only: Option<&[String]>) -> Result<(TaskSet, Vec<TaskMe
             if !set.tasks.contains(id) {
                 return Err(format!("unknown task {id}"));
             }
+        }
+    }
+    for (id, tier) in &set.plan_tiers {
+        if !set.tasks.contains(id) {
+            return Err(format!("plan_tiers names unknown task {id}"));
+        }
+        if !matches!(tier.as_str(), "Tier1" | "Tier2" | "Tier3") {
+            return Err(format!(
+                "plan_tiers.{id}: {tier} is not Tier1, Tier2 or Tier3"
+            ));
         }
     }
     if tasks.is_empty() {
@@ -330,6 +344,14 @@ struct RunRecord {
     run_timed_out: bool,
     run_idle: Option<String>,
     node_state_after_run: Option<String>,
+    /// Node state after the run and any `resume --retry` rounds.
+    node_state_after_dispatch: Option<String>,
+    /// Tier set in the plan (lp-2), or None for `tier = null` (lp-1).
+    plan_tier: Option<String>,
+    /// One entry per `resume --retry` issued by the runner.
+    retry_resumes: Vec<Value>,
+    /// `run` plus every `resume --retry`.
+    dispatch_wall_seconds: f64,
     attempts_count: u64,
     retries: u64,
     worker_wall_seconds: Option<u64>,
@@ -352,6 +374,7 @@ struct RunRecord {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Results {
     schema: String,
     task_set_version: String,
@@ -365,6 +388,9 @@ struct Results {
     config_file: String,
     config_sha256: Option<String>,
     harnesses: Value,
+    /// Dispatchable candidates per planned tier, from doctor (configured order).
+    tier_candidates: Value,
+    plan_tiers: serde_json::Map<String, Value>,
     protocol: String,
     state_carried: String,
     reps_requested: u32,
@@ -387,6 +413,7 @@ struct Ctx<'a> {
     version: String,
     run_timeout: Duration,
     accept_as: String,
+    max_retries: u32,
 }
 
 fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Options) -> ExitCode {
@@ -431,10 +458,11 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
         lp,
         bin: bin.clone(),
         out: out.clone(),
-        config_template,
         version: set.version.clone(),
         run_timeout: Duration::from_secs(opts.run_timeout_s),
         accept_as: opts.accept_as.clone(),
+        max_retries: config_max_retries(&config_template).unwrap_or(1),
+        config_template,
     };
 
     println!(
@@ -457,6 +485,20 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
             return ExitCode::FAILURE;
         }
     };
+    let mut planned: Vec<&str> = tasks
+        .iter()
+        .map(|t| set.plan_tiers.get(&t.id).map_or("Tier1", String::as_str))
+        .collect();
+    planned.sort_unstable();
+    planned.dedup();
+    let tier_candidates = match tier_coverage(&harnesses, &planned) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("bench-learning: doctor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("  doctor: candidates per planned tier {tier_candidates}");
 
     let mut results = Results {
         schema: SCHEMA.into(),
@@ -474,6 +516,11 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
         config_file: "benches/learning-plane/meshloop.toml".into(),
         config_sha256: sha256(&config_path),
         harnesses,
+        tier_candidates,
+        plan_tiers: tasks
+            .iter()
+            .map(|t| (t.id.clone(), json!(set.plan_tiers.get(&t.id))))
+            .collect(),
         protocol: PROTOCOL.into(),
         state_carried: STATE_CARRIED.into(),
         reps_requested: opts.reps,
@@ -485,7 +532,8 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
     'reps: for rep in 1..=opts.reps {
         for task in tasks {
             println!("\n== rep {rep} task {}", task.id);
-            let record = run_one(&ctx, task, rep);
+            let tier = set.plan_tiers.get(&task.id).map(String::as_str);
+            let record = run_one(&ctx, task, rep, tier);
             print_run(&record);
             let quota = record.quota_hit.clone();
             results.runs.push(record);
@@ -549,6 +597,47 @@ fn write_results(path: &Path, results: &Results, redactions: &[(String, String)]
     }
 }
 
+/// Whether a model tier as `doctor --json` parses it fits a task tier (`tier_fits`).
+fn tier_fits(task_tier: &str, model_tier: &str) -> bool {
+    match task_tier {
+        "Tier2" => matches!(model_tier, "MidTier" | "TopTier"),
+        "Tier3" => model_tier == "TopTier",
+        _ => true,
+    }
+}
+
+/// Dispatchable (harness, model) candidates per planned tier, in configured order.
+fn tier_coverage(harnesses: &Value, tiers: &[&str]) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+    for tier in tiers {
+        let fits: Vec<String> = harnesses
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|h| h["dispatchable"] == Value::Bool(true))
+            .flat_map(|h| {
+                h["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(move |m| tier_fits(tier, m["tier"].as_str().unwrap_or("")))
+                    .map(move |m| {
+                        format!(
+                            "{}/{}",
+                            h["name"].as_str().unwrap_or("?"),
+                            m["model_ref"].as_str().unwrap_or("?")
+                        )
+                    })
+            })
+            .collect();
+        if fits.is_empty() {
+            return Err(format!("no dispatchable candidate fits {tier}"));
+        }
+        out.insert((*tier).to_string(), json!(fits));
+    }
+    Ok(Value::Object(out))
+}
+
 fn doctor(ctx: &Ctx, task: &TaskMeta) -> Result<Value, String> {
     let dir = ctx.out.join("doctor");
     let repo = dir.join("repo");
@@ -604,6 +693,16 @@ fn doctor(ctx: &Ctx, task: &TaskMeta) -> Result<Value, String> {
     ))
 }
 
+/// `max_retries` from the `[limits]` table of the configuration template.
+fn config_max_retries(template: &str) -> Option<u32> {
+    template
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("max_retries"))
+        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 fn task_config(ctx: &Ctx, task: &TaskMeta) -> String {
     let verify = ctx.lp.join("verify.py");
     let task_dir = ctx.lp.join("tasks").join(&task.id);
@@ -650,19 +749,19 @@ fn path_str(p: &Path) -> String {
     p.display().to_string()
 }
 
-fn plan_json(graph_id: &str, task: &TaskMeta) -> Value {
+fn plan_json(graph_id: &str, task: &TaskMeta, tier: Option<&str>) -> Value {
     json!({
         "graph_id": graph_id,
         "nodes": [{
             "id": 1,
             "description": task.description,
             "depends_on": [],
-            "tier": null,
+            "tier": tier,
         }]
     })
 }
 
-fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
+fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecord {
     let total = Instant::now();
     let graph_id = format!("lp-{}-r{rep}", task.id);
     let dir = ctx.out.join("runs").join(format!("r{rep}-{}", task.id));
@@ -674,6 +773,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
         kind: task.kind.clone(),
         rep,
         graph_id: graph_id.clone(),
+        plan_tier: tier.map(String::from),
         started_unix: unix_now(),
         ..RunRecord::default()
     };
@@ -689,7 +789,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
     let written = fs::write(&config, task_config(ctx, task)).and_then(|_| {
         fs::write(
             &plan,
-            serde_json::to_string_pretty(&plan_json(&graph_id, task)).unwrap_or_default(),
+            serde_json::to_string_pretty(&plan_json(&graph_id, task, tier)).unwrap_or_default(),
         )
     });
     if let Err(e) = written {
@@ -755,14 +855,70 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
         .ok()
         .and_then(|v| v["data"]["idle"].as_str().map(String::from));
 
-    let status = ml(
-        &["status", "--graph", &graph_id, "--config", &cfg, "--json"],
-        "status",
-        short,
-    );
-    let status_v: Value = serde_json::from_str(&status.stdout).unwrap_or(Value::Null);
+    let read_status = |name: &str| -> Value {
+        let out = ml(
+            &["status", "--graph", &graph_id, "--config", &cfg, "--json"],
+            name,
+            short,
+        );
+        serde_json::from_str(&out.stdout).unwrap_or(Value::Null)
+    };
+    let mut status_v = read_status("status");
+    rec.node_state_after_run = status_v["data"]["nodes"][0]["state"]
+        .as_str()
+        .map(String::from);
+
+    // Operator retry protocol (lp-2): a node that ends Failed while attempts remain gets
+    // `resume --retry`, up to max_retries, so fallback across candidates is exercised.
+    let mut dispatch_secs = rec.run_wall_seconds;
+    for i in 1..=ctx.max_retries {
+        let node = &status_v["data"]["nodes"][0];
+        let attempts_before = status_v["data"]["summary"]["attempts"]
+            .as_u64()
+            .unwrap_or(0);
+        if node["state"].as_str() != Some("Failed")
+            || node["waiting_for"].as_str() == Some("retry_budget_exhausted")
+            || attempts_before >= u64::from(ctx.max_retries)
+        {
+            break;
+        }
+        let start = Instant::now();
+        let name = format!("retry-{i}");
+        let out = ml(
+            &[
+                "resume", "--graph", &graph_id, "--retry", "--config", &cfg, "--json",
+            ],
+            &name,
+            ctx.run_timeout,
+        );
+        let secs = round2(start.elapsed().as_secs_f64());
+        dispatch_secs += secs;
+        status_v = read_status(&format!("status-{name}"));
+        let attempts_after = status_v["data"]["summary"]["attempts"]
+            .as_u64()
+            .unwrap_or(0);
+        rec.retry_resumes.push(json!({
+            "exit": out.code,
+            "timed_out": out.timed_out,
+            "wall_seconds": secs,
+            "attempts_after": attempts_after,
+            "state_after": status_v["data"]["nodes"][0]["state"],
+        }));
+        if out.timed_out {
+            rec.run_timed_out = true;
+            break;
+        }
+        if attempts_after <= attempts_before {
+            rec.errors.push(format!(
+                "resume --retry dispatched no new attempt (no unused candidate at {})",
+                tier.unwrap_or("default tier")
+            ));
+            break;
+        }
+    }
+    rec.dispatch_wall_seconds = round2(dispatch_secs);
     let node = &status_v["data"]["nodes"][0];
-    rec.node_state_after_run = node["state"].as_str().map(String::from);
+    rec.node_state_after_dispatch = node["state"].as_str().map(String::from);
     let summary = &status_v["data"]["summary"];
     rec.attempts_count = summary["attempts"].as_u64().unwrap_or(0);
     rec.retries = summary["retries"].as_u64().unwrap_or(0);
@@ -778,7 +934,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
     let inspect_v: Value = serde_json::from_str(&inspect.stdout).unwrap_or(Value::Null);
     rec.attempts = parse_attempts(&inspect_v);
 
-    let state = rec.node_state_after_run.clone().unwrap_or_default();
+    let state = rec.node_state_after_dispatch.clone().unwrap_or_default();
     if state == "AwaitingReview" {
         let accept = ml(
             &[
@@ -836,7 +992,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32) -> RunRecord {
         }
     } else {
         rec.errors.push(format!(
-            "node {state:?} after run (idle {:?}); not accepted or integrated",
+            "node {state:?} after dispatch (run idle {:?}); not accepted or integrated",
             rec.run_idle
         ));
     }
@@ -1321,16 +1477,26 @@ fn group_stats(runs: &[&RunRecord]) -> Value {
     let ok = runs.iter().filter(|r| r.success).count();
     let first = runs.iter().filter(|r| r.first_attempt_success).count();
     let retries: Vec<f64> = runs.iter().map(|r| r.retries as f64).collect();
-    let wall: Vec<f64> = runs.iter().map(|r| r.run_wall_seconds).collect();
+    let wall: Vec<f64> = runs.iter().map(|r| dispatch_wall(r)).collect();
     json!({
         "runs": n,
         "success": rate(ok, n),
         "first_attempt_success": rate(first, n),
         "retries_mean": opt2(mean(&retries)),
         "retries_median": opt2(median(&retries)),
-        "run_wall_seconds_p50": opt2(percentile(&wall, 0.5)),
-        "run_wall_seconds_p95": opt2(percentile(&wall, 0.95)),
+        "dispatch_wall_seconds_p50": opt2(percentile(&wall, 0.5)),
+        "dispatch_wall_seconds_p95": opt2(percentile(&wall, 0.95)),
+        "fallback_successes": runs.iter().filter(|r| r.success && !r.first_attempt_success).count(),
     })
+}
+
+/// `run` plus retries. Records from before lp-2 have only `run_wall_seconds`.
+fn dispatch_wall(r: &RunRecord) -> f64 {
+    if r.dispatch_wall_seconds > 0.0 {
+        r.dispatch_wall_seconds
+    } else {
+        r.run_wall_seconds
+    }
 }
 
 fn summarize(runs: &[RunRecord]) -> Value {
@@ -1385,6 +1551,42 @@ fn summarize(runs: &[RunRecord]) -> Value {
         })
         .collect();
 
+    let mut by_tier = serde_json::Map::new();
+    let mut tiers: Vec<String> = runs
+        .iter()
+        .map(|r| r.plan_tier.clone().unwrap_or_else(|| "null".into()))
+        .collect();
+    tiers.sort();
+    tiers.dedup();
+    for t in &tiers {
+        let g: Vec<&RunRecord> = runs
+            .iter()
+            .filter(|r| r.plan_tier.as_deref().unwrap_or("null") == t)
+            .collect();
+        by_tier.insert(t.clone(), group_stats(&g));
+    }
+    let mut first_dispatch = serde_json::Map::new();
+    for r in runs {
+        if let Some(a) = r.attempts.first() {
+            let key = format!(
+                "{}/{}",
+                a.harness.as_deref().unwrap_or("?"),
+                a.model_ref.as_deref().unwrap_or("?")
+            );
+            let n = first_dispatch
+                .get(&key)
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            first_dispatch.insert(key, json!(n + 1));
+        }
+    }
+    let mut retries_hist = serde_json::Map::new();
+    for r in runs {
+        let key = r.retries.to_string();
+        let n = retries_hist.get(&key).and_then(Value::as_u64).unwrap_or(0);
+        retries_hist.insert(key, json!(n + 1));
+    }
+
     let mut by_task = serde_json::Map::new();
     let mut task_ids: Vec<&str> = Vec::new();
     for r in runs {
@@ -1396,6 +1598,7 @@ fn summarize(runs: &[RunRecord]) -> Value {
         let g: Vec<&RunRecord> = runs.iter().filter(|r| r.task_id == *id).collect();
         let mut s = group_stats(&g);
         s["difficulty"] = json!(g[0].difficulty);
+        s["plan_tier"] = json!(g[0].plan_tier);
         by_task.insert((*id).to_string(), s);
     }
 
@@ -1467,6 +1670,9 @@ fn summarize(runs: &[RunRecord]) -> Value {
             json!(round2((max - min) * 100.0))
         },
         "by_rep": by_rep,
+        "by_plan_tier": by_tier,
+        "first_dispatch_distribution": first_dispatch,
+        "runs_by_retries": retries_hist,
         "by_task": by_task,
         "by_harness_model": by_arm,
     })
@@ -1528,12 +1734,13 @@ fn print_run(r: &RunRecord) {
         })
         .collect();
     println!(
-        "  {} success={} first={} retries={} run={}s attempts=[{}] final_verify={:?}{}",
+        "  {} tier={} success={} first={} retries={} dispatch={}s attempts=[{}] final_verify={:?}{}",
         r.task_id,
+        r.plan_tier.as_deref().unwrap_or("null"),
         r.success,
         r.first_attempt_success,
         r.retries,
-        r.run_wall_seconds,
+        dispatch_wall(r),
         arms.join(", "),
         r.final_verify_exit,
         r.quota_hit
@@ -1643,6 +1850,32 @@ mod tests {
     }
 
     #[test]
+    fn max_retries_from_template() {
+        assert_eq!(config_max_retries("[limits]\nmax_retries = 3\n"), Some(3));
+        assert_eq!(config_max_retries("x = 1\n"), None);
+    }
+
+    #[test]
+    fn tier_coverage_follows_tier_fits() {
+        let h = json!([
+            {"name": "codex", "dispatchable": true, "models": [
+                {"model_ref": "lite", "tier": "Lightweight"},
+                {"model_ref": "big", "tier": "TopTier"}]},
+            {"name": "claude", "dispatchable": true, "models": [
+                {"model_ref": "mid", "tier": "MidTier"}]},
+            {"name": "agy", "dispatchable": false, "models": [
+                {"model_ref": "x", "tier": "TopTier"}]}
+        ]);
+        let c = tier_coverage(&h, &["Tier1", "Tier2", "Tier3"]).unwrap();
+        assert_eq!(c["Tier1"], json!(["codex/lite", "codex/big", "claude/mid"]));
+        assert_eq!(c["Tier2"], json!(["codex/big", "claude/mid"]));
+        assert_eq!(c["Tier3"], json!(["codex/big"]));
+        let none = json!([{"name": "pi", "dispatchable": true, "models": [
+            {"model_ref": "m", "tier": "MidTier"}]}]);
+        assert!(tier_coverage(&none, &["Tier3"]).is_err());
+    }
+
+    #[test]
     fn pi_tokens_not_reported() {
         assert_eq!(
             parse_tokens("pi", "exit=0\nstdout:\nDone\nstderr:\n").status,
@@ -1668,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_has_one_untiered_node() {
+    fn plan_has_one_node_with_the_planned_tier() {
         let t = TaskMeta {
             id: "x".into(),
             language: "python".into(),
@@ -1677,8 +1910,12 @@ mod tests {
             description: "do it".into(),
             test_command: vec![],
         };
-        let p = plan_json("lp-x-r1", &t);
+        let p = plan_json("lp-x-r1", &t, None);
         assert_eq!(p["nodes"][0]["tier"], Value::Null);
+        assert_eq!(
+            plan_json("lp-x-r1", &t, Some("Tier2"))["nodes"][0]["tier"],
+            "Tier2"
+        );
         assert_eq!(p["nodes"][0]["description"], "do it");
     }
 
@@ -1753,7 +1990,10 @@ mod tests {
         assert_eq!(s["overall"]["success"]["successes"], 2);
         assert_eq!(s["overall"]["first_attempt_success"]["successes"], 1);
         assert_eq!(s["overall"]["retries_mean"], 1.0);
-        assert_eq!(s["overall"]["run_wall_seconds_p50"], 30.0);
+        assert_eq!(s["overall"]["dispatch_wall_seconds_p50"], 30.0);
+        assert_eq!(s["overall"]["fallback_successes"], 1);
+        assert_eq!(s["first_dispatch_distribution"]["codex/m"], 3);
+        assert_eq!(s["runs_by_retries"]["0"], 1);
         assert_eq!(s["overall"]["adjust_count"], 0);
         assert_eq!(s["success_rate_by_rep"], json!([1.0, 0.0]));
         assert_eq!(s["by_harness_model"][0]["first_dispatches"], 3);

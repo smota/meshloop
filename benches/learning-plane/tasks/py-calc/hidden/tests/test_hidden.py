@@ -1,5 +1,5 @@
+import ast
 import os
-import re
 import unittest
 from fractions import Fraction
 
@@ -71,14 +71,46 @@ class Errors(unittest.TestCase):
         self.assertEqual(evaluate("1 ^ -1000"), 1)
 
 
+BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
+
+
+def banned_uses(src):
+    """Calls to the banned builtins and imports of `ast`, found with an AST walk.
+
+    `re.compile(...)` and other attribute calls are allowed; `builtins.eval(...)` is not.
+    """
+    found = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in BANNED_CALLS:
+                found.append(func.id)
+            elif (
+                isinstance(func, ast.Attribute)
+                and func.attr in BANNED_CALLS
+                and isinstance(func.value, ast.Name)
+                and func.value.id in ("builtins", "__builtins__")
+            ):
+                found.append(func.value.id + "." + func.attr)
+        elif isinstance(node, ast.Import):
+            found += [a.name for a in node.names if a.name.split(".")[0] == "ast"]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "ast":
+            found.append(node.module)
+    return found
+
+
 class NoEval(unittest.TestCase):
+    def test_checker_itself(self):
+        self.assertEqual(banned_uses("import re\nP = re.compile(r'x')\n"), [])
+        self.assertEqual(banned_uses("x = eval('1')"), ["eval"])
+        self.assertEqual(banned_uses("import builtins\nbuiltins.exec('1')"), ["builtins.exec"])
+        self.assertEqual(banned_uses("from ast import parse"), ["ast"])
+
     def test_source_does_not_use_eval(self):
         path = os.path.join(os.path.dirname(os.path.abspath(calc.__file__)), "calc.py")
         with open(path, encoding="utf-8") as f:
             src = f.read()
-        for pattern in (r"\b(eval|exec|compile|__import__)\s*\(",
-                        r"^\s*(import|from)\s+ast\b"):
-            self.assertIsNone(re.search(pattern, src, re.MULTILINE), pattern)
+        self.assertEqual(banned_uses(src), [])
 
 
 if __name__ == "__main__":

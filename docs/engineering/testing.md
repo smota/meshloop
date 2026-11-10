@@ -80,7 +80,7 @@ cargo run -p xtask -- bench-world-s
 ```
 
 ### 2.4a Learning-plane baseline (`xtask bench-learning`, live, manual)
-Issue #144 fixes the task set and configuration that the learning-plane comparison (#140) is measured against. Everything is in [`benches/learning-plane/`](../../benches/learning-plane/): `taskset.json` (version `lp-1`), eight tasks with a seed, hidden tests and a reference solution, `verify.py` (runs the hidden tests on a copy, so edits to `tests/` cannot pass a task), and `meshloop.toml` (codex, claude and pi with two models each). Results and proposed thresholds are in [`BASELINE.md`](../../benches/learning-plane/BASELINE.md).
+Issue #144 fixes the task set and configuration that the learning-plane comparison (#140) is measured against. Everything is in [`benches/learning-plane/`](../../benches/learning-plane/): `taskset.json` (version `lp-2`, with the tier a plan reviewer sets for each task), eight tasks with a seed, hidden tests and a reference solution, `verify.py` (runs the hidden tests on a copy, so edits to `tests/` cannot pass a task), and `meshloop.toml` (codex, claude and pi with two models each). Results and proposed thresholds are in [`BASELINE.md`](../../benches/learning-plane/BASELINE.md). lp-1 is kept as a superseded record.
 
 ```bash
 # Offline: each seed fails its hidden tests and passes them with the reference solution
@@ -92,7 +92,7 @@ cargo run -p xtask -- bench-learning --live --reps 3 --bin <meshloop> --bin-comm
 cargo run -p xtask -- bench-learning --aggregate <results.json>
 ```
 
-`--live` dispatches real workers and is never run by `xtask check`, `cargo test` or CI. Each run follows a fixed protocol (`review-plan --accept`, `run`, `accept` only when Meshloop's checks passed, `resume`, `integrate --into main`), and success is the exit code of the hidden tests on `main`. Every task and repetition starts from a new repository and an empty Meshloop store, so no `routing_feedback` carries over. The runner stops early when a worker or Meshloop's quota breaker reports a usage limit. Token counts are taken only from what a harness prints (codex `tokens used`, claude `--output-format json`); otherwise they are recorded as not reported.
+`--live` dispatches real workers and is never run by `xtask check`, `cargo test` or CI. Each run follows a fixed protocol (`review-plan --accept`, `run`, `resume --retry` while the node is `Failed` and attempts remain, `accept` only when Meshloop's checks passed, `resume`, `integrate --into main`), and success is the exit code of the hidden tests on `main`. Every task and repetition starts from a new repository and an empty Meshloop store, so no `routing_feedback` carries over. The runner stops early when a worker or Meshloop's quota breaker reports a usage limit. Token counts are taken only from what a harness prints (codex `tokens used`, claude `--output-format json`); otherwise they are recorded as not reported.
 
 ### 2.5 Full-Lifecycle Smoke Test (`xtask smoke`)
 Validates the complete product lifecycle (`doctor` $\to$ `review-plan` $\to$ `run` $\to$ `accept` $\to$ `resume` $\to$ `integrate`) on a disposable Git repository in **<5 seconds**:

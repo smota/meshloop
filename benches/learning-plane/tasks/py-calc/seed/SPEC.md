@@ -26,6 +26,8 @@ Semantics:
   unbalanced parentheses, empty parentheses, a missing operand, two numbers in a row
   (`1 2`) or implicit multiplication (`2(3)`, `(1)(2)`).
 
-`eval`, `exec`, `compile` and the `ast` module must not be used.
+The built-in functions `eval`, `exec`, `compile` and `__import__` must not be called
+(`re.compile` and other module functions are fine), and the `ast` module must not be
+imported.
 
 Only `calc.py` may change.

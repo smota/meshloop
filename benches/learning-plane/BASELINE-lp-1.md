@@ -1,4 +1,6 @@
-# Learning-plane baseline (task set lp-1)
+# Learning-plane baseline (task set lp-1) — superseded
+
+> **Superseded by lp-2 ([BASELINE.md](BASELINE.md)), 2026-11-10:** lp-1 could not tell a learning effect apart: all 24 runs went to a single (harness, model), none were retried, and priors bounded at ±0.25 cannot reach mid or top models at Tier1. The lp-1 task set and runner are at commit `a2e944e`; in this record, `taskset.json`, `meshloop.toml` and `verify.py` mean their versions at that commit.
 
 Issue [#144](https://github.com/smota/meshloop/issues/144). The baseline that the
 learning-plane comparison in [#140](https://github.com/smota/meshloop/issues/140) is
@@ -20,8 +22,8 @@ thresholds that apply on #144.
 | Host | WSL2 Linux (kernel 6.18), Python 3.14.7, cargo 1.98.0 |
 | Harness versions (doctor) | codex-cli 0.167.0, Claude Code 2.1.322, pi 1.5.0 |
 | Model actually run | `codex` / `gpt-6-luna` for all 24 attempts. This is the `model_ref` that Meshloop substituted into `--model {model_ref}` and recorded on each attempt row. claude and pi were never dispatched |
-| Raw results | [`results/baseline-2026-11-10.json`](results/baseline-2026-11-10.json). Paths are redacted. Worker transcripts are not included; they stay in the ignored `.agent-runs/bench-learning/baseline/` |
-| Command | `xtask bench-learning --live --reps 3 --bin <meshloop-f0691d9> --bin-commit f0691d9 --out .agent-runs/bench-learning/baseline --results benches/learning-plane/results/baseline-2026-11-10.json` |
+| Raw results | [`results/baseline-lp-1-2026-11-10.json`](results/baseline-lp-1-2026-11-10.json). Paths are redacted. Worker transcripts are not included; they stay in the ignored `.agent-runs/bench-learning/baseline/` |
+| Command | `xtask bench-learning --live --reps 3 --bin <meshloop-f0691d9> --bin-commit f0691d9 --out .agent-runs/bench-learning/baseline --results benches/learning-plane/results/baseline-lp-1-2026-11-10.json` |
 
 Not part of the baseline: two pilot runs of `py-median-bugfix` on codex/`gpt-6-luna`,
 both passed, made while building the runner. Single-prompt probes also confirmed that

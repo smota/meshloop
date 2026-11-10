@@ -1,6 +1,6 @@
 {
-  "version": "lp-1",
-  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test or meshloop.toml requires a new version and a new baseline.",
+  "version": "lp-2",
+  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier or meshloop.toml requires a new version and a new baseline. lp-2 supersedes lp-1: py-calc's no-eval check is an AST check (lp-1's regex also matched re.compile), and plans carry the tier a plan reviewer would set.",
   "tasks": [
     "py-median-bugfix",
     "py-wordfreq",
@@ -10,5 +10,15 @@
     "rs-brackets",
     "py-calc",
     "py-semver"
-  ]
+  ],
+  "plan_tiers": {
+    "py-median-bugfix": "Tier1",
+    "py-wordfreq": "Tier1",
+    "py-lru": "Tier2",
+    "py-intervals": "Tier2",
+    "py-roman": "Tier2",
+    "rs-brackets": "Tier2",
+    "py-calc": "Tier3",
+    "py-semver": "Tier3"
+  }
 }
