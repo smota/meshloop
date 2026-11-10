@@ -2135,8 +2135,6 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
     None
 }
 
-/// Reads the store only (never owns workers), so it also works on `run --detach`.
-#[allow(clippy::too_many_arguments)]
 /// `meshloop events`: a graph's run-table events in append order with their stable
 /// `event_id` as `seq`, after `--after` (#137). Read-only under ADR 0034: the same
 /// read-only composition as status, inspect and watch, one SELECT, no writes. Each
@@ -2253,6 +2251,8 @@ fn cmd_events(
     ExitCode::SUCCESS
 }
 
+/// Reads the store only (never owns workers), so it also works on `run --detach`.
+#[allow(clippy::too_many_arguments)]
 fn cmd_watch(
     graph: Option<String>,
     session_id: Option<String>,
