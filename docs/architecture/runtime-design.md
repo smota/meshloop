@@ -263,7 +263,20 @@ CI. Prompt-construction tests assert no context outside a node's declared depend
 leaks into its prompt. A fixture harness returning a clean exit code with a broken worktree
 (or the reverse) must prove the worktree diff, not exit code, gates `verifying`.
 
+> **Amendment 2026-11-10 (ADR 0039, proposed; not in effect until accepted).** Native
+> attempts do not pass through `HarnessCapabilities`. Meshloop does not call `invoke`,
+> `try_collect` or `cancel` for them, and the port is unchanged. The worktree-diff rule
+> above applies to native attempts without exception. See §3 "Native dispatch (ADR 0039)".
+
 ## 3. Execution, transport, isolation, and recovery (ADR 0005)
+
+> **Amendment 2026-11-10 (ADR 0039, proposed; not in effect until accepted).** This
+> section's subprocess-only rule stays in force for every attempt except the native worker
+> attempts described in "Native dispatch (ADR 0039)" at the end of this section. The
+> subprocess-only rule is the v1 "CLI-subprocess only" statement, which became direct CLI
+> workers under ADR 0022. Herdr itself was removed by ADR 0022. Ownership, cancellation
+> and liveness commitments below apply to subprocess attempts only. The text below is
+> otherwise unchanged.
 
 **Herdr transport.** `HerdrSessionPort` (meshloop-engine) exposes `spawn`, `status`,
 `cancel`, `cleanup`. v1 ships exactly one implementation: CLI-subprocess invocation of the
@@ -300,6 +313,112 @@ repositories. Fault-injection for crash, timeout, stale state, partial completio
 exhausted retries, including killing the Meshloop process itself mid-`running` and
 mid-`accepted`-to-`integrated`, asserting recovery reaches `blocked` or a correctly new
 attempt — never a duplicate integration.
+
+### Native dispatch (ADR 0039)
+
+Proposed, dated 2026-11-10. This is the mechanism for ADR 0039. Nothing here applies until
+that record is accepted, and #147 to #150 implement it.
+
+**Eligibility.** Routing (§5) runs unchanged. After it selects a candidate for a run-loop
+worker node, the attempt is native only when all of the following hold:
+- the candidate harness has `dispatch = "native"`;
+- its `kind` equals the invocation's origin harness;
+- an origin session is set;
+- the invoking command is `meshloop next`.
+
+Every other case uses subprocess dispatch. Planner, reviewer and model-review dispatch are
+never native. `run`, `resume` and a detached driver leave native-eligible nodes `ready` and
+return `AwaitingNativePull`. They return `AwaitingNativeReport` when only parked attempts
+remain. `loop_until_idle` returns on both reasons instead of sleeping and re-ticking.
+
+**Park (`meshloop next`).**
+1. Drive the loop until it is idle or waits only on native work. This verifies reported
+   attempts, merges, promotes, and dispatches subprocess nodes, waiting on them as `run`
+   does.
+2. Before any other effect, append `ParkDeadlinePassed` for every overdue parked attempt.
+3. For each native-eligible ready node, within `max_concurrent_workers` (parked attempts
+   occupy slots), create the attempt id, worktree, branch and `.meshloop-prompt-<attempt>`
+   file as for a subprocess attempt.
+4. Persist on the attempt: `dispatch_mode = native`, origin harness and session, requested
+   harness and model, base revision, `parked_at`, and
+   `deadline_at = parked_at + [limits] task_timeout_seconds`.
+5. Record HEAD and a digest of `git status --porcelain` for the origin checkout and the
+   integrate worktree.
+6. Append `AttemptParked`. Writing the row and appending the event happen in one store
+   transaction.
+7. If the task's previous attempt used the other mode, append `DispatchModeChanged`
+   (`ready → ready`, reason required) first.
+
+The JSON result lists every parked, unreported attempt bound to this origin: `task_id`,
+`attempt_id`, `role` (`meshloop:worker`), `prompt_path`, `worktree_path`,
+`base_revision`, `harness`, `model_ref`, and `deadline_at`. It returns the idle reason when
+the list is empty. Repeating `next` returns the same items and never re-parks them.
+
+**Report (`meshloop report`).** Arguments: `--task`, `--attempt`, an optional
+`--note`/`--note-file`, and an optional `--model`, plus the origin flags.
+1. Refuse when the origin harness or session differs from the attempt's recorded origin,
+   or when the attempt is not the task's latest attempt.
+2. Refuse a second report for an attempt that is already `verifying` or later. A refusal
+   appends nothing.
+3. If the attempt is overdue, append `ParkDeadlinePassed` first.
+4. Append `NativeReportReceived` and set `ended_at`. The note is redacted, truncated to the
+   2048-byte outcome limit, and stored as a `native-report` evidence row bound to the
+   attempt. That row never counts toward any pass condition. The reported model is stored
+   beside the requested model.
+5. On `failed` or `cancelled`, the event is stored, the state stays where it is, and nothing
+   is verified.
+
+Verification runs on the next tick through the existing no-in-memory-outcome path
+(`recover_verifying` / `finish_orphaned_verification`).
+
+**Verification.** In order:
+1. Out-of-worktree check: HEAD and porcelain digest of the origin checkout and integrate
+   worktree, compared against the values recorded at park. Any change fails the attempt
+   and lists the paths.
+2. `commit_all` in the attempt worktree.
+3. `git-diff` against the recorded base, honouring `empty_diff_ok`.
+4. `allowed-paths`.
+5. The configured verify command.
+6. The unchanged gate path: verify gate (ADR 0037) or `meshloop accept --as`.
+
+Heavy repair rounds (ADR 0026) are not dispatched for native attempts, because they block
+on `collect`. A failure goes through the retry budget. Every evidence row carries the
+dispatch mode.
+
+**Cancel, restart and recovery.**
+- `meshloop cancel` on `awaiting-report` appends `Cancel` with reason
+  `native: tracking stopped; sub-agent not stopped by Meshloop`. It calls no harness
+  method and uses no recorded PID. Its JSON names the attempt and the origin so that the
+  operator skill can stop the sub-agent.
+- `resume --restart` refuses while any attempt is `awaiting-report`.
+- `crash_fail` and `reattach_running` consider only `running`, so they never touch a parked
+  attempt. Recovery reconciles a parked attempt only by report, deadline or cancel.
+- A cancelled or expired native attempt's worktree is liveness-uncertain for cleanup
+  (ADR 0033).
+
+**Status.**
+- Per native attempt, `status` and `inspect` show: `dispatch_mode`, state
+  `awaiting-report`, `waiting_for: native_report`, origin harness and session,
+  `parked_at`, `deadline_at`, `overdue`, `report` (`pending`, `received` or `late`),
+  `model_ref` and `model_reported`, and the
+  `limits` list (`no_owned_process`, `no_cancel_proof`, `no_liveness`,
+  `no_detached_execution`, `inherits_session_permissions`).
+- `live` is `NotObservable`.
+- Status is read-only (ADR 0034): it shows that an attempt is overdue but never appends.
+
+**Feedback.** The routing feedback key gains the dispatch mode. A native outcome whose
+reported model is missing or differs from the requested model is recorded under model
+`unverified`.
+
+**Validation scenarios.** Fixture-only and offline:
+- park, report, deadline, cancel, and late report on `failed` or `cancelled`;
+- wrong-origin refusal and a duplicate report;
+- a crash between park and report, then `resume`;
+- a report claiming success while checks fail;
+- an out-of-worktree change, an empty diff, and a mode change event;
+- refusal of a ledger that contains an unknown state or event.
+
+Live proof per harness is #152, not CI.
 
 ## 4. Verification and persistence (ADR 0007)
 
