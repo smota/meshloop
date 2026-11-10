@@ -89,6 +89,13 @@ pub enum Command {
         db: Option<PathBuf>,
         attempts: bool,
     },
+    /// The graph's run-table events with their stable ids, read-only (#137).
+    Events {
+        graph: Option<String>,
+        after: i64,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+    },
     Watch {
         graph: Option<String>,
         session_id: Option<String>,
@@ -291,6 +298,12 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--config"),
             (true, "--db"),
             (false, "--attempts"),
+        ],
+        "events" => &[
+            (true, "--graph"),
+            (true, "--after"),
+            (true, "--config"),
+            (true, "--db"),
         ],
         "watch" => &[
             (true, "--session-id"),
@@ -572,6 +585,21 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 attempts: has_flag(rest, "--attempts"),
             })
         }
+        Some(v) if v == "events" => {
+            let rest = &args[1..];
+            let after = match flag_value(rest, "--after") {
+                Some(raw) => raw.parse::<i64>().ok().filter(|n| *n >= 0).ok_or_else(|| {
+                    format!("meshloop:events --after expects an event id >= 0, got {raw}")
+                })?,
+                None => 0,
+            };
+            Ok(Command::Events {
+                graph: flag_value(rest, "--graph"),
+                after,
+                config: flag_value(rest, "--config").map(PathBuf::from),
+                db: flag_value(rest, "--db").map(PathBuf::from),
+            })
+        }
         Some(v) if v == "watch" => {
             let rest = &args[1..];
             let session_id = flag_value(rest, "--session-id");
@@ -781,7 +809,7 @@ pub fn help_text() -> &'static str {
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
-     \x20 meshloop:watch | meshloop:workspace\n\
+     \x20 meshloop:watch | meshloop:events | meshloop:workspace\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -793,6 +821,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop inspect --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
+     \x20 meshloop events [--graph <id>] [--after <event id>] [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
      \x20 meshloop roles [--json]\n\
@@ -825,6 +854,31 @@ mod tests {
         assert!(super::parse(&["status", "--drivers", "--graph", "g"].map(String::from)).is_err());
     }
     use super::*;
+
+    #[test]
+    fn events_takes_graph_and_an_after_cursor() {
+        let parsed = parse(&["events", "--graph", "g", "--after", "42"].map(String::from)).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Events { ref graph, after: 42, .. } if graph.as_deref() == Some("g")
+        ));
+        let parsed = parse(&["events"].map(String::from)).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Events {
+                graph: None,
+                after: 0,
+                ..
+            }
+        ));
+        for bad in ["-1", "x", ""] {
+            assert!(
+                parse(&["events", "--after", bad].map(String::from)).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(parse(&["events", "--task", "1"].map(String::from)).is_err());
+    }
 
     #[test]
     fn status_keeps_config_db_and_graph() {

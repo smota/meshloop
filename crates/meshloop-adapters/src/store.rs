@@ -137,6 +137,13 @@ impl SqliteStore {
         Ok(count as usize)
     }
 
+    /// The run-table events every reader sees for `graph_id`, in append order, each
+    /// with its `event_id` (#137). Read-only: one SELECT, the same visibility as
+    /// `records_for_graph`. The id is stable, so a projection can keep a cursor on it.
+    pub fn event_log(&self, graph_id: &str) -> Result<Vec<(i64, TransitionRecord)>, StoreError> {
+        visible_rows(&self.conn, graph_id, None)
+    }
+
     pub fn all_evidence(&self) -> Result<Vec<Evidence>, StoreError> {
         let mut stmt = self
             .conn
@@ -189,9 +196,22 @@ fn visible_records(
     graph_id: &str,
     task: Option<TaskId>,
 ) -> Result<Vec<TransitionRecord>, StoreError> {
+    Ok(visible_rows(conn, graph_id, task)?
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
+}
+
+/// `visible_records` with each record's `event_id`: the log position SQLite assigned
+/// at append, unique and increasing, never reused or renumbered.
+fn visible_rows(
+    conn: &Connection,
+    graph_id: &str,
+    task: Option<TaskId>,
+) -> Result<Vec<(i64, TransitionRecord)>, StoreError> {
     let mut stmt = conn
         .prepare(
-            "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at
+            "SELECT graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at, event_id
              FROM events WHERE graph_id = ?1 AND (?2 IS NULL OR task_id = ?2) AND (generation_id IS NULL OR EXISTS(SELECT 1 FROM workspace_run_bindings b WHERE b.graph_id = events.graph_id)) ORDER BY event_id ASC",
         )
         .map_err(|e| StoreError::Io(e.to_string()))?;
@@ -207,24 +227,28 @@ fn visible_records(
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, String>(7)?,
                 r.get::<_, String>(8)?,
+                r.get::<_, i64>(9)?,
             ))
         })
         .map_err(|e| StoreError::Io(e.to_string()))?;
     let mut out = Vec::new();
     for row in rows {
-        let (gid, tid, aid, from, to, ev, reason, executor, occurred) =
+        let (gid, tid, aid, from, to, ev, reason, executor, occurred, event_id) =
             row.map_err(|e| StoreError::Io(e.to_string()))?;
-        out.push(TransitionRecord {
-            graph_id: gid,
-            task_id: TaskId(tid),
-            attempt_id: aid.map(AttemptId),
-            from: parse_state(&from)?,
-            to: parse_state(&to)?,
-            event: parse_event(&ev)?,
-            reason,
-            executor,
-            occurred_at: occurred,
-        });
+        out.push((
+            event_id,
+            TransitionRecord {
+                graph_id: gid,
+                task_id: TaskId(tid),
+                attempt_id: aid.map(AttemptId),
+                from: parse_state(&from)?,
+                to: parse_state(&to)?,
+                event: parse_event(&ev)?,
+                reason,
+                executor,
+                occurred_at: occurred,
+            },
+        ));
     }
     Ok(out)
 }
@@ -1190,6 +1214,56 @@ mod tests {
         store.append(rec.clone()).unwrap();
         let got = store.records_for_graph("g").unwrap();
         assert_eq!(got, vec![rec]);
+    }
+
+    #[test]
+    fn event_log_pairs_each_visible_record_with_its_increasing_id() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let rec = |graph: &str, from, to, event| TransitionRecord {
+            graph_id: graph.into(),
+            task_id: TaskId(1),
+            attempt_id: None,
+            from,
+            to,
+            event,
+            reason: None,
+            executor: "meshloop".into(),
+            occurred_at: "1".into(),
+        };
+        store
+            .append(rec(
+                "g",
+                TaskState::Pending,
+                TaskState::Ready,
+                Event::DependencySatisfied,
+            ))
+            .unwrap();
+        store
+            .append(rec(
+                "other",
+                TaskState::Pending,
+                TaskState::Ready,
+                Event::DependencySatisfied,
+            ))
+            .unwrap();
+        store
+            .append(rec(
+                "g",
+                TaskState::Ready,
+                TaskState::Running,
+                Event::AttemptStarted,
+            ))
+            .unwrap();
+        let log = store.event_log("g").unwrap();
+        let ids: Vec<i64> = log.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![1, 3],
+            "ids are the log's own, not a per-graph count"
+        );
+        let records: Vec<TransitionRecord> = log.into_iter().map(|(_, r)| r).collect();
+        assert_eq!(records, store.records_for_graph("g").unwrap());
+        assert!(store.event_log("missing").unwrap().is_empty());
     }
 
     #[test]

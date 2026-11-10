@@ -223,10 +223,10 @@ fn absent_ledger_reads_create_nothing_and_targeted_reads_exit_two() {
         let before = snapshot(&fixture.base);
         let status = fixture.read(&["status"], 0);
         assert_eq!(status["data"]["runs"], serde_json::json!([]));
-        for command in ["status", "inspect", "watch"] {
+        for command in ["status", "inspect", "watch", "events"] {
             fixture.read(&[command, "--graph", "missing"], 2);
         }
-        for command in ["inspect", "watch"] {
+        for command in ["inspect", "watch", "events"] {
             fixture.read(&[command], 2);
         }
         assert_eq!(snapshot(&fixture.base), before);
@@ -242,7 +242,7 @@ fn existing_empty_ledger_targeted_reads_exit_two_without_maintenance() {
         fixture.read(&["status"], 0)["data"]["runs"],
         serde_json::json!([])
     );
-    for command in ["status", "inspect", "watch"] {
+    for command in ["status", "inspect", "watch", "events"] {
         fixture.read(&[command, "--graph", "missing"], 2);
     }
     assert_eq!(snapshot(&fixture.base), before);
@@ -328,6 +328,11 @@ fn public_cli_observes_live_wal_while_fence_held_without_application_or_git_writ
         "--interval",
         "1",
     ])));
+    // #137: the event stream reads the same live WAL with no application write.
+    assert_eq!(
+        fixture.read(&["events", "--graph", "only-in-live-wal"], 0)["data"]["graph_id"],
+        "only-in-live-wal"
+    );
     assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
     assert_eq!(
         git(
@@ -359,6 +364,7 @@ fn closed_wal_ledger_is_readable_without_identity_or_gitignore_creation() {
         "only-in-live-wal"
     );
     fixture.read(&["inspect", "--graph", "only-in-live-wal"], 0);
+    fixture.read(&["events", "--graph", "only-in-live-wal"], 0);
     assert_watch(bounded_output(&mut fixture.command(&[
         "watch",
         "--graph",
@@ -377,7 +383,7 @@ fn pre_v6_public_reads_require_upgrade_without_migrating_application_state() {
     conn.execute_batch("CREATE TABLE schema_meta(version INTEGER NOT NULL); INSERT INTO schema_meta VALUES(5); CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('retained');").unwrap();
     drop(conn);
     let before = snapshot(&fixture.base);
-    for command in ["status", "inspect", "watch"] {
+    for command in ["status", "inspect", "watch", "events"] {
         let value = fixture.read(&[command, "--graph", "old"], 2);
         assert!(
             value.to_string().contains("SchemaUpgradeRequired"),

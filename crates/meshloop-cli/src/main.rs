@@ -271,6 +271,12 @@ fn dispatch(inv: Invocation) -> ExitCode {
                 )
             }
         }
+        Command::Events {
+            graph,
+            after,
+            config,
+            db,
+        } => cmd_events(graph, after, config, db, inv.json, inv.origin),
         Command::Watch {
             graph,
             session_id,
@@ -2131,6 +2137,122 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
 
 /// Reads the store only (never owns workers), so it also works on `run --detach`.
 #[allow(clippy::too_many_arguments)]
+/// `meshloop events`: a graph's run-table events in append order with their stable
+/// `event_id` as `seq`, after `--after` (#137). Read-only under ADR 0034: the same
+/// read-only composition as status, inspect and watch, one SELECT, no writes. Each
+/// event is a pointer (task, attempt, states, event name, time, the attempt's worktree
+/// as meshloop recorded it), never a reason, note or worker output, so a projection
+/// such as the nodecode cell's Board can keep a cursor on `seq` and post each one once.
+fn cmd_events(
+    graph: Option<String>,
+    after: i64,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    const COMMAND: &str = "meshloop:events";
+    let (cfg, _) = match load_cfg(config) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let composed = match compose::compose_read_only(compose::ComposeRequest {
+        config: &cfg,
+        repo_root: repo_root(),
+        db_path: db.as_deref(),
+        worktree_base: None,
+        origin: origin.clone(),
+        fixture_only: false,
+    }) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let message = graph.as_deref().map_or_else(
+                || "graph not found: no managed runs".to_string(),
+                |id| format!("graph '{id}' not found: no managed runs"),
+            );
+            return read_error(COMMAND, origin, json, message);
+        }
+        Err(e) => return read_error(COMMAND, origin, json, e),
+    };
+    let store = &composed.store;
+    let run = match graph.as_deref() {
+        Some(id) => store.load_run(id),
+        None => store.latest_run(),
+    };
+    let run = match run {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            let message = graph.as_deref().map_or_else(
+                || "graph not found: no runs".to_string(),
+                |id| format!("graph '{id}' not found"),
+            );
+            return read_error(COMMAND, origin, json, message);
+        }
+        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
+    };
+    let events = match store.event_log(&run.graph_id) {
+        Ok(events) => events,
+        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
+    };
+    let worktrees: HashMap<u32, String> = match store.attempts_for_graph(&run.graph_id) {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|a| {
+                a.worktree_path
+                    .map(|p| (a.attempt_id.0, p.display().to_string()))
+            })
+            .collect(),
+        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
+    };
+    let shown: Vec<_> = events.iter().filter(|(seq, _)| *seq > after).collect();
+    let last_seq = shown.last().map_or(after, |(seq, _)| *seq);
+    if json {
+        let rows: Vec<serde_json::Value> = shown
+            .iter()
+            .map(|(seq, e)| {
+                serde_json::json!({
+                    "seq": seq,
+                    "task": e.task_id.0,
+                    "attempt": e.attempt_id.map(|a| a.0),
+                    "from": format!("{:?}", e.from),
+                    "to": format!("{:?}", e.to),
+                    "event": format!("{:?}", e.event),
+                    "occurred_at": e.occurred_at,
+                    "evidence_path": e.attempt_id.and_then(|a| worktrees.get(&a.0)),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            json_out::ok(
+                COMMAND,
+                origin,
+                serde_json::json!({
+                    "graph_id": run.graph_id,
+                    "plan_state": format!("{:?}", run.plan_state),
+                    "after": after,
+                    "last_seq": last_seq,
+                    "events": rows,
+                })
+            )
+        );
+    } else {
+        println!(
+            "graph {} (plan {:?}): {} event(s) after {after}",
+            run.graph_id,
+            run.plan_state,
+            shown.len()
+        );
+        for (seq, e) in &shown {
+            println!(
+                "  {seq} #{} {:?} -> {:?} ({:?})",
+                e.task_id.0, e.from, e.to, e.event
+            );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn cmd_watch(
     graph: Option<String>,
     session_id: Option<String>,

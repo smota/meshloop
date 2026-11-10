@@ -337,6 +337,7 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
             "cancel",
             "doctor",
             "error",
+            "events",
             "inspect",
             "inspect_attempts",
             "integrate_preview",
@@ -420,6 +421,49 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
     // /meshloop resume: detached, as run.
     case("resume_detached");
     fixture.wait_for_node("gcell", 2, "AwaitingReview");
+
+    // The Board projection (#137): every transition of gcell, each with its stable id,
+    // read after a cursor. The last event per node is the state status reports.
+    let events = case("events");
+    let rows = events["data"]["events"].as_array().expect("events");
+    let seqs: Vec<i64> = rows
+        .iter()
+        .map(|e| e["seq"].as_i64().expect("seq"))
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+    assert_eq!(events["data"]["last_seq"], *seqs.last().expect("an event"));
+    let status = fixture.as_cell(&["status", "--graph", "gcell"].map(String::from));
+    for node in status["data"]["nodes"].as_array().expect("nodes") {
+        let last = rows.iter().rev().find(|e| e["task"] == node["id"]);
+        assert_eq!(last.map(|e| &e["to"]), Some(&node["state"]), "{events:#}");
+    }
+    let tail = fixture.as_cell(
+        &[
+            "events",
+            "--graph",
+            "gcell",
+            "--after",
+            &seqs[seqs.len() - 2].to_string(),
+        ]
+        .map(String::from),
+    );
+    assert_eq!(
+        tail["data"]["events"].as_array().map(Vec::len),
+        Some(1),
+        "{tail:#}"
+    );
+    let none = fixture.as_cell(
+        &[
+            "events",
+            "--graph",
+            "gcell",
+            "--after",
+            &seqs[seqs.len() - 1].to_string(),
+        ]
+        .map(String::from),
+    );
+    assert_eq!(none["data"]["events"], serde_json::json!([]), "{none:#}");
+    assert_eq!(none["data"]["last_seq"], *seqs.last().expect("an event"));
 
     // /meshloop cancel on a second run, and the worktrees meshloop keeps for it.
     for argv in [
