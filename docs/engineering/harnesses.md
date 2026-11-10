@@ -55,21 +55,35 @@ one of two forms. Use one form per entry; setting both is a config error.
 - **Single model (unchanged):** `model_ref = "..."` with optional `model_tier`
   (`"mid"` when omitted). Configs written before #134 load and route as before.
 - **List:** `models = [{ model_ref = "...", model_tier = "top" }, ...]`. `model_tier`
-  defaults to `"mid"` per entry. The list must be non-empty and hold at most 16 entries.
+  is `"top"`, `"mid"` (the default) or `"lightweight"`; any other value is a config
+  error. (The single-model `model_tier` keeps its old lenient parse, where an unknown
+  value means lightweight.) The list must be non-empty and hold at most 16 entries.
   Each `model_ref` must be non-empty, unique within the entry, at most 256 bytes, free
   of whitespace and control characters, and must not start with `-`. Unknown keys in an
   entry are rejected.
 
 Routing expands every (harness, model) pair into its own candidate. The arm key is
 (harness, `model_ref`, task tier), so each model has its own `routing_feedback` row and
-its own tier filter. Retry and fallback track these arms: a retry may pick another model
-of the same harness. Probes, quota cooldown and headroom remain per harness.
+its own tier filter. Probes, quota cooldown and headroom remain per harness.
+
+Retry and fallback decide what a failed attempt has used up:
+
+- A failure after the harness process started (a timeout, a collection fault, failed
+  checks) uses up only that (harness, model). A retry may pick another model of the
+  same harness.
+- A failure before any process started (an invoke or spawn error, or a worktree that
+  could not be created) is not about the model. It uses up every model of that harness.
+  The attempt is recorded either way and counts toward `max_retries`.
+- A failure that puts the harness into quota cooldown (`CapacityExhausted`) grants a
+  retry only if a candidate on another, available harness is left. Otherwise the task
+  ends `Failed` instead of waiting on a harness that routing filters out.
 
 At dispatch the chosen `model_ref` replaces `{model_ref}` in `invoke_args_template`.
 Arguments are a structured argv with no shell, so the model is one argument and is never
 interpreted. The attempt records that same `model_ref` in evidence, and its routing
-feedback uses it. `meshloop doctor` lists each configured pair under its harness;
-`doctor --json` reports them as `data.harnesses[].models`.
+feedback uses it. `meshloop doctor` lists each configured pair under its harness with
+its parsed tier; `doctor --json` reports them as `data.harnesses[].models`, each with
+`model_ref`, the configured `model_tier` and the parsed `tier` (for example `TopTier`).
 
 Meshloop ships no model flag (ADR 0003): the shipped templates do not pass
 `{model_ref}`, so each CLI runs its own default model and `model_ref` remains a label.

@@ -99,6 +99,8 @@ pub struct Composed {
     pub planner: PlannerSelection,
 }
 
+/// `"top"`, `"mid"`; `"lightweight"` and, for the legacy `model_tier`, any other value
+/// mean lightweight. `config::load` restricts the `models` list to the three names.
 pub(crate) fn parse_model_tier(s: &str) -> ModelCapabilityTier {
     match s {
         "top" => ModelCapabilityTier::TopTier,

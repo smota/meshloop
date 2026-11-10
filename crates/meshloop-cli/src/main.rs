@@ -2615,9 +2615,10 @@ fn cmd_doctor(
             println!("  harness {name}: {status}");
             for m in h["models"].as_array().into_iter().flatten() {
                 println!(
-                    "    model {name}/{} ({})",
+                    "    model {name}/{} (model_tier {:?} -> {})",
                     m["model_ref"].as_str().unwrap_or("?"),
-                    m["model_tier"].as_str().unwrap_or("?")
+                    m["model_tier"].as_str().unwrap_or("?"),
+                    m["tier"].as_str().unwrap_or("?")
                 );
             }
         }
@@ -2713,7 +2714,13 @@ fn doctor_probe(cfg: &crate::config::Config) -> Vec<serde_json::Value> {
                 let models: Vec<serde_json::Value> = cfg.harnesses[name]
                     .model_entries()
                     .into_iter()
-                    .map(|m| serde_json::json!({"model_ref": m.model_ref, "model_tier": m.model_tier}))
+                    .map(|m| {
+                        serde_json::json!({
+                            "model_ref": m.model_ref,
+                            "model_tier": m.model_tier,
+                            "tier": format!("{:?}", compose::parse_model_tier(&m.model_tier)),
+                        })
+                    })
                     .collect();
                 let mut row = match handle.join() {
                     Ok(Ok(p)) => serde_json::json!({

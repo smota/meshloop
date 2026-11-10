@@ -163,7 +163,8 @@ pub struct HarnessConfig {
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     pub model_ref: String,
-    /// `"top"`, `"mid"` (default) or anything else for lightweight, as `model_tier`.
+    /// `"top"`, `"mid"` (default) or `"lightweight"`. Unlike the legacy single-model
+    /// `model_tier`, any other value is a config error.
     #[serde(default = "default_model_tier")]
     pub model_tier: String,
 }
@@ -173,6 +174,9 @@ pub struct ModelEntry {
 pub const MAX_MODELS_PER_HARNESS: usize = 16;
 /// Upper bound on one `model_ref` in a `models` list, in bytes.
 const MAX_MODEL_REF_BYTES: usize = 256;
+/// Tiers accepted in a `models` list. The legacy `model_tier` keeps its lenient parse,
+/// where an unknown value means lightweight.
+const LIST_MODEL_TIERS: [&str; 3] = ["top", "mid", "lightweight"];
 
 impl HarnessConfig {
     /// The models this entry routes, in configuration order: the `models` list, or the
@@ -235,6 +239,12 @@ fn validate_models(name: &str, hc: &HarnessConfig) -> Result<(), ConfigError> {
         }
         if !seen.insert(r.as_str()) {
             return err(format!("duplicate model_ref '{r}' in models"));
+        }
+        if !LIST_MODEL_TIERS.contains(&m.model_tier.as_str()) {
+            return err(format!(
+                "models[{i}].model_tier '{}' must be one of top, mid, lightweight",
+                m.model_tier
+            ));
         }
     }
     Ok(())
@@ -649,6 +659,13 @@ probe_timeout_seconds = 0",
         // An omitted legacy model_tier still defaults to "mid".
         let c = with_models("legacy-default-tier", "model_ref = \"grok\"").expect("loads");
         assert_eq!(c.harnesses["grok"].model_entries()[0].model_tier, "mid");
+        // The legacy form keeps its lenient tier parse; only the list form is strict.
+        let c = with_models(
+            "legacy-odd-tier",
+            "model_ref = \"grok\"\nmodel_tier = \"Top\"",
+        )
+        .expect("legacy tier stays lenient");
+        assert_eq!(c.harnesses["grok"].model_entries()[0].model_tier, "Top");
     }
 
     #[test]
@@ -659,6 +676,7 @@ probe_timeout_seconds = 0",
                 { model_ref = "grok-4-fast", model_tier = "mid" },
                 { model_ref = "grok-4" , model_tier = "top" },
                 { model_ref = "grok-mini" },
+                { model_ref = "grok-nano", model_tier = "lightweight" },
             ]"#,
         )
         .expect("models list loads");
@@ -672,7 +690,8 @@ probe_timeout_seconds = 0",
             [
                 ("grok-4-fast", "mid"),
                 ("grok-4", "top"),
-                ("grok-mini", "mid")
+                ("grok-mini", "mid"),
+                ("grok-nano", "lightweight")
             ]
         );
     }
@@ -717,6 +736,11 @@ probe_timeout_seconds = 0",
                 "whitespace or control",
             ),
             ("m-many", too_many.as_str(), "at most"),
+            (
+                "m-tier",
+                "models = [{ model_ref = \"a\", model_tier = \"Top\" }]",
+                "must be one of top, mid, lightweight",
+            ),
         ] {
             match with_models(tag, models) {
                 Err(ConfigError::Parse(msg)) => {

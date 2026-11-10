@@ -4,6 +4,7 @@
 - Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
+- Amended: 2026-11-10 (#134)
 - Author/executor: Claude (builder sub-agent)
 - Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039
 - Decision owner: Samuel
@@ -146,13 +147,17 @@ expands each into its own (harness, model, tier) candidate and substitutes it in
 > **Amendment 2026-11-10 (#134, key names and loader behaviour).** A `[harnesses.<name>]`
 > entry sets either `model_ref` with optional `model_tier` (the pre-#134 form, unchanged)
 > or `models = [{ model_ref = "...", model_tier = "..." }, ...]`, not both. `model_tier`
-> defaults to `"mid"` in both forms. `load` rejects an empty list, more than 16 entries,
-> an empty, duplicate, over-256-byte, whitespace-bearing or `-`-prefixed `model_ref`, and
-> unknown keys in an entry. Each pair is one candidate keyed (harness, `model_ref`, task
-> tier); retry and fallback track these arms. The attempt row, `routing_feedback` and
-> `{model_ref}` all use the `model_ref` of the dispatched candidate. `doctor --json`
-> reports `data.harnesses[].models`. No model flag is shipped (ADR 0003); operator
-> examples are in [harnesses.md](../../engineering/harnesses.md#model-selection).
+> defaults to `"mid"` in both forms; in the list it must be `top`, `mid` or
+> `lightweight`. `load` rejects an empty list, more than 16 entries, an empty, duplicate,
+> over-256-byte, whitespace-bearing or `-`-prefixed `model_ref`, and unknown keys in an
+> entry. Each pair is one candidate keyed (harness, `model_ref`, task tier). Retry and
+> fallback track these arms, except that a failure before any process starts uses up
+> every model of its harness. For subprocess dispatch, the attempt row,
+> `routing_feedback` and `{model_ref}` all use the `model_ref` of the dispatched
+> candidate; native outcomes are keyed per ADR 0039 (model `unverified`). `doctor
+> --json` reports `data.harnesses[].models` with the parsed `tier`. No model flag is
+> shipped (ADR 0003); operator examples are in
+> [harnesses.md](../../engineering/harnesses.md#model-selection).
 
 **Native attempts (ADR 0039).** Learning counts only observed evidence: checks meshloop
 ran and diffs it read, never a session's or sub-agent's report, with native and

@@ -4572,8 +4572,8 @@ fn doctor_reports_each_configured_harness_model_pair() {
     assert_eq!(
         v["data"]["harnesses"][0]["models"],
         serde_json::json!([
-            {"model_ref": "fail-mid-model", "model_tier": "mid"},
-            {"model_ref": "good-top-model", "model_tier": "top"},
+            {"model_ref": "fail-mid-model", "model_tier": "mid", "tier": "MidTier"},
+            {"model_ref": "good-top-model", "model_tier": "top", "tier": "TopTier"},
         ]),
         "{stdout}"
     );
@@ -4592,11 +4592,11 @@ fn doctor_reports_each_configured_harness_model_pair() {
         .expect("doctor text");
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(
-        text.contains("model fixture/fail-mid-model (mid)"),
+        text.contains("model fixture/fail-mid-model (model_tier \"mid\" -> MidTier)"),
         "{text}"
     );
     assert!(
-        text.contains("model fixture/good-top-model (top)"),
+        text.contains("model fixture/good-top-model (model_tier \"top\" -> TopTier)"),
         "{text}"
     );
 
@@ -4611,7 +4611,7 @@ fn doctor_reports_each_configured_harness_model_pair() {
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor json");
     assert_eq!(
         v["data"]["harnesses"][0]["models"],
-        serde_json::json!([{"model_ref": "fixture-model", "model_tier": "top"}])
+        serde_json::json!([{"model_ref": "fixture-model", "model_tier": "top", "tier": "TopTier"}])
     );
     fs::remove_dir_all(&dir).ok();
 }
