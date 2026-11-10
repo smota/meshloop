@@ -2,13 +2,23 @@
 """Load the nodecode-meshloop cell on a throwaway nodecode home and run it.
 
 Starts `nodecode serve` with HOME set to a scratch directory and an emptied
-environment, links this cell into that home, opens one session in a fixture
-repository, and runs /meshloop doctor, status and inspect through the
-gateway's POST /api/gateway/slash, which runs a cell command with no model
-turn. It checks the summaries, the failure lines (missing binary, older
-binary, no JSON), that the cell changed nothing in the repository or the
-meshloop store, and that switching the cell off leaves the meshloop CLI's
-answers as they were.
+environment, links this cell into that home, opens sessions in fixture
+repositories, and runs /meshloop commands through the gateway's
+POST /api/gateway/slash, which runs a cell command with no model turn.
+
+Read-only: doctor, status, inspect, report and review-plan's plan view, the
+failure lines (missing binary, older binary, no JSON, timeout, noisy stderr),
+that these changed nothing in the repository or the meshloop store, and that
+switching the cell off leaves the meshloop CLI's answers as they were.
+
+Writes (#136): with meshloop.write_commands off every write command refuses in
+one line and runs nothing; accept and review-plan refuse without an identity
+and pass the typed one as --as (read back from meshloop's event log); the :tool
+veto refuses calls that run accept, review-plan or integrate (exercised through
+/meshloop hook-check, which runs the installed hook function on a synthetic
+call, since a real tool call needs a model turn); a fixture graph goes plan,
+review-plan, run (detached), accept, resume, integrate; and cancel leaves no
+process and no worktree meshloop does not own.
 
 It never touches the operator's nodecode home: every path it writes is under
 --work. Run it with `python3 -I`. Exit status 0 means every check held.
@@ -30,7 +40,11 @@ from pathlib import Path
 CELL = Path(__file__).resolve().parent.parent
 SESSION = "s-MESHLOOPCELL"
 GRAPH = "g135"
+DRIVE_GRAPH = "g136"
+SECOND_GRAPH = "g136b"
+CANCEL_GRAPH = "g136c"
 CHECKS = []
+WRITE_REFUSED = "refused: write commands are off"
 
 
 def note(line=""):
@@ -54,40 +68,39 @@ def git(repo, *args):
     return out.stdout
 
 
-def make_fixture(repo, fixture_harness):
+def make_fixture(repo, fixture_harness, invoke=None, graph=GRAPH, nodes=None, extra=None):
+    """A git repository whose meshloop.toml runs the fixture harness with
+    INVOKE, and a committed plan.json for GRAPH."""
     repo.mkdir(parents=True)
     git(repo, "init", "--quiet")
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "user.name", "Fixture")
     (repo / "README.md").write_text("seed\n")
     (repo / ".gitignore").write_text("/.meshloop/\n/worktrees/\n")
+    invoke = invoke or ["--prompt-file", "{prompt_file}"]
     (repo / "meshloop.toml").write_text(
         f"""selected_harnesses = ["fixture"]
 [limits]
 max_concurrent_workers = 1
 max_retries = 2
-task_timeout_seconds = 30
+task_timeout_seconds = 120
 [verify]
 verify_command = []
 [harnesses.fixture]
 executable = {json.dumps(str(fixture_harness))}
 version_args = ["--version"]
-invoke_args_template = ["--prompt-file", "{{prompt_file}}"]
+invoke_args_template = {json.dumps(invoke)}
 model_ref = "fixture-model"
 model_tier = "top"
 """
     )
-    (repo / "plan.json").write_text(
-        json.dumps(
-            {
-                "graph_id": GRAPH,
-                "nodes": [
-                    {"id": 1, "description": "first", "depends_on": [], "tier": None},
-                    {"id": 2, "description": "second", "depends_on": [1], "tier": None},
-                ],
-            }
-        )
-    )
+    nodes = nodes or [
+        {"id": 1, "description": "first", "depends_on": [], "tier": None},
+        {"id": 2, "description": "second", "depends_on": [1], "tier": None},
+    ]
+    (repo / "plan.json").write_text(json.dumps({"graph_id": graph, "nodes": nodes}))
+    for name, text in (extra or {}).items():
+        (repo / name).write_text(text)
     git(repo, "add", ".")
     git(repo, "commit", "--quiet", "-m", "seed")
 
@@ -170,8 +183,8 @@ class Organism:
         except urllib.error.HTTPError as error:
             return {"http_error": error.code, "body": error.read().decode(errors="replace")}
 
-    def slash(self, line):
-        answer = self.call("POST", "/api/gateway/slash", {"line": line, "session_id": SESSION})
+    def slash(self, line, session=SESSION):
+        answer = self.call("POST", "/api/gateway/slash", {"line": line, "session_id": session})
         text = answer.get("text") if isinstance(answer, dict) else None
         return text if isinstance(text, str) else json.dumps(answer)
 
@@ -189,6 +202,50 @@ class Organism:
 
 def write_config(home, section):
     (home / ".nodecode" / "config.jsonc").write_text(json.dumps({"meshloop": section}, indent=2) + "\n")
+
+
+def processes_in(path):
+    """(pid, command line) of every process whose working directory is PATH
+    or under it: what meshloop or a harness left running there."""
+    found = []
+    root = str(Path(path).resolve())
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cwd = os.readlink(entry / "cwd")
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        if cwd == root or cwd.startswith(root + "/"):
+            found.append((int(entry.name), cmdline))
+    return found
+
+
+def cli_json(meshloop, repo, *args):
+    out = run([str(meshloop), *args, "--json"], repo)
+    try:
+        return json.loads(out.stdout)
+    except ValueError:
+        return {"ok": False, "error": f"no JSON (exit {out.returncode}): {out.stderr[-300:]}"}
+
+
+def wait_until(what, probe, seconds=90):
+    """PROBE() once it is truthy, polled; None after SECONDS."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        value = probe()
+        if value:
+            return value
+        time.sleep(0.5)
+    note(f"timed out waiting for {what}")
+    return None
+
+
+def node_states(meshloop, repo, graph):
+    status = cli_json(meshloop, repo, "status", "--graph", graph)
+    data = status.get("data") or {}
+    return {n["id"]: n["state"] for n in data.get("nodes", [])}, data
 
 
 def fake_binary(path, body):
@@ -218,6 +275,193 @@ def prepare_work(path):
     work.mkdir(parents=True)
     (work / MARKER).write_text("made by cells/nodecode-meshloop/test/load_test.py\n")
     return work
+
+
+def drive_section(answer, organism, home, work, meshloop, fixture_harness):
+    """#136: the commands that write, on fixture repositories of their own."""
+    write_config(home, {"binary": str(meshloop), "timeout_seconds": 30, "write_commands": True})
+    organism.restart_cell()
+
+    planner_repo = work / "planner"
+    make_fixture(planner_repo, fixture_harness, invoke=["--emit-graph"])
+    drive_repo = work / "drive"
+    second = json.dumps(
+        {"graph_id": SECOND_GRAPH, "nodes": [{"id": 1, "description": "another", "depends_on": [], "tier": None}]}
+    )
+    make_fixture(drive_repo, fixture_harness, graph=DRIVE_GRAPH, extra={"plan-second.json": second})
+    cancel_repo = work / "cancel"
+    make_fixture(
+        cancel_repo,
+        fixture_harness,
+        invoke=["--prompt-file", "{prompt_file}", "60000"],
+        graph=CANCEL_GRAPH,
+        nodes=[{"id": 1, "description": "slow, to cancel", "depends_on": [], "tier": None}],
+    )
+    sessions = {"s-MESHLOOPPLAN": planner_repo, "s-MESHLOOPDRIVE": drive_repo, "s-MESHLOOPCANCEL": cancel_repo}
+    for session, repo in sessions.items():
+        created = organism.call("POST", "/api/gateway/sessions", {"session_id": session, "cwd": str(repo)})
+        check(f"session {session} opened", "http_error" not in created, json.dumps(created))
+
+    # plan and the plan view, on a repository whose harness plans.
+    text = answer("/meshloop plan --out planned.json add a widget", "s-MESHLOOPPLAN")
+    check(
+        "plan writes a plan and starts nothing",
+        text.startswith("meshloop plan: graph fixture-") and "2 nodes, written to planned.json" in text
+        and "Nothing runs yet" in text,
+        text,
+    )
+    text = answer("/meshloop review-plan --plan planned.json", "s-MESHLOOPPLAN")
+    check("the new plan is shown, not reviewed", "not reviewed in this repository yet" in text, text)
+    check("plan staged nothing", cli_json(meshloop, planner_repo, "status").get("data", {}).get("runs") == [])
+
+    d = "s-MESHLOOPDRIVE"
+    # (b) Identity: refused without one, passed as typed with one.
+    text = answer("/meshloop review-plan --plan plan.json --accept", d)
+    check("review-plan --accept without --as refuses", text.startswith("meshloop review-plan: names no identity"), text)
+    text = answer("/meshloop review-plan --plan plan.json --accept --as --graph", d)
+    check("a flag is no identity", text.startswith("meshloop review-plan: ") and "no identity" in text, text)
+    text = answer("/meshloop run --plan plan.json", d)
+    check("run refuses a plan nobody accepted", text.startswith("meshloop run: exited 2") and "acceptance" in text, text)
+    text = answer("/meshloop review-plan --plan plan.json --accept --as person-one", d)
+    check(
+        "review-plan --accept --as records the decision",
+        text.startswith(f"meshloop review-plan: graph {DRIVE_GRAPH}, accept as person-one: PlanAccepted"),
+        text,
+    )
+    text = answer("/meshloop run --plan plan.json", d)
+    check(
+        "run starts a detached driver and points to inspect",
+        text.startswith(f"meshloop run: graph {DRIVE_GRAPH}, driver started detached (running)")
+        and f"/meshloop inspect {DRIVE_GRAPH}" in text,
+        text,
+    )
+    states = wait_until("node 1 to await review", lambda: (node_states(meshloop, drive_repo, DRIVE_GRAPH)[0].get(1) == "AwaitingReview") or None)
+    check("the detached run reached the gate", states is not None)
+    text = answer(f"/meshloop inspect {DRIVE_GRAPH}", d)
+    check("inspect shows the gate", "#1 AwaitingReview, waiting for acceptance" in text, text)
+    text = answer(f"/meshloop accept --task 1 --as you --graph {DRIVE_GRAPH}", d)
+    check("a placeholder identity refuses", text.startswith('meshloop accept: "you" is a placeholder'), text)
+    text = answer(f"/meshloop accept --task 1 --as <your-name> --graph {DRIVE_GRAPH}", d)
+    check("the hint's own placeholder refuses", "is a placeholder" in text, text)
+    # A second run waiting for acceptance: accept without --graph must ask which.
+    answer("/meshloop review-plan --plan plan-second.json --accept --as person-one", d)
+    answer("/meshloop run --plan plan-second.json", d)
+    waiting = wait_until(
+        "the second run to await review",
+        lambda: (node_states(meshloop, drive_repo, SECOND_GRAPH)[0].get(1) == "AwaitingReview") or None,
+    )
+    check("the second run reached the gate", waiting is not None)
+    text = answer("/meshloop accept --task 1 --as person-one", d)
+    check(
+        "accept without --graph refuses when two runs wait",
+        text.startswith("meshloop accept: 2 runs wait for acceptance") and "--graph" in text,
+        text,
+    )
+    text = answer(f"/meshloop accept --task 1 --graph {DRIVE_GRAPH}", d)
+    check("accept without --as refuses", text.startswith("meshloop accept: names no identity"), text)
+    check("nothing was accepted", node_states(meshloop, drive_repo, DRIVE_GRAPH)[0].get(1) == "AwaitingReview")
+    text = answer(f"/meshloop accept --task 1 --as person-one --graph {DRIVE_GRAPH}", d)
+    check(
+        "accept passes the typed identity as --as",
+        text.startswith(f"meshloop accept: task 1 of graph {DRIVE_GRAPH} accepted as person-one; meshloop recorded \"accepted by person-one at "),
+        text,
+    )
+    attempts = cli_json(meshloop, drive_repo, "inspect", "--attempts", "--graph", DRIVE_GRAPH)
+    evidence = [
+        e.get("summary_redacted", "")
+        for n in attempts.get("data", {}).get("nodes", [])
+        if n.get("id") == 1
+        for a in n.get("attempts", [])
+        for e in a.get("evidence", [])
+        if e.get("kind") == "human_acceptance"
+    ]
+    check("the event log holds the acceptance by person-one", any("accepted by person-one" in e for e in evidence), json.dumps(evidence))
+    text = answer(f"/meshloop resume {DRIVE_GRAPH}", d)
+    check("resume starts a detached driver", text.startswith(f"meshloop resume: graph {DRIVE_GRAPH}, driver started detached"), text)
+    states = wait_until("node 2 to await review", lambda: (node_states(meshloop, drive_repo, DRIVE_GRAPH)[0].get(2) == "AwaitingReview") or None)
+    check("node 2 reached the gate after resume", states is not None)
+    text = answer(f"/meshloop accept --task 2 --as person-one --graph {DRIVE_GRAPH}", d)
+    check("second accept", "accepted as person-one" in text, text)
+    answer(f"/meshloop resume {DRIVE_GRAPH}", d)
+
+    def complete():
+        states, data = node_states(meshloop, drive_repo, DRIVE_GRAPH)
+        return states and all(v == "Integrated" for v in states.values()) and data.get("driver") != "alive"
+
+    check("every node integrated into the integrate worktree", wait_until("the graph to complete", complete) is not None)
+    branch = git(drive_repo, "symbolic-ref", "--short", "HEAD").strip()
+    head_before = git(drive_repo, "rev-parse", "HEAD").strip()
+    text = answer(f"/meshloop integrate --graph {DRIVE_GRAPH} --into {branch}", d)
+    check(
+        "integrate without --accept-integrate points at the worktree and lands nothing",
+        text.startswith(f"meshloop integrate: graph {DRIVE_GRAPH} not landed. Review the integrate worktree")
+        and git(drive_repo, "rev-parse", "HEAD").strip() == head_before,
+        text,
+    )
+    text = answer(f"/meshloop integrate --graph {DRIVE_GRAPH} --into {branch} --accept-integrate", d)
+    check("integrate lands on the branch", text.startswith(f"meshloop integrate: graph {DRIVE_GRAPH} landed on {branch}; 2 Integrated"), text)
+    check("the branch moved", git(drive_repo, "rev-parse", "HEAD").strip() != head_before)
+    worktrees = [
+        line for line in git(drive_repo, "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ") and f"/{DRIVE_GRAPH}/" in line
+    ]
+    branches = git(drive_repo, "for-each-ref", "--format=%(refname)", f"refs/heads/meshloop/{DRIVE_GRAPH}")
+    check("the landed run left no worktree or branch (auto-reclaim)", not worktrees and not branches.strip(), f"{worktrees} {branches}")
+    text = answer(f"/meshloop report {DRIVE_GRAPH}", d)
+    check(
+        "report after landing",
+        "dispatched: fixture (model_ref fixture-model, 2 attempts)" in text
+        and "accepted by person-one at" in text,
+        text,
+    )
+
+    # (d) cancel: a slow worker, cancelled from the cell.
+    c = "s-MESHLOOPCANCEL"
+    answer("/meshloop review-plan --plan plan.json --accept --as person-one", c)
+    answer("/meshloop run --plan plan.json", c)
+    live = wait_until(
+        "the slow attempt to start",
+        lambda: any(n.get("live") == "Live" for n in node_states(meshloop, cancel_repo, CANCEL_GRAPH)[1].get("nodes", [])) or None,
+    )
+    check("the slow attempt is running", live is not None)
+    check("its harness process is there before cancel", any("fixture_harness" in c for _, c in processes_in(cancel_repo)), json.dumps(processes_in(cancel_repo)))
+    text = answer(f"/meshloop resume {CANCEL_GRAPH}", c)
+    check(
+        "resume refuses while the run's driver is alive",
+        text.startswith(f"meshloop resume: refused: a driver is running for {CANCEL_GRAPH}") and "\n" not in text,
+        text,
+    )
+    text = answer(f"/meshloop cancel {CANCEL_GRAPH}", c)
+    check(
+        "cancel answers what is left",
+        text.startswith(f"meshloop cancel: graph {CANCEL_GRAPH} cancelled; 1 Cancelled")
+        and "attempt processes alive: none" in text
+        and "every one ledger-owned" in text,
+        text,
+    )
+    left = wait_until("processes in the cancelled repository to exit", lambda: (not processes_in(cancel_repo)) or None, 30)
+    check("no process left in the cancelled repository", left is not None, json.dumps(processes_in(cancel_repo)))
+    states, data = node_states(meshloop, cancel_repo, CANCEL_GRAPH)
+    check(
+        "meshloop status: cancelled, no live attempt, driver not alive",
+        states == {1: "Cancelled"}
+        and all(n.get("live") != "Live" for n in data.get("nodes", []))
+        and data.get("driver") != "alive",
+        json.dumps(data)[:600],
+    )
+    doctor = cli_json(meshloop, cancel_repo, "doctor")
+    check("meshloop doctor is ready after cancel", doctor.get("ok") is True and doctor["data"]["harnesses_ready"], json.dumps(doctor)[:400])
+    inventory = cli_json(meshloop, cancel_repo, "workspace", "inventory")
+    entries = inventory.get("data", {}).get("entries", [])
+    listed = git(cancel_repo, "worktree", "list", "--porcelain")
+    paths = [line.split(" ", 1)[1] for line in listed.splitlines() if line.startswith("worktree ")][1:]
+    owned = {str((cancel_repo / ".meshloop" / "worktrees" / e["location"]["relative_path"]).resolve()) for e in entries if e.get("ownership") == "ledger-owned"}
+    check(
+        "every worktree left is one meshloop owns (no orphan)",
+        all(e.get("ownership") == "ledger-owned" for e in entries) and all(str(Path(p).resolve()) in owned for p in paths),
+        f"{paths} {json.dumps(entries)[:600]}",
+    )
+    note(f"cancelled run keeps {len(paths)} worktree(s), all ledger-owned: {paths}")
 
 
 def main():
@@ -255,8 +499,8 @@ def main():
         created = organism.call("POST", "/api/gateway/sessions", {"session_id": SESSION, "cwd": str(repo)})
         check("session opened in the fixture repository", "http_error" not in created, json.dumps(created))
 
-        def answer(line):
-            text = organism.slash(line)
+        def answer(line, session=SESSION):
+            text = organism.slash(line, session)
             note(f"$ {line}\n{text}\n")
             return text
 
@@ -288,11 +532,82 @@ def main():
         check("unknown graph is one line", text.startswith("meshloop inspect: ") and "\n" not in text, text)
         text = answer("/meshloop status --graph")
         check("flag-shaped graph id refused", text.startswith("meshloop status: ") and "no graph id" in text, text)
-        text = answer("/meshloop accept 1")
+        text = answer("/meshloop frobnicate 1")
         check("no other verb", text.startswith("meshloop: ") and "no verb" in text, text)
         text = answer("/meshloop")
         check("bare /meshloop answers its usage", text.startswith("meshloop: /meshloop doctor"), text)
+
+        # Read-only additions (#136): the run report and the plan view.
+        text = answer("/meshloop report")
+        check(
+            "report names what was dispatched and what was not",
+            text.startswith(f"meshloop report: graph {GRAPH} ")
+            and "dispatched: fixture (model_ref fixture-model, 1 attempt)" in text
+            and "not exercised: none of the 1 selected" in text
+            and "otherwise it is the entry's label" in text,
+            text,
+        )
+        text = answer("/meshloop review-plan --plan plan.json")
+        check(
+            "review-plan without a decision only shows the plan",
+            text.startswith(f"meshloop review-plan: plan plan.json, graph {GRAPH}, 2 nodes, plan state PlanAccepted")
+            and "#2, after #1: second" in text
+            and "--accept --as <your-name>" in text,
+            text,
+        )
+
+        # (a) Every write command refuses while meshloop.write_commands is off.
+        writes = {
+            "plan": "/meshloop plan add a widget",
+            "review-plan": "/meshloop review-plan --plan plan.json --accept --as person-one",
+            "run": "/meshloop run --plan plan.json",
+            "resume": f"/meshloop resume {GRAPH}",
+            "cancel": f"/meshloop cancel {GRAPH}",
+            "accept": f"/meshloop accept --task 1 --as person-one --graph {GRAPH}",
+            "integrate": f"/meshloop integrate --graph {GRAPH} --into master --accept-integrate",
+        }
+        for verb, line in writes.items():
+            text = answer(line)
+            check(
+                f"write commands off: {verb} refuses in one line",
+                text.startswith(f"meshloop {verb}: {WRITE_REFUSED}") and "\n" not in text,
+                text,
+            )
+
+        # (c) The :tool veto. A real tool call needs a model turn, so hook-check runs
+        # the installed hook function on a synthetic eval call; the form is never run.
+        vetoed = {
+            "shell string": '(sh "meshloop accept --task 1 --as me")',
+            "path and flags": '(sh "cd /r && /opt/bin/meshloop --json integrate --graph g --into main")',
+            "argv list": '(sb-ext:run-program "/x/target/debug/meshloop" (list "review-plan" "--accept"))',
+            "quoted argv": "(uiop:run-program '(\"meshloop\" \"meshloop:accept\" \"--task\" \"1\"))",
+            "MCP tool name": '(mcp-call "meshloop_integrate" (list))',
+            "the slash line": '(post "/api/gateway/slash" "{\\"line\\":\\"/meshloop accept --task 1 --as me\\"}")',
+            "the cell's own code": '(meshloop::accept-of "s" "--task 1 --as me")',
+        }
+        for name, form in vetoed.items():
+            text = answer(f"/meshloop hook-check {form}")
+            check(
+                f"tool veto refuses: {name}",
+                text.startswith("meshloop hook-check: refused: ERROR: refused by nodecode-meshloop")
+                and "hook on this organism's :tool chain" in text,
+                text,
+            )
+        passed = {
+            "a read verb": '(sh "meshloop status --json")',
+            "the eval verbs": "(list (meshloop:status) (meshloop:report))",
+            "the word in a message": "(sh \"git commit -m 'accept and integrate the meshloop docs'\")",
+        }
+        for name, form in passed.items():
+            text = answer(f"/meshloop hook-check {form}")
+            check(
+                f"tool veto lets through: {name}",
+                text.startswith("meshloop hook-check: passes") and "hook on this organism's :tool chain" in text,
+                text,
+            )
         check("no write to the repository or meshloop state", snapshot(repo) == before)
+
+        drive_section(answer, organism, home, work, meshloop, Path(args.fixture_harness).resolve())
 
         # Failure lines: each is one line naming the verb, never a condition.
         failures = {

@@ -600,6 +600,7 @@ Windows implementation: `tasklist /FO CSV /NH /FI PID eq <n>` (CSV, not English 
 | `meshloop run --plan <path> --accept-plan [--config] [--worktree-base] [--db] [--allow-live-harness]` | Snapshot+accept plan, then loop `tick` until `Idle`. Exit 0 only for `GraphComplete` or `AwaitingHumanAcceptance` with no Failed/Blocked; 1 otherwise. If `graph_id` already exists: not terminal → refuse, tell operator to `resume`; terminal → refuse (new `graph_id` required). |
 | `meshloop status [--graph <id>]` | Replay event log; print per-node **log** state; annotate reconcile-view; worktree path, HEAD, evidence. Supported **during** `run` (WAL). |
 | `meshloop resume [--graph <id>] [--retry]` | Append crash-fail events (and `RetryAuthorized` iff `--retry`), then **loop `tick` until `Idle`**: Accepted merge, Pending promotion, Ready dispatch — not only Ready nodes. Same exit-code map as `run`. |
+| `meshloop resume --detach --graph <id> [--retry\|--restart]` | The same resume, run by a detached driver as `run --detach` starts one; answers at once with the driver log (#136). Refused while a driver for that graph is alive. |
 | `meshloop cancel [--graph <id>] [--task <id>]` | Legal `Cancel`; kill only if `LiveCheck::Live`; no merge. Idempotent. |
 | `meshloop inspect --task <id> [--graph <id>]` | Diffstat, evidence (including failed rows), attempt list, worktree path. |
 | `meshloop accept --task <id> --as <identity>` | Any tier at `AwaitingReview`. `--as` must be non-empty. |
