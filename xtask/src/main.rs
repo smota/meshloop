@@ -1,6 +1,7 @@
 //! Repository checks, session-control-plane smoke, session pack, and publish dry-run.
 
 #![forbid(unsafe_code)]
+mod learning_bench;
 mod system1_bench;
 mod workspace_lifecycle_smoke;
 
@@ -28,9 +29,10 @@ fn main() -> ExitCode {
         Some("bench-dag") => bench_dag(root),
         Some("bench-mutation") => bench_mutation(root),
         Some("bench-world-s") => bench_world_s(root, &args[1..]),
+        Some("bench-learning") => learning_bench::bench_learning(root, &args[1..]),
         _ => {
             eprintln!(
-                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-system1|bench-dag|bench-mutation|bench-world-s"
+                "Usage: cargo run -p xtask -- check|smoke|bundle|live|publish-dry|bench|bench-system1|bench-dag|bench-mutation|bench-world-s|bench-learning"
             );
             ExitCode::from(2)
         }
