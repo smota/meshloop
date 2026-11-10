@@ -2813,16 +2813,23 @@ fn bench(root: &Path) -> ExitCode {
             let out = Command::new("ps")
                 .args(["-A", "-o", "pid=,stat=,comm=,args="])
                 .output();
-            let survivors = out
-                .ok()
-                .map(|o| {
-                    live_processes_named(&String::from_utf8_lossy(&o.stdout), "fixture_harness")
-                })
-                .unwrap_or_default();
-            for line in &survivors {
-                eprintln!("bench: orphan fixture_harness process: {line}");
+            match out {
+                Ok(o) if o.status.success() => {
+                    let survivors = live_processes_named(
+                        &String::from_utf8_lossy(&o.stdout),
+                        "fixture_harness",
+                    );
+                    for line in &survivors {
+                        eprintln!("bench: orphan fixture_harness process: {line}");
+                    }
+                    survivors.len()
+                }
+                // Fail closed: an unreadable process table cannot prove zero orphans.
+                _ => {
+                    eprintln!("bench: cannot list processes with `ps`; counting as an orphan");
+                    1
+                }
             }
-            survivors.len()
         }
     };
 
