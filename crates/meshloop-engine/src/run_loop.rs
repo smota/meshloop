@@ -2353,7 +2353,14 @@ impl<'a> RunLoop<'a> {
         restart: bool,
     ) -> Result<IdleReason, OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
-        self.require_owned_root(graph_id)?;
+        // On Windows a held fence also blocks this unfenced registry read; it is
+        // the same busy stop as the fenced tick, before any state changes.
+        match self.require_owned_root(graph_id) {
+            Err(OrchestratorError::Store(StoreError::FenceBusy)) => {
+                return Ok(IdleReason::FenceBusy);
+            }
+            result => result?,
+        }
         if retry && restart {
             return Err(OrchestratorError::Illegal(
                 "use either --retry or --restart, not both".into(),

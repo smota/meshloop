@@ -34,6 +34,45 @@ fn refused() -> StoreError {
 fn io_refused(_: impl std::fmt::Display) -> StoreError {
     StoreError::Io("workspace local operation failed".into())
 }
+/// True when `error` reports that another holder has the fence. Windows locks are
+/// mandatory: another handle's lock or read of the held file fails with
+/// ERROR_LOCK_VIOLATION (33), and an open refused by a share mode fails with
+/// ERROR_SHARING_VIOLATION (32). Every other error stays a hard error.
+fn is_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(32 | 33))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+/// `FenceBusy` for fence contention, otherwise the generic local I/O failure.
+fn contended_or_io(error: std::io::Error) -> StoreError {
+    if is_contention(&error) {
+        StoreError::FenceBusy
+    } else {
+        io_refused(error)
+    }
+}
+/// Runs `attempt` until it is not `FenceBusy`, waiting briefly for another short
+/// holder (bounded: 20 tries, 1 second), then fails closed with `FenceBusy`.
+fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    let mut tries = 0;
+    loop {
+        match attempt() {
+            Err(StoreError::FenceBusy) if tries < 19 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
 
 pub(crate) fn native_identity(path: &Path) -> Result<NativeIdentity, StoreError> {
     let id = file_id::get_file_id(path).map_err(|_| refused())?;
@@ -60,6 +99,7 @@ fn regular_entry(path: &Path, directory: bool) -> Result<(), StoreError> {
 fn lock(file: &File) -> Result<(), StoreError> {
     file.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => StoreError::FenceBusy,
+        std::fs::TryLockError::Error(error) if is_contention(&error) => StoreError::FenceBusy,
         std::fs::TryLockError::Error(_) => refused(),
     })
 }
@@ -134,11 +174,11 @@ impl GitRepositoryIdentity {
                         .read(true)
                         .write(true)
                         .open(&registry_path)
-                        .map_err(io_refused)?,
+                        .map_err(contended_or_io)?,
                     false,
                 )
             }
-            Err(error) => return Err(io_refused(error)),
+            Err(error) => return Err(contended_or_io(error)),
         };
         after_open(&registry_path)?;
         acquire_lock(&file)?;
@@ -215,6 +255,7 @@ pub(crate) struct RegistryView {
     pub roots: BTreeMap<RootAlias, RegistryRoot>,
 }
 /// Reads an existing fence manifest. Does not create, lock, or rewrite it.
+/// On Windows another holder's lock blocks this read, reported as `FenceBusy`.
 pub(crate) fn read_registry(path: &Path) -> Result<Option<RegistryView>, StoreError> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -222,7 +263,7 @@ pub(crate) fn read_registry(path: &Path) -> Result<Option<RegistryView>, StoreEr
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => return Err(refused()),
         Ok(_) => {}
     }
-    let mut file = File::open(path).map_err(io_refused)?;
+    let mut file = File::open(path).map_err(contended_or_io)?;
     let manifest = read_manifest(&mut file)?;
     if manifest.version != 1 {
         return Err(refused());
@@ -252,7 +293,7 @@ fn read_manifest(file: &mut File) -> Result<Manifest, StoreError> {
     // Bound malformed local state before parsing; registry roots are deliberately small.
     file.take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(io_refused)?;
+        .map_err(contended_or_io)?;
     if bytes.len() > 1024 * 1024 {
         return Err(refused());
     }
@@ -506,20 +547,9 @@ impl meshloop_engine::workspace::RunOwnership for RunLoopOwnershipAccess {
     fn acquire(
         &self,
     ) -> Result<Box<dyn meshloop_engine::workspace::RunOwnershipLease + '_>, StoreError> {
-        // The fence is exclusive and non-blocking. Wait briefly for another short
-        // holder (bounded: 20 tries, 1 second), then fail closed.
+        // The fence is exclusive and non-blocking; `retry_busy` bounds the wait.
         let identity = GitRepositoryIdentity::new(&self.git);
-        let mut tries = 0;
-        let lease = loop {
-            match identity.acquire(&self.checkout, &self.ledger) {
-                Ok(lease) => break lease,
-                Err(StoreError::FenceBusy) if tries < 19 => {
-                    tries += 1;
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) => return Err(error),
-            }
-        };
+        let lease = retry_busy(|| identity.acquire(&self.checkout, &self.ledger))?;
         Ok(Box::new(RunLoopLease {
             lease,
             alias: None,
@@ -535,7 +565,8 @@ impl meshloop_engine::workspace::RunOwnership for RunLoopOwnershipAccess {
         ]);
         let output = bounded_stdout(command, Duration::from_secs(10))?;
         let common = PathBuf::from(std::str::from_utf8(&output).map_err(|_| refused())?.trim());
-        let Some(registry) = read_registry(&common.join(REGISTRY))? else {
+        // Windows: a held fence blocks this unlocked read, so wait as `acquire` does.
+        let Some(registry) = retry_busy(|| read_registry(&common.join(REGISTRY)))? else {
             return Ok(false);
         };
         Ok(registry

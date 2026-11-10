@@ -2913,3 +2913,90 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
         Some(third)
     );
 }
+
+#[test]
+fn fence_contention_is_busy_and_other_io_errors_stay_hard() {
+    use std::io::{Error, ErrorKind};
+    assert!(is_contention(&Error::from(ErrorKind::WouldBlock)));
+    assert!(matches!(
+        contended_or_io(Error::from(ErrorKind::WouldBlock)),
+        StoreError::FenceBusy
+    ));
+    for kind in [
+        ErrorKind::NotFound,
+        ErrorKind::PermissionDenied,
+        ErrorKind::Other,
+    ] {
+        assert!(!is_contention(&Error::from(kind)), "{kind:?}");
+        assert!(matches!(
+            contended_or_io(Error::from(kind)),
+            StoreError::Io(_)
+        ));
+    }
+    // ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33) are contention
+    // only on Windows; elsewhere those raw codes are unrelated errors.
+    for code in [32, 33] {
+        assert_eq!(
+            is_contention(&Error::from_raw_os_error(code)),
+            cfg!(windows),
+            "{code}"
+        );
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED (5) is not contention.
+        assert!(!is_contention(&Error::from_raw_os_error(5)));
+    }
+}
+
+#[test]
+fn retry_busy_bounds_the_wait_and_passes_other_results_through() {
+    let mut calls = 0;
+    let busy: Result<(), _> = retry_busy(|| {
+        calls += 1;
+        Err(StoreError::FenceBusy)
+    });
+    assert!(matches!(busy, Err(StoreError::FenceBusy)));
+    assert_eq!(calls, 20);
+    let mut calls = 0;
+    let done = retry_busy(|| {
+        calls += 1;
+        if calls < 3 {
+            Err(StoreError::FenceBusy)
+        } else {
+            Ok(calls)
+        }
+    });
+    assert_eq!(done.unwrap(), 3);
+    let mut calls = 0;
+    let hard: Result<(), _> = retry_busy(|| {
+        calls += 1;
+        Err(StoreError::Io("x".into()))
+    });
+    assert!(matches!(hard, Err(StoreError::Io(_))));
+    assert_eq!(calls, 1);
+}
+
+/// A second acquire against a held fence is busy, never a generic I/O error. The
+/// unfenced registry read succeeds where locks are advisory and is busy where they
+/// are mandatory (Windows).
+#[test]
+fn held_fence_reports_busy_to_other_acquirers_and_readers() {
+    let f = Fixture::new();
+    let held = f.lease();
+    let second = GitRepositoryIdentity::new("git").acquire(&f.repo, &f.ledger);
+    assert!(matches!(second, Err(StoreError::FenceBusy)));
+    let read = read_registry(&held.registry_path);
+    if cfg!(windows) {
+        assert!(matches!(read, Err(StoreError::FenceBusy)));
+    } else {
+        assert!(read.unwrap().is_some());
+    }
+    drop(held);
+    assert!(
+        read_registry(&f.repo.join(".git").join(REGISTRY))
+            .unwrap()
+            .is_some()
+    );
+    drop(f.lease());
+}
