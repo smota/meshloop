@@ -77,8 +77,10 @@ lists them. How the decisions in ADR 0038 were built:
   posts. It was tested by running the installed hook function on synthetic calls, since a
   real tool call needs a model turn.
 - **Run report.** `/meshloop report` lists the (harness, `model_ref`) pairs a run's attempts
-  recorded and the selected harnesses it did not exercise. `model_ref` stays a label until
-  [#134](https://github.com/smota/meshloop/issues/134)'s model list passes it to a harness.
+  recorded and the selected harnesses it did not exercise. Since
+  [#134](https://github.com/smota/meshloop/issues/134), `model_ref` is the model meshloop
+  dispatched when the operator's template passes it (a `models` list and
+  `--model {model_ref}`); otherwise it is the entry's label.
 
 ## Platform
 

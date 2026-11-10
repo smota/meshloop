@@ -41,6 +41,7 @@ CELL = Path(__file__).resolve().parent.parent
 SESSION = "s-MESHLOOPCELL"
 GRAPH = "g135"
 DRIVE_GRAPH = "g136"
+SECOND_GRAPH = "g136b"
 CANCEL_GRAPH = "g136c"
 CHECKS = []
 WRITE_REFUSED = "refused: write commands are off"
@@ -67,7 +68,7 @@ def git(repo, *args):
     return out.stdout
 
 
-def make_fixture(repo, fixture_harness, invoke=None, graph=GRAPH, nodes=None):
+def make_fixture(repo, fixture_harness, invoke=None, graph=GRAPH, nodes=None, extra=None):
     """A git repository whose meshloop.toml runs the fixture harness with
     INVOKE, and a committed plan.json for GRAPH."""
     repo.mkdir(parents=True)
@@ -98,6 +99,8 @@ model_tier = "top"
         {"id": 2, "description": "second", "depends_on": [1], "tier": None},
     ]
     (repo / "plan.json").write_text(json.dumps({"graph_id": graph, "nodes": nodes}))
+    for name, text in (extra or {}).items():
+        (repo / name).write_text(text)
     git(repo, "add", ".")
     git(repo, "commit", "--quiet", "-m", "seed")
 
@@ -282,7 +285,10 @@ def drive_section(answer, organism, home, work, meshloop, fixture_harness):
     planner_repo = work / "planner"
     make_fixture(planner_repo, fixture_harness, invoke=["--emit-graph"])
     drive_repo = work / "drive"
-    make_fixture(drive_repo, fixture_harness, graph=DRIVE_GRAPH)
+    second = json.dumps(
+        {"graph_id": SECOND_GRAPH, "nodes": [{"id": 1, "description": "another", "depends_on": [], "tier": None}]}
+    )
+    make_fixture(drive_repo, fixture_harness, graph=DRIVE_GRAPH, extra={"plan-second.json": second})
     cancel_repo = work / "cancel"
     make_fixture(
         cancel_repo,
@@ -333,6 +339,24 @@ def drive_section(answer, organism, home, work, meshloop, fixture_harness):
     check("the detached run reached the gate", states is not None)
     text = answer(f"/meshloop inspect {DRIVE_GRAPH}", d)
     check("inspect shows the gate", "#1 AwaitingReview, waiting for acceptance" in text, text)
+    text = answer(f"/meshloop accept --task 1 --as you --graph {DRIVE_GRAPH}", d)
+    check("a placeholder identity refuses", text.startswith('meshloop accept: "you" is a placeholder'), text)
+    text = answer(f"/meshloop accept --task 1 --as <your-name> --graph {DRIVE_GRAPH}", d)
+    check("the hint's own placeholder refuses", "is a placeholder" in text, text)
+    # A second run waiting for acceptance: accept without --graph must ask which.
+    answer("/meshloop review-plan --plan plan-second.json --accept --as person-one", d)
+    answer("/meshloop run --plan plan-second.json", d)
+    waiting = wait_until(
+        "the second run to await review",
+        lambda: (node_states(meshloop, drive_repo, SECOND_GRAPH)[0].get(1) == "AwaitingReview") or None,
+    )
+    check("the second run reached the gate", waiting is not None)
+    text = answer("/meshloop accept --task 1 --as person-one", d)
+    check(
+        "accept without --graph refuses when two runs wait",
+        text.startswith("meshloop accept: 2 runs wait for acceptance") and "--graph" in text,
+        text,
+    )
     text = answer(f"/meshloop accept --task 1 --graph {DRIVE_GRAPH}", d)
     check("accept without --as refuses", text.startswith("meshloop accept: names no identity"), text)
     check("nothing was accepted", node_states(meshloop, drive_repo, DRIVE_GRAPH)[0].get(1) == "AwaitingReview")
@@ -377,9 +401,12 @@ def drive_section(answer, organism, home, work, meshloop, fixture_harness):
     text = answer(f"/meshloop integrate --graph {DRIVE_GRAPH} --into {branch} --accept-integrate", d)
     check("integrate lands on the branch", text.startswith(f"meshloop integrate: graph {DRIVE_GRAPH} landed on {branch}; 2 Integrated"), text)
     check("the branch moved", git(drive_repo, "rev-parse", "HEAD").strip() != head_before)
-    worktrees = git(drive_repo, "worktree", "list", "--porcelain").count("worktree ")
+    worktrees = [
+        line for line in git(drive_repo, "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ") and f"/{DRIVE_GRAPH}/" in line
+    ]
     branches = git(drive_repo, "for-each-ref", "--format=%(refname)", f"refs/heads/meshloop/{DRIVE_GRAPH}")
-    check("the landed run left no worktree or branch (auto-reclaim)", worktrees == 1 and not branches.strip(), f"{worktrees} {branches}")
+    check("the landed run left no worktree or branch (auto-reclaim)", not worktrees and not branches.strip(), f"{worktrees} {branches}")
     text = answer(f"/meshloop report {DRIVE_GRAPH}", d)
     check(
         "report after landing",
@@ -398,6 +425,12 @@ def drive_section(answer, organism, home, work, meshloop, fixture_harness):
     )
     check("the slow attempt is running", live is not None)
     check("its harness process is there before cancel", any("fixture_harness" in c for _, c in processes_in(cancel_repo)), json.dumps(processes_in(cancel_repo)))
+    text = answer(f"/meshloop resume {CANCEL_GRAPH}", c)
+    check(
+        "resume refuses while the run's driver is alive",
+        text.startswith(f"meshloop resume: refused: a driver is running for {CANCEL_GRAPH}") and "\n" not in text,
+        text,
+    )
     text = answer(f"/meshloop cancel {CANCEL_GRAPH}", c)
     check(
         "cancel answers what is left",
@@ -511,7 +544,7 @@ def main():
             text.startswith(f"meshloop report: graph {GRAPH} ")
             and "dispatched: fixture (model_ref fixture-model, 1 attempt)" in text
             and "not exercised: none of the 1 selected" in text
-            and "model_ref is the label" in text,
+            and "otherwise it is the entry's label" in text,
             text,
         )
         text = answer("/meshloop review-plan --plan plan.json")
@@ -519,7 +552,7 @@ def main():
             "review-plan without a decision only shows the plan",
             text.startswith(f"meshloop review-plan: plan plan.json, graph {GRAPH}, 2 nodes, plan state PlanAccepted")
             and "#2, after #1: second" in text
-            and "--accept --as YOU" in text,
+            and "--accept --as <your-name>" in text,
             text,
         )
 

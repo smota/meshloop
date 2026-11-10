@@ -56,6 +56,7 @@
         { "path": "data.nodes[].waiting_for", "type": "string?" },
         { "path": "data.nodes[].description", "type": "string" },
         { "path": "data.nodes[].live", "type": "string?" },
+        { "path": "data.awaiting_acceptance", "type": "array" },
         { "path": "data.driver", "type": "string?", "optional": true }
       ]
     },
@@ -141,6 +142,13 @@
         { "path": "data.status", "type": "string" },
         { "path": "data.detached", "type": "boolean" },
         { "path": "data.driver_log", "type": "string" }
+      ]
+    },
+    "resume_driver_alive": {
+      "argv": ["resume", "--detach", "--graph", "gcell"],
+      "ok": false,
+      "fields": [
+        { "path": "error", "type": "string" }
       ]
     },
     "cancel": {

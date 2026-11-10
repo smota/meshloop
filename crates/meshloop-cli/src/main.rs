@@ -992,6 +992,15 @@ fn cmd_run(
         eprintln!("plan '{graph_id}' was declined; meshloop:review-plan --adjust, then --accept");
         return ExitCode::from(2);
     }
+    if existing_state.is_some() && driver_alive(&saga, &graph_id) {
+        let message = driver_running_message(&graph_id);
+        if json {
+            println!("{}", json_out::err("meshloop:run", origin, message));
+        } else {
+            eprintln!("{message}");
+        }
+        return ExitCode::from(2);
+    }
     if !accept_plan && existing_state != Some(PlanState::PlanAccepted) {
         eprintln!(
             "Plan requires human acceptance before execution (ADR 0009). \
@@ -1248,6 +1257,9 @@ fn cmd_resume_detached(
             origin: origin.clone(),
         },
         |saga| match saga.resolve_graph_id(Some(&gid)) {
+            Ok(_) if driver_alive(saga, &gid) => {
+                read_error(command, origin.clone(), json, driver_running_message(&gid))
+            }
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => read_error(command, origin.clone(), json, format!("{e:?}")),
         },
@@ -1623,6 +1635,7 @@ fn cmd_status(
                             "blocked_by": n.blocked_by.iter().map(|d| d.0).collect::<Vec<_>>(),
                         })).collect::<Vec<_>>(),
                     });
+                    data["awaiting_acceptance"] = serde_json::json!(awaiting_acceptance(saga));
                     attach_driver_json(&mut data, saga, s);
                     println!("{}", json_out::ok("meshloop:status", origin.clone(), data));
                 } else {
@@ -1822,6 +1835,39 @@ fn cmd_cancel(
             }
         }
     })
+}
+
+/// Whether a driver for `graph_id` is alive now: a second one would tick the same graph.
+fn driver_alive(saga: &RunLoop<'_>, graph_id: &str) -> bool {
+    saga.status(graph_id).ok().is_some_and(|status| {
+        driver_liveness::observe(saga.store, saga.processes, &status)
+            .is_some_and(|report| report.label == "alive")
+    })
+}
+
+fn driver_running_message(graph_id: &str) -> String {
+    format!(
+        "a driver is running for {graph_id}; it merges accepted nodes itself. \
+         Follow it with meshloop inspect --graph {graph_id}"
+    )
+}
+
+/// Graph ids of the runs with a node waiting for `meshloop accept`.
+fn awaiting_acceptance(saga: &RunLoop<'_>) -> Vec<String> {
+    saga.store
+        .list_runs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| {
+            saga.status(&row.graph_id).ok().is_some_and(|status| {
+                status
+                    .nodes
+                    .iter()
+                    .any(|node| node.state == TaskState::AwaitingReview)
+            })
+        })
+        .map(|row| row.graph_id)
+        .collect()
 }
 
 fn attach_driver_json(data: &mut serde_json::Value, saga: &RunLoop<'_>, status: &RunStatus) {

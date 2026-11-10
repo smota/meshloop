@@ -511,8 +511,8 @@ IDENTITY at TIME\"), or NIL when there is none."
       (when (> (length nodes) *node-lines*)
         (format out "~%  ... ~d more; `meshloop inspect --attempts --graph ~a --json' lists them all"
                 (- (length nodes) *node-lines*) graph))
-      (format out "~%  model_ref is the label meshloop recorded for each attempt; it names the model ~
-                   that ran only when the harness's invoke template passes {model_ref} (#134)"))))
+      (format out "~%  model_ref is the model meshloop dispatched when the harness's invoke template ~
+                   passes {model_ref} (a models list, #134); otherwise it is the entry's label"))))
 
 ;;; --- the verbs -----------------------------------------------------------------------
 

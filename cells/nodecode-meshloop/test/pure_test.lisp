@@ -149,18 +149,32 @@ define-cell) are nodecode's and are only read.")
                 ("slash line" "(post \"/api/gateway/slash\" \"{\\\"line\\\":\\\"/meshloop accept --task 1\\\"}\")")
                 ("prefixed slash" "(post \"/meshloop:integrate\")")
                 ("the cell's own code" "(meshloop::accept-of \"s\" \"--task 1 --as me\")")
-                ("the cell's package by full name" "(nodecode-meshloop::run-slash \"accept\" \"s\")")))
+                ("the cell's package by full name" "(nodecode-meshloop::run-slash \"accept\" \"s\")")
+                ;; Review round 1 bypasses.
+                ("\\u escape" "(sh \"meshloop \\u0061ccept --task 1\")")
+                ("%XX escape" "(http-get \"/x?cmd=meshloop%20%61ccept\")")
+                ("empty quotes inside the name" "(sh \"m\\\"\\\"eshloop accept --task 1\")")
+                ("single quotes inside the name" "(sh \"mesh''loop accept --task 1\")")
+                ("backslash inside the name" "(sh \"me\\\\shloop accept --task 1\")")
+                ("verb piped into xargs" "(sh \"echo accept | xargs meshloop\")")
+                ("executable in a variable" "(sh \"B=meshloop; $B accept --task 1\")")
+                ("quoted variable" "(sh \"x=meshloop && \\\"$x\\\" integrate --graph g\")")
+                ("cargo run -p" "(sh \"cargo run -q -p meshloop-cli -- review-plan --accept\")")
+                ("find-symbol by name" "(funcall (find-symbol \"ACCEPT-OF\" \"MESHLOOP\") \"s\" \"\")")
+                ("intern in the cell's package" "(funcall (intern \"RUN-SLASH\" :nodecode-meshloop) \"accept\" \"s\")")
+                ("in-package" "(in-package #:meshloop) (run-slash \"accept --task 1\" \"s\")")))
   (check (format nil "veto refuses: ~a" (first case)) (veto (second case)) (second case)))
 
 (dolist (case '(("a read verb" "(sh \"meshloop status --json\")")
                 ("the eval verbs" "(list (meshloop:status) (meshloop:report))")
                 ("the words in a message" "(sh \"git commit -m 'accept and integrate the meshloop docs'\")")
-                ("a verb too far from the executable" "(sh \"meshloop status a b c d e f g accept\")")
                 ("another program's accept" "(sh \"gh pr review --approve; accept-terms\")")
                 ("meshloop doctor then git" "(sh \"meshloop doctor && git status\")")
-                ;; A known gap, kept here so it is not mistaken for coverage: the
-                ;; verb past a flag's value is not read. The veto is a speed bump.
-                ("KNOWN GAP: a verb after a flag value" "(sh (format nil \"meshloop ~a --task 1\" \"accept\"))")))
+                ("a status line, then a commit" "(sh \"meshloop status; git commit -m accept\")")
+                ("find-package of another package" "(sh \"meshloop status\") (find-package :uiop)")
+                ;; A known gap, kept here so it is not mistaken for coverage: a
+                ;; command assembled from pieces at run time. The veto reads text.
+                ("KNOWN GAP: a command assembled at run time" "(sh (format nil \"meshloop ~a --task 1\" \"accept\"))")))
   (check (format nil "veto lets through: ~a" (first case)) (null (veto (second case)))
          (veto (second case))))
 
@@ -173,6 +187,10 @@ define-cell) are nodecode's and are only read.")
          (nodecode-meshloop::gated-call "eval" args))
   (check "veto refuses an MCP tool by its name"
          (nodecode-meshloop::gated-call "mcp__meshloop__meshloop_accept" (make-hash-table)))
+  (check "veto refuses an MCP tool by its last __ segment on the meshloop server"
+         (nodecode-meshloop::gated-call "mcp__meshloop__review_plan" (make-hash-table)))
+  (check "veto lets another server's accept tool through"
+         (null (nodecode-meshloop::gated-call "mcp__github__accept" (make-hash-table))))
   (check "veto lets an unrelated tool through"
          (null (nodecode-meshloop::gated-call "read_file" (make-hash-table)))))
 
@@ -196,6 +214,11 @@ define-cell) are nodecode's and are only read.")
                 ("--as with no value" "--task 1 --as")
                 ("a flag as the identity" "--as --graph")
                 ("a placeholder" "--as <you>")
+                ("the hint's placeholder" "--as <your-name>")
+                ("you" "--as you")
+                ("ME" "--as ME")
+                ("Identity" "--as Identity")
+                ("name" "--as name")
                 ("non-ASCII" "--as sámuel")
                 ("too long" "--as aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
   (pure-test::check (format nil "identity refused: ~a" (first case))

@@ -73,24 +73,27 @@ which is the default.
 | In the shell | Runs |
 |---|---|
 | `/meshloop plan [--out FILE] OBJECTIVE` | `meshloop plan --objective OBJECTIVE --out FILE` (default `meshloop-plan.json`). Starts nothing |
-| `/meshloop review-plan [--plan FILE] --accept\|--decline\|--adjust --as YOU [--reason TEXT]` | `meshloop review-plan` with that decision and `--as YOU`. `--adjust` needs `--reason` |
+| `/meshloop review-plan [--plan FILE] --accept\|--decline\|--adjust --as <your-name> [--reason TEXT]` | `meshloop review-plan` with that decision and `--as <your-name>`. `--adjust` needs `--reason` |
 | `/meshloop run [--plan FILE]` | `meshloop run --plan FILE --detach`, then points to `inspect`. Never `--accept-plan` |
-| `/meshloop resume [GRAPH] [--retry\|--restart]` | `meshloop resume --detach --graph GRAPH` (newest run without GRAPH) |
+| `/meshloop resume [GRAPH] [--retry\|--restart]` | `meshloop resume --detach --graph GRAPH` (newest run without GRAPH). Refuses while the graph's driver is alive |
 | `/meshloop cancel [GRAPH] [--task N]` | `meshloop cancel --graph GRAPH`, then reports live attempts, the driver and the worktrees meshloop keeps |
-| `/meshloop accept --task N --as YOU [--graph GRAPH]` | `meshloop accept --task N --as YOU --graph GRAPH`, then reads the acceptance back from `inspect --attempts` |
+| `/meshloop accept --task N --as <your-name> [--graph GRAPH]` | `meshloop accept --task N --as <your-name> --graph GRAPH`, then reads the acceptance back from `inspect --attempts`. Without `--graph`: the one run waiting for acceptance, a refusal when several are |
 | `/meshloop integrate --graph GRAPH --into BRANCH [--accept-integrate]` | Without `--accept-integrate`: names the integrate worktree to review and lands nothing. With it: `meshloop integrate --graph GRAPH --into BRANCH --accept-integrate` |
 
 The human gates are unchanged:
 
 - **Identity.** `accept` and every `review-plan` decision need `--as IDENTITY` typed in that
   command, and pass it to meshloop as `--as`. There is no default identity, no setting that
-  supplies one, and the session id is never used. Without `--as` the command refuses. The
-  identity is a claim meshloop records; nothing authenticates it (ADR 0038, Consequences).
+  supplies one, and the session id is never used. Without `--as` the command refuses, and so
+  does a placeholder (`you`, `me`, `identity`, `name`, `<your-name>`, in any case): type your
+  own name. The identity is a claim meshloop records; nothing authenticates it (ADR 0038, Consequences).
 - **Plan review.** `review-plan` without a decision only shows the plan. The decision is a
   second command the person types. `run` never passes `--accept-plan`, so an unreviewed plan
   is refused by meshloop.
 - **Nothing follows on its own.** `run` and `resume` start a detached driver and return. Each
-  node then waits for `accept`; nothing accepts, resumes or integrates automatically.
+  node then waits for `accept`; nothing accepts, resumes or integrates automatically. While
+  a run's driver is alive it merges accepted nodes itself, so `resume` refuses then, and
+  meshloop refuses a second `run --detach` or `resume --detach` for that graph too.
 - **Integrate is explicit.** `--accept-integrate` must be typed after the integrate worktree
   has been pointed out.
 
@@ -107,9 +110,9 @@ meshloop review-plan: graph g136, accept as person-one: PlanAccepted
   next: /meshloop run --plan plan.json starts it detached; nothing starts on its own
 
 meshloop run: graph g136, driver started detached (running); nothing follows on its own
-  follow it with /meshloop inspect g136; a node that waits for acceptance takes /meshloop accept --task N --as YOU --graph g136, then /meshloop resume g136
+  follow it with /meshloop inspect g136; a node that waits for acceptance takes /meshloop accept --task N --as <your-name> --graph g136. While this driver is alive it merges accepted nodes itself; once /meshloop status g136 shows it exited, /meshloop resume g136 starts the next
 
-meshloop accept: names no identity. Type who decides after --as, in this command: /meshloop accept --task N --as YOU [--graph GRAPH]
+meshloop accept: names no identity. Type who decides after --as, in this command: /meshloop accept --task N --as <your-name> [--graph GRAPH]
 
 meshloop accept: task 1 of graph g136 accepted as person-one; meshloop recorded "accepted by person-one at 1794331730"
   next: /meshloop resume g136 merges it; nothing resumes on its own
@@ -118,7 +121,7 @@ meshloop report: graph g136 completed, plan PlanAccepted, 2 nodes (2 Integrated)
   dispatched: fixture (model_ref fixture-model, 2 attempts)
   not exercised: none of the 1 selected
   #1 Integrated: fixture/fixture-model IntegrationOwnerMerge, exit 0; accepted by person-one at 1794331730
-  model_ref is the label meshloop recorded for each attempt; it names the model that ran only when the harness's invoke template passes {model_ref} (#134)
+  model_ref is the model meshloop dispatched when the harness's invoke template passes {model_ref} (a models list, #134); otherwise it is the entry's label
 ```
 
 A summary lists 12 nodes at most and counts the rest. Node descriptions, notes and worker
@@ -129,20 +132,34 @@ worker text.
 
 `/meshloop report` reads `meshloop inspect --attempts --json` and `meshloop doctor --json`. It
 lists each (harness, `model_ref`) pair that an attempt recorded, and each selected harness with
-no attempt in that run, with doctor's dispatchability. `model_ref` is the label meshloop
-recorded for the attempt. It names the model that actually ran only when the harness's invoke
-template passes `{model_ref}`, which [#134](https://github.com/smota/meshloop/issues/134)'s
-model list does. Until then it is a label, not evidence of the model.
+no attempt in that run, with doctor's dispatchability. Since
+[#134](https://github.com/smota/meshloop/issues/134), a harness entry may list `models`, and
+the router substitutes each one into `{model_ref}`. When the operator's invoke template passes
+it (for example `--model {model_ref}`), `model_ref` is the model meshloop dispatched.
+Otherwise it is the entry's label and the CLI runs its own default model.
 
 ### The `:tool` veto
 
 ADR 0038 makes accept, review-plan and integrate operator-typed slash commands, never
-model-callable. The cell installs one hook on nodecode's `:tool` point. It refuses an organism
-tool call when any string in the call's arguments runs `meshloop accept`, `review-plan` or
-`integrate`: a shell string or an argv list naming the `meshloop` executable (any path, with
-flags before the verb, or the `meshloop:accept` form), the MCP tools `meshloop_accept`,
-`meshloop_review_plan` and `meshloop_integrate`, the `/meshloop accept` slash line, or this
-cell's own code reached through `meshloop::`. The refusal is recorded as the call's failure.
+model-callable. The cell installs one hook on nodecode's `:tool` point. It reads every string
+in a tool call's arguments as written and with `\uXXXX` and `%XX` decoded, and refuses the
+call when one of them runs `meshloop accept`, `review-plan` or `integrate`:
+
+- an argv list or token run naming the `meshloop` executable (any path, `meshloop.exe`, the
+  `meshloop:accept` form) and then the verb;
+- a shell line, read with quotes joined and backslashes dropped (`m""eshloop`, `mesh''loop`
+  and `me\shloop` are `meshloop`) and cut at `;`, `&&`, `||`, `&` and newlines with a `|`
+  pipeline kept whole, whose command holds a gated verb anywhere and a meshloop runner: the
+  executable, a `$VARIABLE` in command position, or `meshloop-cli` after `-p`. That covers
+  `echo accept | xargs meshloop` and `B=meshloop; $B accept`;
+- the MCP tools `meshloop_accept`, `meshloop_review_plan` and `meshloop_integrate`, or any
+  tool whose server segment is meshloop and whose last `__` segment is a gated verb;
+- the `/meshloop accept` slash line;
+- this cell's own code, reached through `meshloop::`, or by `find-symbol`, `intern`,
+  `find-package` or `in-package` naming its package.
+
+The meshloop binary takes its verb as the first argument and refuses a flag there, so moving
+the verb after flags is no way around the veto. The refusal is recorded as the call's failure.
 
 This is defence in depth, not a security boundary. The organism's eval has the operator's full
 host authority. A call can build the command from pieces or reach meshloop another way, and
@@ -174,8 +191,8 @@ repository's config added `--permission-mode acceptEdits` to claude, an operator
 
 `integrate --into master --accept-integrate` landed the graph and #142's auto-reclaim
 removed every worktree and `meshloop/g136-live/` branch, so `workspace inventory` listed
-none. The `model_ref` values are configured labels: these templates pass no model, so the
-models actually run are not known (#134).
+none. The `model_ref` values are labels: these templates pass no `{model_ref}`, so each CLI
+ran its own default model and the models actually run are not recorded.
 
 Not exercised: claude was selected and dispatchable, but the router chose codex for both
 Tier3 nodes, so it was not dispatched. agy is not dispatchable because its invoke template is
@@ -273,8 +290,8 @@ list. To read a new field, add it to `contract.json` first.
   a plain SBCL with no nodecode: `sbcl --script cells/nodecode-meshloop/test/pure_test.lisp`.
   It reads every form of the cell's files, compiles each function against stand-in nodecode
   packages and fails on a full compiler warning, then tests the functions that need nothing
-  of nodecode: the `:tool` veto's reading of a call (refusals, pass-throughs and one recorded
-  known gap) and the argument checks of the commands that write (identity, task, graph,
+  of nodecode: the `:tool` veto's reading of a call (every spelling above, the pass-throughs,
+  and a command assembled at run time, which it cannot see) and the argument checks of the commands that write (identity, task, graph,
   branch, plan path, flags). Neither `cargo test` nor `xtask check` runs it.
 
 - **Optional CI:** the `nodecode-cell` job in `.github/workflows/ci.yml` installs a pinned

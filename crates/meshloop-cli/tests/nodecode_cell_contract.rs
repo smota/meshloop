@@ -75,6 +75,8 @@ enum Harness {
     Worker,
     /// The planner: the fixture answers a canned two-node graph.
     Planner,
+    /// Work nodes that take four seconds, so a driver is seen alive.
+    Slow,
 }
 
 struct Fixture {
@@ -126,6 +128,7 @@ model_tier = "top"
                 match harness {
                     Harness::Worker => r#"["--prompt-file", "{prompt_file}"]"#,
                     Harness::Planner => r#"["--emit-graph"]"#,
+                    Harness::Slow => r#"["--prompt-file", "{prompt_file}", "4000"]"#,
                 }
             ),
         )
@@ -339,6 +342,7 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
             "integrate_preview",
             "plan",
             "resume_detached",
+            "resume_driver_alive",
             "review_plan",
             "run_detached",
             "status",
@@ -445,6 +449,51 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
             .as_array()
             .is_some_and(|e| e.iter().any(|e| e["graph_id"] == "gcancel")),
         "{inventory:#}"
+    );
+
+    // A second driver is refused while one is alive: resume and run alike.
+    let slow = Fixture::new(Harness::Slow);
+    for argv in [
+        vec![
+            "review-plan",
+            "--plan",
+            "plan.json",
+            "--accept",
+            "--as",
+            "contract-person",
+        ],
+        vec!["run", "--plan", "plan.json", "--detach"],
+    ] {
+        let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+        assert_eq!(slow.as_cell(&argv)["ok"], true, "{argv:?}");
+    }
+    slow.wait_for("gcell", "the slow driver to be alive", |status| {
+        status["data"]["driver"] == "alive"
+    });
+    let argv = argv_of(&contract, "resume_driver_alive");
+    let refused = slow.as_cell(&argv);
+    assert_case(&contract, "resume_driver_alive", &argv, &refused);
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("a driver is running for gcell")),
+        "{refused:#}"
+    );
+    let rerun: Vec<String> = ["run", "--plan", "plan.json", "--detach"]
+        .map(String::from)
+        .to_vec();
+    let refused = slow.as_cell(&rerun);
+    assert_eq!(refused["ok"], false, "{refused:#}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("a driver is running for gcell")),
+        "{refused:#}"
+    );
+    let status = slow.wait_for_node("gcell", 1, "AwaitingReview");
+    assert_eq!(
+        status["data"]["awaiting_acceptance"],
+        serde_json::json!(["gcell"])
     );
 
     // /meshloop plan, on a repository whose harness plans.

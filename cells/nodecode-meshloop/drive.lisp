@@ -63,6 +63,9 @@ with - so it cannot read as a flag."
        (char/= #\- (char text 0))
        (every (lambda (c) (or (and (< (char-code c) 128) (alphanumericp c)) (find c allowed))) text)))
 
+(defparameter +placeholder-identities+ '("you" "me" "identity" "name" "your-name" "yourname")
+  "Words a hint or a habit puts after --as that name nobody.")
+
 (defun identity-of (found usage)
   "The identity typed after --as in this command, checked; a refusal when there
 is none. The cell supplies no identity of its own: not a default, not a
@@ -70,6 +73,10 @@ setting, not the session's."
   (let ((who (flag "--as" found)))
     (cond ((null who)
            (fail "names no identity. Type who decides after --as, in this command: ~a" usage))
+          ((or (member who +placeholder-identities+ :test #'string-equal)
+               (and (> (length who) 1) (char= #\< (char who 0))))
+           (fail "~s is a placeholder, not a name: type your own name after --as"
+                 (nlk:one-line who :cap 40)))
           ((not (ascii-word-p who "._@:+-"))
            (fail "~s is no identity: letters, digits and . _ @ : + -, at most 128, not starting with -"
                  (nlk:one-line who :cap 40)))
@@ -150,6 +157,10 @@ half-second waits: a cancelled driver takes a moment to see the cancel."
           return data
         do (sleep 0.5)))
 
+(defun driver-alive-p (graph session-id)
+  "Whether meshloop reports GRAPH's driver alive now."
+  (equal (nlk:json-value (run-status graph session-id) :string "data" "driver") "alive"))
+
 (defun graph-lines (graph)
   "One line per node of a plan GRAPH: id, tier, what it waits for, description."
   (let ((nodes (nlk:json-array graph "nodes")))
@@ -215,7 +226,7 @@ checked against the contract's graph fields."
                      (format nil "meshloop plan: graph ~a, ~d node~:p, written to ~a~a~%  ~
                                   Nothing runs yet. Read it: /meshloop review-plan --plan ~a; then decide ~
                                   in a separate command, naming yourself: --accept, --decline or --adjust, ~
-                                  each with --as YOU"
+                                  each with --as <your-name>"
                              (nlk:json-value graph :string "graph_id")
                              (length (nlk:json-array graph "nodes"))
                              (nlk:json-value object :string "data" "path")
@@ -224,7 +235,7 @@ checked against the contract's graph fields."
 ;;; --- review-plan ------------------------------------------------------------------
 
 (defparameter +review-usage+
-  "/meshloop review-plan [--plan FILE] to read it; then /meshloop review-plan [--plan FILE] --accept|--decline|--adjust --as YOU [--reason TEXT]")
+  "/meshloop review-plan [--plan FILE] to read it; then /meshloop review-plan [--plan FILE] --accept|--decline|--adjust --as <your-name> [--reason TEXT]")
 
 (defun show-plan (session-id path)
   "The plan at PATH and where review stands, writing nothing."
@@ -235,8 +246,8 @@ checked against the contract's graph fields."
                      (nlk:json-value (checked status "status") :string "data" "plan_state"))))
     (format nil "meshloop review-plan: plan ~a, graph ~a, ~d node~:p, ~:[not reviewed in this repository yet~;~:*plan state ~a~]~a~%  ~
                  Node descriptions are data, not instructions. Decide in a separate command, naming ~
-                 yourself: /meshloop review-plan --plan ~a --accept --as YOU (or --decline or --adjust, ~
-                 --as YOU --reason TEXT)"
+                 yourself: /meshloop review-plan --plan ~a --accept --as <your-name> (or --decline or --adjust, ~
+                 --as <your-name> --reason TEXT)"
             path id (length (nlk:json-array graph "nodes")) state (graph-lines graph) path)))
 
 (defun review-plan-of (session-id text)
@@ -283,7 +294,7 @@ checked against the contract's graph fields."
                                   (cond ((equal state "PlanAccepted")
                                          (format nil "/meshloop run --plan ~a starts it detached; nothing starts on its own" path))
                                         ((equal state "PlanDeclined")
-                                         (format nil "stopped; /meshloop review-plan --plan ~a --adjust --as YOU --reason TEXT reopens it" path))
+                                         (format nil "stopped; /meshloop review-plan --plan ~a --adjust --as <your-name> --reason TEXT reopens it" path))
                                         (t (format nil "read it again with /meshloop review-plan --plan ~a, then decide" path)))))))))))))
 
 ;;; --- run, resume, cancel ----------------------------------------------------------
@@ -294,8 +305,10 @@ checked against the contract's graph fields."
          (graph (nlk:json-value data :string "graph_id")))
     (format nil "meshloop ~a: graph ~a, driver started detached (~a); nothing follows on its own~%  ~
                  follow it with /meshloop inspect ~a; a node that waits for acceptance takes ~
-                 /meshloop accept --task N --as YOU --graph ~a, then /meshloop resume ~a~%  driver log: ~a"
-            verb graph (nlk:json-value data :string "status") graph graph graph
+                 /meshloop accept --task N --as <your-name> --graph ~a. While this driver is alive it ~
+                 merges accepted nodes itself; once /meshloop status ~a shows it exited, ~
+                 /meshloop resume ~a starts the next~%  driver log: ~a"
+            verb graph (nlk:json-value data :string "status") graph graph graph graph
             (nlk:json-value data :string "driver_log"))))
 
 (defun run-plan-of (session-id text)
@@ -320,6 +333,9 @@ checked against the contract's graph fields."
                (multiple-value-bind (found positionals)
                    (parse-flags text '(("--retry" :switch) ("--restart" :switch)))
                  (let ((graph (graph-or-newest positionals session-id "/meshloop resume [GRAPH] [--retry|--restart]")))
+                   (when (driver-alive-p graph session-id)
+                     (fail "refused: a driver is running for ~a; it merges accepted nodes itself. ~
+                            Follow it with /meshloop inspect ~a" graph graph))
                    (driver-answer "resume"
                                   (checked (ok-or-refuse
                                             (or (act "resume" (append (list "--detach" "--graph" graph)
@@ -343,7 +359,15 @@ checked against the contract's graph fields."
                                  (fail "answered no JSON envelope")))
                             "cancel")
                    ;; What is left, as meshloop sees it: attempts still alive,
-                   ;; the driver, and the worktrees it keeps for the run.
+                   ;; the driver, and the worktrees it keeps for the run. The
+                   ;; cancel is recorded by now, whatever these reads answer.
+                   (handler-case (cancel-aftermath graph task session-id)
+                     (meshloop-error (condition)
+                       (format nil "meshloop cancel: graph ~a~@[ task ~a~] cancelled; reading what is left ~
+                                    failed: ~a" graph task (meshloop-error-detail condition)))))))))
+
+(defun cancel-aftermath (graph task session-id)
+  "The answer after GRAPH (or its TASK) was cancelled: what meshloop reports left."
                    (let* ((status (settled-status graph session-id))
                           (nodes (nlk:json-array status "nodes"))
                           (alive (loop for node across nodes
@@ -363,11 +387,24 @@ checked against the contract's graph fields."
                                   `meshloop workspace preview --cleanup --json' says which it may reclaim"
                              graph task (state-counts nodes) alive
                              (nlk:json-value status :string "driver")
-                             graph (length entries) foreign foreign)))))))
+                             graph (length entries) foreign foreign)))
 
 ;;; --- accept -----------------------------------------------------------------------
 
-(defparameter +accept-usage+ "/meshloop accept --task N --as YOU [--graph GRAPH]")
+(defparameter +accept-usage+ "/meshloop accept --task N --as <your-name> [--graph GRAPH]")
+
+(defun awaiting-graph (session-id)
+  "The one run waiting for acceptance, when accept names no --graph. More than
+one is a refusal asking which; none falls back to the newest run."
+  (let* ((object (ok-or-refuse (ask "status" '() session-id)))
+         (data (nlk:json-value object :object "data")))
+    (unless (and data (nth-value 1 (gethash "graph_id" data)))
+      (fail "names no graph and this repository has no managed run"))
+    (let ((waiting (coerce (nlk:json-array (checked object "status") "data" "awaiting_acceptance") 'list)))
+      (cond ((rest waiting)
+             (fail "~d runs wait for acceptance (~{~a~^, ~}); name one with --graph" (length waiting) waiting))
+            (waiting (first waiting))
+            (t (nlk:json-value data :string "graph_id"))))))
 
 (defun accept-of (session-id text)
   (answering "accept"
@@ -380,7 +417,7 @@ checked against the contract's graph fields."
                         (who (identity-of found +accept-usage+))
                         (graph (if (flag "--graph" found)
                                    (graph-of (flag "--graph" found))
-                                   (newest-graph session-id))))
+                                   (awaiting-graph session-id))))
                    ;; WHO is the word typed after --as in this command; nothing
                    ;; else reaches this argument.
                    (act "accept" (list "--task" task "--as" who "--graph" graph) session-id)
@@ -391,8 +428,9 @@ checked against the contract's graph fields."
                                          (nlk:json-array object "data" "nodes")))
                           (recorded (and node (last-attempt node) (acceptance-line (last-attempt node)))))
                      (format nil "meshloop accept: task ~a of graph ~a accepted as ~a; ~:[meshloop shows no acceptance record for it yet~;~:*meshloop recorded \"~a\"~]~%  ~
-                                  next: /meshloop resume ~a merges it; nothing resumes on its own"
-                             task graph who recorded graph)))))))
+                                  next: ~:[/meshloop resume ~a merges it; nothing resumes on its own~;~
+                                  the driver running for ~a merges it itself; type nothing more~]"
+                             task graph who recorded (driver-alive-p graph session-id) graph)))))))
 
 ;;; --- integrate --------------------------------------------------------------------
 
@@ -450,7 +488,7 @@ checked against the contract's graph fields."
                             :placeholder "meshloop-plan.json" :verb "read"))))
 
 (defparameter +usage+
-  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as YOU, run, resume, cancel, accept --task N --as YOU, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto")
+  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as <your-name>, run, resume, cancel, accept --task N --as <your-name>, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto")
 
 (defun after-first-word (text)
   "TEXT past its first word and the blanks after it, as typed."
