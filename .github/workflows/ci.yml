@@ -44,3 +44,37 @@ jobs:
             artifacts/bench/run.json
             artifacts/bench/scorecard.md
             artifacts/bench/system1_bench.json
+
+  # Optional nodecode cell check (ADR 0038, #135). Non-blocking: it installs a pinned
+  # nodecode release on a throwaway HOME, loads cells/nodecode-meshloop and runs its load
+  # test. It is never called from xtask or cargo test; the blocking contract is
+  # crates/meshloop-cli/tests/nodecode_cell_contract.rs. Needs glibc 2.38 or newer.
+  nodecode-cell:
+    name: optional - nodecode cell load (non-blocking)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 20
+    env:
+      NODECODE_VERSION: 98dd6dc80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Build meshloop and the fixture harness
+        run: cargo build --locked -p meshloop-cli -p meshloop-adapters --bins
+      - name: Install the pinned nodecode release on a throwaway HOME
+        run: |
+          home="$RUNNER_TEMP/nodecode-install"
+          mkdir -p "$home"
+          curl -fsSL https://nodecode.ai/install.sh -o "$RUNNER_TEMP/nodecode-install.sh"
+          env -i HOME="$home" PATH=/usr/bin:/bin LANG=C.UTF-8 NODECODE_VERSION="$NODECODE_VERSION" \
+            sh "$RUNNER_TEMP/nodecode-install.sh" --no-modify-path
+          "$home/.local/share/nodecode/$NODECODE_VERSION/nodecode" --version
+      - name: Load the cell and run doctor, status and inspect
+        run: |
+          python3 -I cells/nodecode-meshloop/test/load_test.py \
+            --meshloop "$PWD/target/debug/meshloop" \
+            --fixture-harness "$PWD/target/debug/fixture_harness" \
+            --nodecode "$RUNNER_TEMP/nodecode-install/.local/share/nodecode/$NODECODE_VERSION/nodecode" \
+            --work "$RUNNER_TEMP/nodecode-cell"
