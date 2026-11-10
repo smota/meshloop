@@ -15,6 +15,13 @@
 # error that names the harness. Stdin is null unless `prompt_via` is `stdin`.
 # An empty `invoke_args_template` is probed but never dispatched. Check with:
 #   meshloop doctor --config meshloop.toml
+#
+# Models: an entry sets either `model_ref` (+ optional `model_tier`) or a `models` list,
+# e.g. `models = [{ model_ref = "a", model_tier = "mid" }, { model_ref = "b", model_tier = "top" }]`.
+# Routing makes each (harness, model) its own candidate with its own feedback. The
+# templates below do not pass `{model_ref}`, so each CLI runs its own default model.
+# The commented "model example" lines show how an operator passes it; they are
+# examples, not shipped defaults. See docs/engineering/harnesses.md#model-selection.
 selected_harnesses = ["grok", "claude", "codex"]
 
 [limits]
@@ -47,6 +54,10 @@ version_args = ["--version"]
 invoke_args_template = ["--prompt-file", "{prompt_file}"]
 model_ref = "grok"
 model_tier = "top"
+# Model example (grok 1.0.77: `grok --help` shows `-m, --model <MODEL>`; `grok models`
+# lists IDs). Replace the three lines above with:
+# invoke_args_template = ["--model", "{model_ref}", "--prompt-file", "{prompt_file}"]
+# models = [{ model_ref = "<model-id>", model_tier = "top" }]
 
 [harnesses.claude]
 kind = "claude"
@@ -57,6 +68,10 @@ prompt_via = "arg"
 invoke_args_template = ["--print", "{prompt}"]
 model_ref = "claude"
 model_tier = "top"
+# Model example (2.1.322: `claude --help` shows `--model <model>`, an alias such as
+# `sonnet` or a full model name). Replace the three lines above with:
+# invoke_args_template = ["--print", "--model", "{model_ref}", "{prompt}"]
+# models = [{ model_ref = "sonnet", model_tier = "mid" }, { model_ref = "opus", model_tier = "top" }]
 
 [harnesses.codex]
 kind = "codex"
@@ -68,6 +83,10 @@ prompt_via = "stdin"
 invoke_args_template = ["exec", "-"]
 model_ref = "codex"
 model_tier = "top"
+# Model example (codex-cli 0.167.0: `codex exec --help` shows `-m, --model <MODEL>`).
+# Replace the three lines above with:
+# invoke_args_template = ["exec", "--model", "{model_ref}", "-"]
+# models = [{ model_ref = "<model-id>", model_tier = "top" }]
 
 [harnesses.pi]
 kind = "pi"

@@ -311,6 +311,23 @@ fn is_fixture(name: &str) -> bool {
     name == "fixture"
 }
 
+/// A routing arm as recorded on an attempt: (harness, model_ref). One harness can list
+/// several models, so retry and fallback track arms, not harness names (issue #134).
+/// With one model per harness this is the same set as the harness names.
+fn arm_of(c: &Candidate) -> (String, String) {
+    (c.harness.clone(), c.model_ref.clone())
+}
+
+fn tried_arms(attempts: &[AttemptRow]) -> HashSet<(String, String)> {
+    attempts
+        .iter()
+        .filter_map(|a| {
+            let harness = a.harness.clone()?;
+            Some((harness, a.model_ref.clone().unwrap_or_default()))
+        })
+        .collect()
+}
+
 struct RepairTick {
     rows: Vec<Evidence>,
     lattice: Option<DiagnosticLattice>,
@@ -572,12 +589,17 @@ impl<'a> RunLoop<'a> {
         match &self.planner {
             PlannerSelection::Route(tier) => Ok((self.candidates.clone(), *tier)),
             PlannerSelection::Harness(name) => {
-                let c = self
+                // Every model the named harness lists stays a candidate (issue #134).
+                let pool: Vec<Candidate> = self
                     .candidates
                     .iter()
-                    .find(|c| &c.harness == name)
-                    .ok_or_else(|| OrchestratorError::UnknownHarness(name.clone()))?;
-                Ok((vec![c.clone()], Tier::Tier1))
+                    .filter(|c| &c.harness == name)
+                    .cloned()
+                    .collect();
+                if pool.is_empty() {
+                    return Err(OrchestratorError::UnknownHarness(name.clone()));
+                }
+                Ok((pool, Tier::Tier1))
             }
         }
     }
@@ -1495,15 +1517,10 @@ impl<'a> RunLoop<'a> {
                 reason: IdleReason::NoCapableCandidate,
             });
         }
-        let used: HashSet<String> = self
-            .store
-            .attempts_for_task(graph_id, task_id)?
-            .into_iter()
-            .filter_map(|a| a.harness)
-            .collect();
+        let used = tried_arms(&self.store.attempts_for_task(graph_id, task_id)?);
         let candidate: crate::router::Candidate = selected
             .iter()
-            .find(|c| !used.contains(&c.harness))
+            .find(|c| !used.contains(&arm_of(c)))
             .cloned()
             .unwrap_or_else(|| selected[0].clone());
         self.require_dispatch_ok(&candidate.harness)?;
@@ -2292,8 +2309,8 @@ impl<'a> RunLoop<'a> {
             });
         }
         let retry_count = attempts.len() as u32;
-        let used: HashSet<String> = attempts.into_iter().filter_map(|a| a.harness).collect();
-        let unused = selected.iter().any(|c| !used.contains(&c.harness));
+        let used = tried_arms(&attempts);
+        let unused = selected.iter().any(|c| !used.contains(&arm_of(c)));
         if fail.to == TaskState::Failed && retry_count < self.limits.max_retries && unused {
             let rec = self.append(
                 graph_id,

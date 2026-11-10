@@ -144,9 +144,100 @@ pub struct HarnessConfig {
     /// `file` (default), `arg`, or `stdin`. `load` rejects any other value and names the harness.
     #[serde(default = "default_prompt_via")]
     pub prompt_via: String,
+    /// Single-model form: the one model this harness runs. Use either this pair or
+    /// `models`, never both. `load` rejects an entry with neither.
+    #[serde(default)]
+    pub model_ref: Option<String>,
+    /// Tier of `model_ref`; `"mid"` when omitted. Only with `model_ref`.
+    #[serde(default)]
+    pub model_tier: Option<String>,
+    /// List form (issue #134, ADR 0038): one harness entry, several models. Routing
+    /// expands each into its own (harness, model_ref, tier) candidate and the chosen
+    /// `model_ref` is substituted into `{model_ref}` in `invoke_args_template`.
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
+}
+
+/// One model of a harness entry's `models` list.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEntry {
     pub model_ref: String,
+    /// `"top"`, `"mid"` (default) or anything else for lightweight, as `model_tier`.
     #[serde(default = "default_model_tier")]
     pub model_tier: String,
+}
+
+/// Upper bound on one harness entry's `models` list. Each model is a routing arm with
+/// its own feedback row, so the list stays small and bounded.
+pub const MAX_MODELS_PER_HARNESS: usize = 16;
+/// Upper bound on one `model_ref` in a `models` list, in bytes.
+const MAX_MODEL_REF_BYTES: usize = 256;
+
+impl HarnessConfig {
+    /// The models this entry routes, in configuration order: the `models` list, or the
+    /// single `model_ref` with its `model_tier`. Empty only for an entry `load` rejects.
+    pub fn model_entries(&self) -> Vec<ModelEntry> {
+        match (&self.models, &self.model_ref) {
+            (Some(models), _) => models.clone(),
+            (None, Some(model_ref)) => vec![ModelEntry {
+                model_ref: model_ref.clone(),
+                model_tier: self.model_tier.clone().unwrap_or_else(default_model_tier),
+            }],
+            (None, None) => Vec::new(),
+        }
+    }
+}
+
+/// Checks the model form of one harness entry. The single `model_ref` form keeps its
+/// pre-#134 behaviour (no new checks); the `models` list is validated in full.
+fn validate_models(name: &str, hc: &HarnessConfig) -> Result<(), ConfigError> {
+    let err = |msg: String| Err(ConfigError::Parse(format!("harness '{name}': {msg}")));
+    let Some(models) = &hc.models else {
+        if hc.model_ref.is_none() {
+            return err("model_ref or models is required".into());
+        }
+        return Ok(());
+    };
+    if hc.model_ref.is_some() || hc.model_tier.is_some() {
+        return err("set either model_ref/model_tier or models, not both".into());
+    }
+    if models.is_empty() {
+        return err("models must not be empty".into());
+    }
+    if models.len() > MAX_MODELS_PER_HARNESS {
+        return err(format!(
+            "models lists {} entries; at most {MAX_MODELS_PER_HARNESS} are allowed",
+            models.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (i, m) in models.iter().enumerate() {
+        let r = &m.model_ref;
+        if r.trim().is_empty() {
+            return err(format!("models[{i}].model_ref must not be empty"));
+        }
+        if r.len() > MAX_MODEL_REF_BYTES {
+            return err(format!(
+                "models[{i}].model_ref is longer than {MAX_MODEL_REF_BYTES} bytes"
+            ));
+        }
+        // The ref becomes one argv element; a leading '-' would read as a harness flag.
+        if r.starts_with('-') {
+            return err(format!(
+                "models[{i}].model_ref '{r}' must not start with '-'"
+            ));
+        }
+        if r.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return err(format!(
+                "models[{i}].model_ref must not contain whitespace or control characters"
+            ));
+        }
+        if !seen.insert(r.as_str()) {
+            return err(format!("duplicate model_ref '{r}' in models"));
+        }
+    }
+    Ok(())
 }
 
 fn default_model_tier() -> String {
@@ -203,6 +294,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
                 hc.prompt_via
             )));
         }
+        validate_models(name, hc)?;
     }
     if let Some(name) = &config.planner.harness
         && !config.selected_harnesses.contains(name)
@@ -524,6 +616,121 @@ probe_timeout_seconds = 0",
         let path = write_temp("zero-probe", &toml);
         assert!(matches!(load(&path), Err(ConfigError::Parse(_))));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// MINIMAL with its single `model_ref`/`model_tier` replaced by `models_toml`.
+    fn with_models(tag: &str, models_toml: &str) -> Result<Config, ConfigError> {
+        let toml = MINIMAL.replace(
+            "model_ref = \"grok\"\n        model_tier = \"top\"",
+            models_toml,
+        );
+        assert_ne!(toml, MINIMAL, "{tag}: MINIMAL model lines not found");
+        let path = write_temp(tag, &toml);
+        let result = load(&path);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        result
+    }
+
+    #[test]
+    fn legacy_single_model_ref_loads_unchanged_as_one_model() {
+        // Issue #134: configs written before `models` existed keep loading as they did.
+        let config = load_with("legacy-model", "").expect("legacy config");
+        let hc = &config.harnesses["grok"];
+        assert_eq!(hc.model_ref.as_deref(), Some("grok"));
+        assert_eq!(hc.model_tier.as_deref(), Some("top"));
+        assert!(hc.models.is_none());
+        assert_eq!(
+            hc.model_entries(),
+            vec![ModelEntry {
+                model_ref: "grok".into(),
+                model_tier: "top".into()
+            }]
+        );
+        // An omitted legacy model_tier still defaults to "mid".
+        let c = with_models("legacy-default-tier", "model_ref = \"grok\"").expect("loads");
+        assert_eq!(c.harnesses["grok"].model_entries()[0].model_tier, "mid");
+    }
+
+    #[test]
+    fn models_list_expands_in_configuration_order_with_per_model_tier() {
+        let config = with_models(
+            "models-list",
+            r#"models = [
+                { model_ref = "grok-4-fast", model_tier = "mid" },
+                { model_ref = "grok-4" , model_tier = "top" },
+                { model_ref = "grok-mini" },
+            ]"#,
+        )
+        .expect("models list loads");
+        let entries = config.harnesses["grok"].model_entries();
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|m| (m.model_ref.as_str(), m.model_tier.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("grok-4-fast", "mid"),
+                ("grok-4", "top"),
+                ("grok-mini", "mid")
+            ]
+        );
+    }
+
+    #[test]
+    fn models_list_rejects_bad_shapes_and_names_the_harness() {
+        let many: String = (0..=MAX_MODELS_PER_HARNESS)
+            .map(|i| format!("{{ model_ref = \"m{i}\" }},"))
+            .collect();
+        let too_many = format!("models = [{many}]");
+        for (tag, models, needle) in [
+            (
+                "m-both",
+                "model_ref = \"grok\"\nmodels = [{ model_ref = \"a\" }]",
+                "not both",
+            ),
+            (
+                "m-both-tier",
+                "model_tier = \"top\"\nmodels = [{ model_ref = \"a\" }]",
+                "not both",
+            ),
+            ("m-neither", "", "model_ref or models"),
+            ("m-empty", "models = []", "must not be empty"),
+            (
+                "m-blank",
+                "models = [{ model_ref = \"  \" }]",
+                "must not be empty",
+            ),
+            (
+                "m-dup",
+                "models = [{ model_ref = \"a\", model_tier = \"top\" }, { model_ref = \"a\", model_tier = \"mid\" }]",
+                "duplicate model_ref 'a'",
+            ),
+            (
+                "m-flag",
+                "models = [{ model_ref = \"--dangerously-skip\" }]",
+                "must not start with '-'",
+            ),
+            (
+                "m-space",
+                "models = [{ model_ref = \"a b\" }]",
+                "whitespace or control",
+            ),
+            ("m-many", too_many.as_str(), "at most"),
+        ] {
+            match with_models(tag, models) {
+                Err(ConfigError::Parse(msg)) => {
+                    assert!(msg.contains(needle), "{tag}: {msg}");
+                    assert!(msg.contains("grok"), "{tag} must name the harness: {msg}");
+                }
+                other => panic!("{tag}: expected a parse error, got {other:?}"),
+            }
+        }
+        // Unknown keys inside a model entry are rejected, not ignored.
+        match with_models("m-key", "models = [{ model_ref = \"a\", tier = \"top\" }]") {
+            Err(ConfigError::Parse(msg)) => assert!(msg.contains("unknown field"), "{msg}"),
+            other => panic!("m-key: expected a parse error, got {other:?}"),
+        }
     }
 
     #[test]

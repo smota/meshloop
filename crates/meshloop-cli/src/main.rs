@@ -2611,7 +2611,15 @@ fn cmd_doctor(
             } else {
                 format!("not ready: {}", h["reason"].as_str().unwrap_or("unknown"))
             };
-            println!("  harness {}: {status}", h["name"].as_str().unwrap_or("?"));
+            let name = h["name"].as_str().unwrap_or("?");
+            println!("  harness {name}: {status}");
+            for m in h["models"].as_array().into_iter().flatten() {
+                println!(
+                    "    model {name}/{} ({})",
+                    m["model_ref"].as_str().unwrap_or("?"),
+                    m["model_tier"].as_str().unwrap_or("?")
+                );
+            }
         }
         if let Some(eligible) = planner["eligible"].as_array() {
             let names: Vec<&str> = eligible.iter().filter_map(|v| v.as_str()).collect();
@@ -2663,7 +2671,12 @@ fn doctor_planner(cfg: &crate::config::Config, rows: &[serde_json::Value]) -> se
         .filter(|name| match &selection {
             PlannerSelection::Harness(h) => h == name,
             PlannerSelection::Route(_) => cfg.harnesses.get(*name).is_some_and(|hc| {
-                meshloop_domain::policy::tier_fits(tier, compose::parse_model_tier(&hc.model_tier))
+                hc.model_entries().iter().any(|m| {
+                    meshloop_domain::policy::tier_fits(
+                        tier,
+                        compose::parse_model_tier(&m.model_tier),
+                    )
+                })
             }),
         })
         .collect();
@@ -2696,7 +2709,13 @@ fn doctor_probe(cfg: &crate::config::Config) -> Vec<serde_json::Value> {
             .into_iter()
             .map(|(name, handle)| {
                 let executable = &cfg.harnesses[name].executable;
-                match handle.join() {
+                // Each configured (harness, model) pair is its own routing candidate.
+                let models: Vec<serde_json::Value> = cfg.harnesses[name]
+                    .model_entries()
+                    .into_iter()
+                    .map(|m| serde_json::json!({"model_ref": m.model_ref, "model_tier": m.model_tier}))
+                    .collect();
+                let mut row = match handle.join() {
                     Ok(Ok(p)) => serde_json::json!({
                         "name": name,
                         "executable": executable,
@@ -2719,7 +2738,9 @@ fn doctor_probe(cfg: &crate::config::Config) -> Vec<serde_json::Value> {
                         "dispatchable": false,
                         "reason": "probe panicked",
                     }),
-                }
+                };
+                row["models"] = serde_json::Value::Array(models);
+                row
             })
             .collect()
     })

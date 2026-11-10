@@ -628,6 +628,41 @@ fn placeholders_inside_arguments_replace_known_tokens_only() {
 }
 
 #[test]
+fn dispatched_model_ref_is_one_structured_argv_element() {
+    // Issue #134: the model the router chose reaches the harness command line as the
+    // argument after the operator's model flag, with no shell between them. Shell
+    // metacharacters and quotes stay inside one argument, uninterpreted.
+    let dir = capture_dir("model-ref");
+    let harness = delivery_harness(
+        vec![
+            "--echo-args".into(),
+            "--model".into(),
+            "{model_ref}".into(),
+            "--prompt-file".into(),
+            "{prompt_file}".into(),
+        ],
+        PromptVia::File,
+    );
+    for (attempt, model) in [
+        (281, "provider/model-a:high"),
+        (282, "model-b;echo $HOME `id` 'q' \"dq\""),
+    ] {
+        let mut input = spec(dir.clone(), attempt);
+        input.model_ref = model.into();
+        let handle = harness.invoke(&input).expect("invoke");
+        let outcome = harness.collect(&handle).expect("collect");
+        assert_eq!(outcome.exit_code, 0);
+        let path = dir.join(format!(".meshloop-prompt-{attempt}"));
+        let expected = format!(
+            "FIXTURE_ARGC:5\nFIXTURE_ARG:--echo-args\nFIXTURE_ARG:--model\nFIXTURE_ARG:{model}\nFIXTURE_ARG:--prompt-file\nFIXTURE_ARG:{}\n",
+            path.to_string_lossy()
+        );
+        assert_eq!(outcome.output_redacted, expected, "{model}");
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn arg_mode_replaces_prompt_text_inside_an_argument() {
     let dir = capture_dir("arg");
     let harness = delivery_harness(
