@@ -278,13 +278,10 @@ list. To read a new field, add it to `contract.json` first.
     --work "$PWD/.agent-runs/nodecode-cell"
   ```
 
-  Known meshloop defect, found by this test and not fixed here: cancelling an attempt that
-  is running races the run's detached driver. When the driver records the killed worker's
-  failed checks after `cancel` recorded `Cancelled`, the event log holds an illegal
-  transition and `meshloop status` refuses the graph (`Store(Corrupt("illegal transition
-  for task 1: Cancelled + DeterministicChecksFailed"))`), and the driver reports `lost`. No
-  process or unowned worktree is left. The check "meshloop status: cancelled, no live
-  attempt, driver not alive" then fails, in about one run in two.
+  This test found a meshloop defect, fixed in #167: cancelling a running attempt raced the
+  run's detached driver and could leave an illegal `Cancelled + DeterministicChecksFailed`
+  sequence that made `meshloop status` refuse the graph. Event appends are now checked
+  against the persisted state, and the cancel check passes reliably.
 
 - **Offline Lisp check (optional):** [`test/pure_test.lisp`](test/pure_test.lisp) runs under
   a plain SBCL with no nodecode: `sbcl --script cells/nodecode-meshloop/test/pure_test.lisp`.
