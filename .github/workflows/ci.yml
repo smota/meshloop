@@ -63,14 +63,24 @@ jobs:
           toolchain: 1.98.0
       - name: Build meshloop and the fixture harness
         run: cargo build --locked -p meshloop-cli -p meshloop-adapters --bins
+      # install.sh and the executable are checked against the digests recorded in
+      # cells/nodecode-meshloop/test/nodecode-$NODECODE_VERSION.sha256 before either runs.
+      # The installer itself checks the tarball against the release's published sha256.
+      # nodecode.ai serves install.sh unversioned: a new one fails here until its digest
+      # is recorded.
       - name: Install the pinned nodecode release on a throwaway HOME
         run: |
+          sums="$GITHUB_WORKSPACE/cells/nodecode-meshloop/test/nodecode-$NODECODE_VERSION.sha256"
           home="$RUNNER_TEMP/nodecode-install"
-          mkdir -p "$home"
-          curl -fsSL https://nodecode.ai/install.sh -o "$RUNNER_TEMP/nodecode-install.sh"
+          mkdir -p "$home" "$RUNNER_TEMP/nodecode-installer"
+          cd "$RUNNER_TEMP/nodecode-installer"
+          curl -fsSL https://nodecode.ai/install.sh -o install.sh
+          grep '  install.sh$' "$sums" | sha256sum -c -
           env -i HOME="$home" PATH=/usr/bin:/bin LANG=C.UTF-8 NODECODE_VERSION="$NODECODE_VERSION" \
-            sh "$RUNNER_TEMP/nodecode-install.sh" --no-modify-path
-          "$home/.local/share/nodecode/$NODECODE_VERSION/nodecode" --version
+            sh ./install.sh --no-modify-path
+          cd "$home/.local/share/nodecode/$NODECODE_VERSION"
+          grep '  nodecode$' "$sums" | sha256sum -c -
+          ./nodecode --version
       - name: Load the cell and run doctor, status and inspect
         run: |
           python3 -I cells/nodecode-meshloop/test/load_test.py \

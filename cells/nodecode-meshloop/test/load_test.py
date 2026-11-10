@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -196,6 +197,29 @@ def fake_binary(path, body):
     return path
 
 
+MARKER = ".nodecode-meshloop-load-test"
+
+
+def prepare_work(path):
+    """WORK made empty, refusing anything this script may not own: a path
+    outside the repository's .agent-runs/, the temp directory or $RUNNER_TEMP,
+    or an existing directory without the marker this script writes."""
+    work = path.resolve()
+    roots = [CELL.parent.parent / ".agent-runs", Path(tempfile.gettempdir())]
+    if os.environ.get("RUNNER_TEMP"):
+        roots.append(Path(os.environ["RUNNER_TEMP"]))
+    roots = [root.resolve() for root in roots]
+    if not any(work != root and root in work.parents for root in roots):
+        raise SystemExit(f"--work {work} must be inside one of: {', '.join(map(str, roots))}")
+    if work.exists():
+        if not (work / MARKER).is_file():
+            raise SystemExit(f"--work {work} exists and was not made by this script; remove it yourself")
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    (work / MARKER).write_text("made by cells/nodecode-meshloop/test/load_test.py\n")
+    return work
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--meshloop", required=True, help="absolute path of a meshloop built from the checkout")
@@ -205,9 +229,7 @@ def main():
     args = parser.parse_args()
 
     meshloop = Path(args.meshloop).resolve()
-    work = Path(args.work).resolve()
-    if work.exists():
-        shutil.rmtree(work)
+    work = prepare_work(Path(args.work))
     home, repo = work / "home", work / "fixture"
     (home / ".nodecode" / "cells").mkdir(parents=True)
     (home / ".nodecode" / "cells" / "nodecode-meshloop").symlink_to(CELL, target_is_directory=True)
@@ -299,6 +321,45 @@ def main():
                 text,
             )
 
+        # A binary whose child outlives it: the timeout must kill the whole process
+        # group, or the grandchild holds the pipe and the read blocks.
+        grandchild = "613.135"
+        write_config(
+            home,
+            {
+                "binary": str(fake_binary(work / "hang-meshloop", f"sleep {grandchild} &\nsleep 614.135\n")),
+                "timeout_seconds": 2,
+            },
+        )
+        organism.restart_cell()
+        started = time.time()
+        text = answer("/meshloop status")
+        elapsed = time.time() - started
+        check(
+            "timeout stops the process group",
+            text.startswith("meshloop status: gave no answer in 2 s") and elapsed < 6,
+            f"{elapsed:.1f} s: {text}",
+        )
+        left = run(["pgrep", "-f", f"sleep {grandchild}"], work)
+        check("no grandchild left after the timeout", left.returncode == 1, left.stdout)
+
+        # More stderr than the cell keeps: it must drain the rest, not stall the binary.
+        write_config(
+            home,
+            {
+                "binary": str(
+                    fake_binary(
+                        work / "noisy-meshloop",
+                        f"head -c 300000 /dev/zero | tr '\\000' e >&2\nexec {json.dumps(str(meshloop))} \"$@\"\n",
+                    )
+                ),
+                "timeout_seconds": 30,
+            },
+        )
+        organism.restart_cell()
+        text = answer("/meshloop status")
+        check("300 KB of stderr is drained", text.startswith(f"meshloop status: graph {GRAPH}, "), text)
+
         # Off: the section vetoed, the command gone, meshloop as it was.
         write_config(home, {"enabled": False, "binary": str(meshloop)})
         organism.restart_cell()
@@ -314,7 +375,11 @@ def main():
     check("loading wrote nothing into the cell folder", cell_files_before == cell_files_after, cell_files_after)
     failed = [name for name, ok in CHECKS if not ok]
     note(f"{len(CHECKS) - len(failed)} of {len(CHECKS)} checks passed")
-    return 1 if failed else 0
+    if failed:
+        note(f"kept {work} for inspection")
+        return 1
+    shutil.rmtree(work)
+    return 0
 
 
 if __name__ == "__main__":

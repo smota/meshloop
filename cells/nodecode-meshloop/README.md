@@ -55,6 +55,11 @@ cell, or remove the link. Its commands disappear, and meshloop itself is unaffec
 | `/meshloop status [GRAPH]` | `(meshloop:status "GRAPH")` | The newest run, or GRAPH: plan state, node counts, attempts, one line per node |
 | `/meshloop inspect [GRAPH]` | `(meshloop:inspect "GRAPH")` | The same run with its overall status |
 
+`doctor` is `meshloop doctor`: it runs the `executable` of each selected harness in the
+repository's `meshloop.toml` with that harness's `version_args`, with the same authority as
+running `meshloop doctor` in a shell. Run it only in repositories whose `meshloop.toml` you
+trust.
+
 `/meshloop` typed alone opens a panel with one row per verb. `(help :meshloop)` is the
 manual. Sample answers from a fixture repository:
 
@@ -97,7 +102,8 @@ Every failure is one line that starts with `meshloop <verb>:`, never a Lisp cond
   field and says the binary may be older than the cell.
 - meshloop answers `ok: false`, for example an unknown graph: the line carries meshloop's
   `error`.
-- A call runs past `timeout_seconds`, or answers more than 8 MiB.
+- A call runs past `timeout_seconds`: the cell kills the binary's whole process group
+  (doctor's harness probes included), or answers more than 8 MiB.
 
 ## The CLI contract
 
@@ -117,10 +123,13 @@ list. To read a new field, add it to `contract.json` first.
   throwaway `HOME` with an emptied environment, links this folder in and opens one session in
   a fixture repository. It then runs the commands through the gateway's
   `POST /api/gateway/slash`, which runs a cell command with no model turn. It checks the
-  summaries and the failure lines (missing binary, older binary, no JSON). It also checks that
+  summaries and the failure lines (missing binary, older binary, no JSON, a timeout whose
+  grandchild holds the pipe, 300 KB of stderr). It also checks that
   the repository's git status, refs, worktrees and `.meshloop/` files (bytes and mtimes) are
   unchanged, and that switching the cell off leaves `meshloop status --json` as it was. It
-  never touches the operator's nodecode home.
+  never touches the operator's nodecode home. `--work` must sit inside the repository's
+  `.agent-runs/`, the temp directory or `$RUNNER_TEMP`; it is removed when every check
+  passes.
 
   ```bash
   python3 -I cells/nodecode-meshloop/test/load_test.py \
@@ -131,5 +140,8 @@ list. To read a new field, add it to `contract.json` first.
   ```
 
 - **Optional CI:** the `nodecode-cell` job in `.github/workflows/ci.yml` installs a pinned
-  nodecode release on a throwaway `HOME` and runs the load test. It is `continue-on-error`,
+  nodecode release on a throwaway `HOME` and runs the load test. It checks `install.sh`
+  and the installed executable against
+  [`test/nodecode-98dd6dc80.sha256`](test/nodecode-98dd6dc80.sha256) before running
+  either. It is `continue-on-error`,
   and neither `xtask` nor `cargo test` calls it.
