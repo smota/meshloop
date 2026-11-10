@@ -2049,6 +2049,7 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
         planner: meshloop_engine::run_loop::PlannerSelection::Harness("fixture".into()),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     assert!(loop_.plan("fixture", "fixture", &mut lease).is_ok());
     let request = harness.request.lock().unwrap().clone().unwrap();
@@ -2640,4 +2641,158 @@ fn cleanup_recovery_refusal_and_drift_stop_before_later_candidates() {
         assert!(f.repo.join(".git").is_dir());
         assert!(f.ledger.is_file());
     }
+}
+
+/// Issue #142: the run loop binds only a fresh, accepted, unmarked run, and each
+/// artifact it registers is a direct child of that run's location.
+#[test]
+fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
+    use meshloop_engine::workspace::RuntimeLedger;
+    let f = Fixture::new();
+    let (mut store, lease) = bound(&f);
+    let graph = GraphId::new("graph-alpha").unwrap();
+    let plan_hash = PlanHash::new(meshloop_domain::digest::sha256_hex(b"{}")).unwrap();
+    let binding = GenerationRecord {
+        id: id("run-loop-generation"),
+        repository_id: lease.repository().id.clone(),
+        graph_id: graph.clone(),
+        ordinal: 1,
+        accepted_plan_hash: plan_hash,
+        root_alias: alias(),
+        relative_path: RelativePath::new("graph-alpha").unwrap(),
+        layout_version: RUN_LOOP_LAYOUT_VERSION,
+    };
+    let mut wrong_hash = binding.clone();
+    wrong_hash.accepted_plan_hash = hash();
+    let mut wrong_path = binding.clone();
+    wrong_path.relative_path = RelativePath::new("elsewhere").unwrap();
+    let mut wrong_layout = binding.clone();
+    wrong_layout.layout_version = 1;
+    for refused in [&wrong_hash, &wrong_path, &wrong_layout] {
+        assert!(store.register_run_loop_run(&lease, refused).is_err());
+    }
+    // An unaccepted plan is not bound.
+    let mut pending = run();
+    pending.plan_state = PlanState::AwaitingPlanReview;
+    store.save_run(&pending).unwrap();
+    assert!(store.register_run_loop_run(&lease, &binding).is_err());
+    store.save_run(&run()).unwrap();
+    // A migration-marked run is refused and never reported as run-loop owned.
+    let conn = Connection::open(&f.ledger).unwrap();
+    conn.execute(
+        "INSERT INTO workspace_legacy_unbound VALUES('runs','graph-alpha','Unresolved')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store.register_run_loop_run(&lease, &binding),
+        Err(StoreError::LegacyOwnershipUnresolved)
+    );
+    conn.execute("DELETE FROM workspace_legacy_unbound", [])
+        .unwrap();
+    assert_eq!(store.run_loop_generation(&graph).unwrap(), None);
+
+    store.register_run_loop_run(&lease, &binding).unwrap();
+    assert_eq!(
+        store.run_loop_generation(&graph).unwrap(),
+        Some(binding.clone())
+    );
+    // Not fresh any more.
+    let mut again = binding.clone();
+    again.id = id("second-generation");
+    assert!(store.register_run_loop_run(&lease, &again).is_err());
+    // Legacy-table writes stay admitted: there is no run binding row.
+    assert!(store.reject_bound_graph("graph-alpha").is_ok());
+
+    let integrate =
+        |name: &str, path: &str, kind: ArtifactKind, attempt: Option<u32>| ArtifactRecord {
+            id: id(name),
+            generation_id: binding.id.clone(),
+            kind,
+            root_alias: alias(),
+            relative_path: RelativePath::new(path).unwrap(),
+            attempt_id: attempt.map(AttemptId),
+        };
+    let first = integrate(
+        "integrate-1",
+        "graph-alpha/integrate",
+        ArtifactKind::Integration,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &first).unwrap(),
+        first.id
+    );
+    // Same kind at the same location is idempotent and keeps the first id.
+    let repeat = integrate(
+        "integrate-2",
+        "graph-alpha/integrate",
+        ArtifactKind::Integration,
+        None,
+    );
+    assert_eq!(
+        store.register_run_loop_artifact(&lease, &repeat).unwrap(),
+        first.id
+    );
+    for refused in [
+        integrate(
+            "clash",
+            "graph-alpha/integrate",
+            ArtifactKind::Deliverable,
+            None,
+        ),
+        integrate(
+            "outside",
+            "other/integrate",
+            ArtifactKind::Integration,
+            None,
+        ),
+        integrate("nested", "graph-alpha/a/b", ArtifactKind::Integration, None),
+        integrate("plan", "graph-alpha/plan", ArtifactKind::Plan, None),
+        integrate(
+            "no-attempt",
+            "graph-alpha/task-1-attempt-1",
+            ArtifactKind::Attempt,
+            None,
+        ),
+        integrate(
+            "ghost",
+            "graph-alpha/task-1-attempt-9",
+            ArtifactKind::Attempt,
+            Some(9),
+        ),
+    ] {
+        assert!(
+            store.register_run_loop_artifact(&lease, &refused).is_err(),
+            "{refused:?}"
+        );
+    }
+    store
+        .save_attempt(&meshloop_engine::ports::AttemptRow {
+            attempt_id: AttemptId(1),
+            graph_id: "graph-alpha".into(),
+            task_id: meshloop_domain::task_graph::TaskId(1),
+            harness: None,
+            model_ref: None,
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: None,
+            ended_at: None,
+            outcome: None,
+        })
+        .unwrap();
+    let attempt = integrate(
+        "attempt-1",
+        "graph-alpha/task-1-attempt-1",
+        ArtifactKind::Attempt,
+        Some(1),
+    );
+    store.register_run_loop_artifact(&lease, &attempt).unwrap();
+    // Restart forgets attempt artifacts with their rows, and keeps the binding.
+    store.reset_graph_execution("graph-alpha").unwrap();
+    assert_eq!(store.artifact(&attempt.id).unwrap(), None);
+    assert!(store.artifact(&first.id).unwrap().is_some());
+    assert_eq!(store.run_loop_generation(&graph).unwrap(), Some(binding));
 }

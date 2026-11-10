@@ -17,7 +17,9 @@ mod adoption;
 mod cleanup;
 mod inventory;
 pub use adoption::apply_adoption;
-pub use cleanup::{CleanupFault, apply_cleanup, observe_cleanup};
+pub use cleanup::{
+    CleanupFault, RunReclaim, apply_cleanup, apply_cleanup_for_graph, observe_cleanup, reclaim_run,
+};
 pub use inventory::{GraphOutcome, InventoryScope, discover_inventory, graph_outcomes};
 mod ledger;
 #[cfg(test)]
@@ -448,6 +450,150 @@ pub(crate) fn pin_database(path: &Path) -> Result<(same_file::Handle, NativeIden
 }
 mod runtime;
 pub use runtime::CancellationClient;
+
+/// Run-loop ownership writer (issue #142). Each `acquire` takes the repository
+/// fence for one write and resolves the registered root holding `worktree_base`.
+pub struct RunLoopOwnershipAccess {
+    git: PathBuf,
+    checkout: PathBuf,
+    ledger: PathBuf,
+    worktree_base: PathBuf,
+}
+impl RunLoopOwnershipAccess {
+    pub fn new(
+        git: impl Into<PathBuf>,
+        checkout: impl Into<PathBuf>,
+        ledger: impl Into<PathBuf>,
+        worktree_base: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            git: git.into(),
+            checkout: checkout.into(),
+            ledger: ledger.into(),
+            worktree_base: worktree_base.into(),
+        }
+    }
+}
+struct RunLoopLease {
+    lease: RepositoryLease,
+    alias: RootAlias,
+    base: PathBuf,
+}
+impl meshloop_engine::workspace::RunOwnershipLease for RunLoopLease {
+    fn fence(&self) -> &dyn RepositoryFence {
+        &self.lease
+    }
+    fn root_alias(&self) -> &RootAlias {
+        &self.alias
+    }
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError> {
+        let root = self.lease.manifest.roots.get(alias);
+        Ok(root.is_some_and(|root| same_identity(&self.base, &root.native_identity)))
+    }
+    fn new_id(&mut self) -> Result<LifecycleId, StoreError> {
+        meshloop_engine::workspace::LifecycleAccess::new_id(&mut self.lease)
+    }
+}
+impl meshloop_engine::workspace::RunOwnership for RunLoopOwnershipAccess {
+    fn acquire(
+        &self,
+    ) -> Result<Box<dyn meshloop_engine::workspace::RunOwnershipLease + '_>, StoreError> {
+        // The fence is exclusive and non-blocking. Wait briefly for another short
+        // holder (bounded: 20 tries, 1 second), then fail closed.
+        let identity = GitRepositoryIdentity::new(&self.git);
+        let mut tries = 0;
+        let mut lease = loop {
+            match identity.acquire(&self.checkout, &self.ledger) {
+                Ok(lease) => break lease,
+                Err(_) if tries < 19 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let alias = lease.run_loop_root(&self.worktree_base)?;
+        Ok(Box::new(RunLoopLease {
+            lease,
+            alias,
+            base: self.worktree_base.clone(),
+        }))
+    }
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError> {
+        let mut command = OwnedSpawnSpec::new(&self.git);
+        command.arg("-C").arg(&self.checkout).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ]);
+        let output = bounded_stdout(command, Duration::from_secs(10))?;
+        let common = PathBuf::from(std::str::from_utf8(&output).map_err(|_| refused())?.trim());
+        let Some(registry) = read_registry(&common.join(REGISTRY))? else {
+            return Ok(false);
+        };
+        Ok(registry
+            .roots
+            .get(alias)
+            .is_some_and(|root| same_identity(&self.worktree_base, &root.identity)))
+    }
+}
+/// True when `path` exists and has native identity `identity`.
+fn same_identity(path: &Path, identity: &NativeIdentity) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|path| native_identity(&path).ok())
+        .is_some_and(|live| live == *identity)
+}
+/// Root aliases the run loop may register, in order. Bounded on purpose.
+const RUN_LOOP_ROOT_ALIASES: usize = 16;
+impl RepositoryLease {
+    /// Alias of the registered root whose native identity is `path`. Registers
+    /// `worktrees` (or the next free `worktrees-<n>`) when none matches, creating a
+    /// missing root through the journaled bootstrap. Never moves an existing root.
+    fn run_loop_root(&mut self, path: &Path) -> Result<RootAlias, StoreError> {
+        use meshloop_engine::workspace::LifecycleAccess;
+        self.validate()?;
+        let exists = match std::fs::symlink_metadata(path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(io_refused(e)),
+        };
+        if exists {
+            regular_entry(path, true)?;
+            let identity = native_identity(&std::fs::canonicalize(path).map_err(io_refused)?)?;
+            let found = self
+                .manifest
+                .roots
+                .iter()
+                .find(|(_, root)| root.native_identity == identity)
+                .map(|(alias, _)| alias.clone());
+            if let Some(alias) = found {
+                self.root(&alias)?;
+                return Ok(alias);
+            }
+        }
+        let alias = (1..=RUN_LOOP_ROOT_ALIASES)
+            .map(|n| {
+                if n == 1 {
+                    "worktrees".to_string()
+                } else {
+                    format!("worktrees-{n}")
+                }
+            })
+            .filter_map(|name| RootAlias::new(name).ok())
+            .find(|alias| {
+                !self.manifest.roots.contains_key(alias)
+                    && !self.manifest.pending_roots.contains_key(alias)
+            })
+            .ok_or_else(refused)?;
+        if exists {
+            self.register_root(alias.clone(), path)?;
+        } else {
+            self.bootstrap_root(alias.clone(), path)?;
+        }
+        Ok(alias)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingRoot {

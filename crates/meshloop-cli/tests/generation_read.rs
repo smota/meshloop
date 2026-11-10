@@ -779,6 +779,7 @@ fn with_reader<T>(
         planner: Default::default(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     observe(&saga)
 }

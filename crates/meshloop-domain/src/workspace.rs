@@ -362,6 +362,21 @@ pub struct RunBinding {
     pub active_generation: Option<LifecycleId>,
     pub current_revision: Option<LifecycleId>,
 }
+/// Layout written by the run loop (issue #142): the run location is
+/// `<root>/<graph>` and holds `integrate`, `task-<n>-attempt-<m>` and
+/// `integrate-<tag>` worktrees on `meshloop/<graph>/...` branches.
+///
+/// A run the run loop creates is bound by its first generation with this layout:
+/// that record pins graph, repository, root alias, run location and layout. It
+/// has no `workspace_run_bindings` row, which stays reserved for scoped runs whose
+/// events and attempts carry generation and revision scope.
+pub const RUN_LOOP_LAYOUT_VERSION: u32 = 2;
+impl GenerationRecord {
+    /// True for the binding generation of a run the run loop created.
+    pub fn is_run_loop_binding(&self) -> bool {
+        self.layout_version == RUN_LOOP_LAYOUT_VERSION && self.ordinal == 1
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProvisionalKind {
     Planning,

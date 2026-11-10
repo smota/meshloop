@@ -30,7 +30,8 @@ pub struct Config {
     pub verify: VerifyConfig,
     #[serde(default)]
     pub planner: PlannerConfig,
-    /// Optional `[workspace] root`. Missing tables keep the nested default.
+    /// Optional `[workspace]`: `root` and `auto_reclaim`. Missing tables keep the
+    /// nested default root and automatic reclamation on.
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     /// When true, Meshloop runs standalone without Herdr daemon, dispatching direct CLI harnesses into Git worktrees.
@@ -66,10 +67,28 @@ pub struct VerifyConfig {
 
 /// `[workspace]`. `root` is optional. A relative root is resolved from the repository.
 /// An absolute root is used as given. Absent means `<repo>/.meshloop/worktrees`.
-#[derive(Debug, Deserialize, Default, Clone)]
+/// `auto_reclaim` (default `true`) reclaims a landed run that this version owns
+/// through digest-bound cleanup once it is integrated and reachable from the base
+/// branch (ADR 0033 amendment, issue #142). `false` prints the cleanup command instead.
+#[derive(Debug, Deserialize, Clone)]
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub root: Option<String>,
+    #[serde(default = "default_auto_reclaim")]
+    pub auto_reclaim: bool,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            root: None,
+            auto_reclaim: default_auto_reclaim(),
+        }
+    }
+}
+
+fn default_auto_reclaim() -> bool {
+    true
 }
 
 /// `[planner]`: which harness runs `meshloop:planner`. Without either key, planning is
@@ -411,6 +430,31 @@ model = \"x\"",
                 Err(ConfigError::Parse(msg)) => assert!(msg.contains(needle), "{tag}: {msg}"),
                 other => panic!("{tag}: expected a parse error, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn workspace_auto_reclaim_defaults_on_and_can_be_switched_off() {
+        let omitted = load_with("reclaim-omitted", "").unwrap();
+        assert!(omitted.workspace.auto_reclaim);
+        assert!(omitted.workspace.root.is_none());
+        let table = load_with("reclaim-table", "[workspace]\nroot = \"short\"").unwrap();
+        assert!(table.workspace.auto_reclaim);
+        let off = load_with("reclaim-off", "[workspace]\nauto_reclaim = false").unwrap();
+        assert!(!off.workspace.auto_reclaim);
+        assert!(matches!(
+            load_with("reclaim-bad", "[workspace]\nauto_reclaim = \"yes\""),
+            Err(ConfigError::Parse(_))
+        ));
+        for tag in [
+            "reclaim-omitted",
+            "reclaim-table",
+            "reclaim-off",
+            "reclaim-bad",
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("meshloop-cfg-{tag}-{}", std::process::id()));
+            std::fs::remove_dir_all(dir).ok();
         }
     }
 

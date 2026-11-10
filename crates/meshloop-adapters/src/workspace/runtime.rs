@@ -420,6 +420,21 @@ impl SqliteStore {
         }
         Ok(())
     }
+    /// Deletes the attempt artifacts of a run-loop run. Restart removes those
+    /// worktrees and the attempt rows they reference; the binding generation and
+    /// the integrate and deliverable artifacts are kept.
+    pub(crate) fn forget_run_loop_attempts(&self, graph: &str) -> Result<(), StoreError> {
+        let graph = GraphId::new(graph).map_err(error)?;
+        if self.run_loop_generation(&graph)?.is_some() {
+            self.conn
+                .execute(
+                    "DELETE FROM workspace_artifacts WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE graph_id=?1)",
+                    [graph.as_str()],
+                )
+                .map_err(error)?;
+        }
+        Ok(())
+    }
     pub(crate) fn reject_legacy_attempt(
         &self,
         attempt: meshloop_domain::evidence::AttemptId,
@@ -620,6 +635,172 @@ impl RuntimeLedger for SqliteStore {
     }
     fn run_binding(&self, g: &GraphId) -> Result<Option<RunBinding>, StoreError> {
         get(&self.conn, "workspace_run_bindings", "graph_id", g.as_str())
+    }
+    fn run_loop_generation(&self, graph: &GraphId) -> Result<Option<GenerationRecord>, StoreError> {
+        let bound: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=?1)",
+                [graph.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if bound || self.legacy_ownership_unresolved(graph)? {
+            return Ok(None);
+        }
+        let first: Option<GenerationRecord> = self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM workspace_generations WHERE graph_id=?1 AND ordinal=1",
+                [graph.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .map(parse)
+            .transpose()?;
+        Ok(first.filter(|g| g.is_run_loop_binding() && g.graph_id == *graph))
+    }
+    fn register_run_loop_run(
+        &mut self,
+        f: &dyn RepositoryFence,
+        g: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        self.validate_fence(f, true)?;
+        f.root(&g.root_alias)?;
+        if !g.is_run_loop_binding()
+            || g.repository_id != f.repository().id
+            || g.relative_path.as_str() != g.graph_id.as_str()
+        {
+            return Err(refused());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let marked: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_legacy_unbound WHERE source_table='runs' AND source_id=?1)
+                 OR EXISTS(SELECT 1 FROM workspace_legacy_unbound m JOIN attempts a ON m.source_table='attempts' AND m.source_id=CAST(a.attempt_id AS TEXT) WHERE a.graph_id=?1)",
+                [g.graph_id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if marked {
+            return Err(StoreError::LegacyOwnershipUnresolved);
+        }
+        // Only a fresh, accepted run is bound: no binding, generation or attempt yet,
+        // and the accepted plan bytes match the generation hash.
+        let fresh: bool = tx
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM workspace_run_bindings WHERE graph_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM workspace_generations WHERE graph_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM attempts WHERE graph_id=?1)",
+                [g.graph_id.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        let plan: Option<(String, String)> = tx
+            .query_row(
+                "SELECT plan_state,plan_json FROM runs WHERE graph_id=?1",
+                [g.graph_id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let accepted = plan.is_some_and(|(state, json)| {
+            state == "PlanAccepted"
+                && format!("{:x}", Sha256::digest(json.as_bytes())) == g.accepted_plan_hash.as_str()
+        });
+        if !fresh || !accepted {
+            return Err(refused());
+        }
+        tx.execute(
+            "INSERT INTO workspace_generations VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                g.id.as_str(),
+                g.repository_id.as_str(),
+                g.graph_id.as_str(),
+                g.ordinal,
+                g.root_alias.as_str(),
+                g.accepted_plan_hash.as_str(),
+                json(g)?
+            ],
+        )
+        .map_err(error)?;
+        tx.commit().map_err(error)
+    }
+    fn register_run_loop_artifact(
+        &mut self,
+        f: &dyn RepositoryFence,
+        a: &ArtifactRecord,
+    ) -> Result<LifecycleId, StoreError> {
+        self.validate_fence(f, true)?;
+        f.root(&a.root_alias)?;
+        let g: GenerationRecord = self.generation(&a.generation_id)?.ok_or_else(refused)?;
+        let owned = self
+            .run_loop_generation(&g.graph_id)?
+            .is_some_and(|binding| binding == g);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let contained = a
+            .relative_path
+            .as_str()
+            .strip_prefix(g.relative_path.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|leaf| !leaf.is_empty() && !leaf.contains('/'));
+        if !owned
+            || g.repository_id != f.repository().id
+            || a.root_alias != g.root_alias
+            || !contained
+            || (a.kind == ArtifactKind::Attempt) != a.attempt_id.is_some()
+            || a.kind == ArtifactKind::Plan
+        {
+            return Err(refused());
+        }
+        if let Some(attempt) = a.attempt_id {
+            let valid: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attempts WHERE attempt_id=?1 AND graph_id=?2)",
+                    params![attempt.0, g.graph_id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            if !valid {
+                return Err(refused());
+            }
+        }
+        let existing: Vec<ArtifactRecord> = list(
+            &tx,
+            "SELECT payload_json FROM workspace_artifacts WHERE generation_id=?1 ORDER BY rowid",
+            g.id.as_str(),
+        )?;
+        if let Some(same) = existing
+            .iter()
+            .find(|record| record.relative_path == a.relative_path)
+        {
+            // A rebuilt deliverable reuses its location; anything else is a conflict.
+            if same.kind == a.kind && same.attempt_id == a.attempt_id {
+                return Ok(same.id.clone());
+            }
+            return Err(refused());
+        }
+        tx.execute(
+            "INSERT INTO workspace_artifacts VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                a.id.as_str(),
+                a.generation_id.as_str(),
+                g.repository_id.as_str(),
+                a.root_alias.as_str(),
+                a.attempt_id.map(|id| id.0),
+                json(a)?
+            ],
+        )
+        .map_err(error)?;
+        tx.commit().map_err(error)?;
+        Ok(a.id.clone())
     }
     fn create_provisional(
         &mut self,

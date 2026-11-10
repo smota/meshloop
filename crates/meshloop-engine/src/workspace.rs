@@ -118,6 +118,25 @@ pub trait LifecycleAccess {
     fn resolve(&self, location: &PortableLocation) -> Result<std::path::PathBuf, StoreError>;
     fn bootstrap_root(&mut self, alias: RootAlias, path: &Path) -> Result<RootRecord, StoreError>;
 }
+/// Repository fence held for one run-loop ownership write. Dropping releases it.
+pub trait RunOwnershipLease {
+    fn fence(&self) -> &dyn RepositoryFence;
+    /// Registered root alias whose native identity is this run loop's worktree base;
+    /// a new run is bound under it.
+    fn root_alias(&self) -> &RootAlias;
+    /// True when `alias` is registered for this run loop's worktree base. Several
+    /// aliases may name one directory.
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError>;
+    fn new_id(&mut self) -> Result<LifecycleId, StoreError>;
+}
+/// Writer capability for run-loop ownership. Each acquisition is short: the fence is
+/// exclusive, and a run must not block planning or cleanup while workers run.
+pub trait RunOwnership {
+    fn acquire(&self) -> Result<Box<dyn RunOwnershipLease + '_>, StoreError>;
+    /// Read-only `RunOwnershipLease::is_base_root`, without taking the fence or
+    /// registering anything.
+    fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError>;
+}
 pub struct ReadOnlyLifecycleAccess;
 impl LifecycleAccess for ReadOnlyLifecycleAccess {
     fn new_id(&mut self) -> Result<LifecycleId, StoreError> {
@@ -176,6 +195,34 @@ pub trait RuntimeLedger: WorkspaceLedger {
         binding: &RunBinding,
     ) -> Result<(), StoreError>;
     fn run_binding(&self, graph: &GraphId) -> Result<Option<RunBinding>, StoreError>;
+    /// Bind a run the run loop creates (issue #142) by inserting its first generation
+    /// with `RUN_LOOP_LAYOUT_VERSION`. Only an accepted run with no binding, marker,
+    /// generation or attempt qualifies; the store checks the accepted plan bytes
+    /// against the generation hash.
+    fn register_run_loop_run(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _binding: &GenerationRecord,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::ReadOnly)
+    }
+    /// The binding generation of a run-loop run: unbound, unmarked, and bound by a
+    /// first generation with the run-loop layout. `None` for every other run.
+    fn run_loop_generation(
+        &self,
+        _graph: &GraphId,
+    ) -> Result<Option<GenerationRecord>, StoreError> {
+        Ok(None)
+    }
+    /// Insert one worktree artifact of a run-loop-owned run. Registering the same
+    /// kind at the same location again is a no-op that returns the existing id.
+    fn register_run_loop_artifact(
+        &mut self,
+        _fence: &dyn RepositoryFence,
+        _record: &ArtifactRecord,
+    ) -> Result<LifecycleId, StoreError> {
+        Err(StoreError::ReadOnly)
+    }
     fn create_provisional(
         &mut self,
         fence: &dyn RepositoryFence,

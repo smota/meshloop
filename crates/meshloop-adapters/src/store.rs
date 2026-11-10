@@ -788,6 +788,7 @@ impl RunStore for SqliteStore {
 
     fn reset_graph_execution(&mut self, graph_id: &str) -> Result<(), StoreError> {
         self.reject_bound_graph(graph_id)?;
+        self.forget_run_loop_attempts(graph_id)?;
         self.telemetry.clear_graph(graph_id);
         self.conn
             .execute(
