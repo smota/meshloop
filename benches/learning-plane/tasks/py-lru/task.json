@@ -1,0 +1,8 @@
+{
+  "id": "py-lru",
+  "language": "python",
+  "difficulty": "medium",
+  "kind": "implement",
+  "description": "Implement the LRUCache class in lru.py as SPEC.md describes. Change only lru.py and leave tests/ unchanged. Check with: python3 -m unittest discover -s tests (from the repository root). When done, reply with one short sentence.",
+  "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests"]
+}

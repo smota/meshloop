@@ -1,0 +1,14 @@
+{
+  "version": "lp-1",
+  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test or meshloop.toml requires a new version and a new baseline.",
+  "tasks": [
+    "py-median-bugfix",
+    "py-wordfreq",
+    "py-lru",
+    "py-intervals",
+    "py-roman",
+    "rs-brackets",
+    "py-calc",
+    "py-semver"
+  ]
+}

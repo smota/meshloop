@@ -1,0 +1,66 @@
+# Learning-plane benchmark configuration (issue #144). Operator config, not a shipped
+# default (ADR 0003). Fixed for the baseline and for the #140 comparison: change it only
+# with a new task-set version and a new baseline.
+#
+# The runner (`cargo run -p xtask -- bench-learning --live`) copies this file once per
+# task and replaces `verify_command` below with the task's hidden-test driver. Nothing
+# else is changed. Flags were checked with each CLI's `--help` and `meshloop doctor`
+# on 2026-11-10 (codex-cli 0.167.0, Claude Code 2.1.322, pi 1.5.0).
+#
+# Routing note: every task is a single leaf node with `tier = null`, so the placeholder
+# tier heuristic assigns Tier1. At Tier1 with an empty `routing_feedback`, the
+# tier-efficiency signal ranks lightweight models first and ties break in the order
+# below (selected_harnesses order, then list order). See BASELINE.md.
+#
+# grok is excluded: free-tier usage limit (#162). agy is excluded: not dispatchable
+# (#164).
+selected_harnesses = ["codex", "claude", "pi"]
+
+[limits]
+max_concurrent_workers = 1
+# Attempts per task, the first dispatch included. 3 lets a task reach all three
+# lightweight arms.
+max_retries = 3
+task_timeout_seconds = 420
+probe_timeout_seconds = 15
+
+[verify]
+# Replaced per task by the runner.
+verify_command = []
+
+[harnesses.codex]
+kind = "codex"
+executable = "codex"
+# `codex exec --help`: `-m, --model <MODEL>`; `-` reads the prompt from stdin. The
+# final stderr lines are `tokens used` and a count, which the runner parses.
+prompt_via = "stdin"
+invoke_args_template = ["exec", "--model", "{model_ref}", "-"]
+models = [
+  { model_ref = "gpt-6-luna", model_tier = "lightweight" },
+  { model_ref = "gpt-6.1-sol", model_tier = "top" },
+]
+
+[harnesses.claude]
+kind = "claude"
+executable = "claude"
+# `claude --help`: `--permission-mode <mode>` (acceptEdits; without it print mode
+# cannot write, #163), `--output-format json` (single result object with `usage` and
+# `modelUsage`, parsed for tokens), `--model <model>` (alias or full name), `--print`.
+prompt_via = "arg"
+invoke_args_template = ["--permission-mode", "acceptEdits", "--output-format", "json", "--model", "{model_ref}", "--print", "{prompt}"]
+models = [
+  { model_ref = "haiku", model_tier = "lightweight" },
+  { model_ref = "sonnet", model_tier = "mid" },
+]
+
+[harnesses.pi]
+kind = "pi"
+executable = "pi"
+# `pi --help`: `--model <pattern>` ("provider/id" supported), `--print, -p`. Text mode
+# prints no token usage.
+prompt_via = "arg"
+invoke_args_template = ["--model", "{model_ref}", "-p", "{prompt}"]
+models = [
+  { model_ref = "openai-codex/gpt-5.6-luna", model_tier = "lightweight" },
+  { model_ref = "openai-codex/gpt-6.1-terra", model_tier = "mid" },
+]
