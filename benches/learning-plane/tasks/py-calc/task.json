@@ -4,5 +4,15 @@
   "difficulty": "hard",
   "kind": "implement",
   "description": "Implement evaluate() in calc.py, an exact arithmetic expression evaluator, as SPEC.md describes. Change only calc.py and leave tests/ unchanged. Check with: python3 -m unittest discover -s tests (from the repository root). When done, reply with one short sentence.",
-  "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests"]
+  "test_command": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests"
+  ],
+  "editable": [
+    "calc.py"
+  ]
 }

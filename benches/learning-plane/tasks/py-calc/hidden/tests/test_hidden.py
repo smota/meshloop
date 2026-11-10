@@ -71,40 +71,62 @@ class Errors(unittest.TestCase):
         self.assertEqual(evaluate("1 ^ -1000"), 1)
 
 
-BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
+BANNED_NAMES = {"eval", "exec", "compile", "__import__"}
+BANNED_MODULES = {"builtins", "importlib", "ast"}
 
 
 def banned_uses(src):
-    """Calls to the banned builtins and imports of `ast`, found with an AST walk.
+    """Uses of the banned built-ins, found with an AST walk (lp-3).
 
-    `re.compile(...)` and other attribute calls are allowed; `builtins.eval(...)` is not.
+    Flags any name `eval`, `exec`, `compile` or `__import__` in any context (a call, an
+    alias such as `e = eval`, an argument), a string constant equal to one of those
+    names (`getattr(builtins, "eval")`, `__builtins__["eval"]`), an attribute access
+    `<x>.eval` and friends on `builtins`/`__builtins__`, and any import of `builtins`,
+    `importlib` or `ast`. Attribute calls on other modules, such as `re.compile`, are
+    allowed.
     """
     found = []
     for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id in BANNED_CALLS:
-                found.append(func.id)
-            elif (
-                isinstance(func, ast.Attribute)
-                and func.attr in BANNED_CALLS
-                and isinstance(func.value, ast.Name)
-                and func.value.id in ("builtins", "__builtins__")
-            ):
-                found.append(func.value.id + "." + func.attr)
+        if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
+            found.append(node.id)
+        elif isinstance(node, ast.Constant) and node.value in BANNED_NAMES:
+            found.append(repr(node.value))
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr in BANNED_NAMES
+            and isinstance(node.value, ast.Name)
+            and node.value.id in ("builtins", "__builtins__")
+        ):
+            found.append(node.value.id + "." + node.attr)
         elif isinstance(node, ast.Import):
-            found += [a.name for a in node.names if a.name.split(".")[0] == "ast"]
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "ast":
-            found.append(node.module)
+            found += [a.name for a in node.names if a.name.split(".")[0] in BANNED_MODULES]
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").split(".")[0]
+            if module in BANNED_MODULES:
+                found.append(node.module)
     return found
 
 
 class NoEval(unittest.TestCase):
-    def test_checker_itself(self):
-        self.assertEqual(banned_uses("import re\nP = re.compile(r'x')\n"), [])
-        self.assertEqual(banned_uses("x = eval('1')"), ["eval"])
-        self.assertEqual(banned_uses("import builtins\nbuiltins.exec('1')"), ["builtins.exec"])
-        self.assertEqual(banned_uses("from ast import parse"), ["ast"])
+    def test_checker_allows(self):
+        for src in ["import re\nP = re.compile(r'x')\n",
+                    "from fractions import Fraction\nx = Fraction('1/2')\n",
+                    "def evaluate(expr):\n    return expr  # no eval here\n"]:
+            self.assertEqual(banned_uses(src), [], src)
+
+    def test_checker_rejects(self):
+        for src in ["x = eval('1')",
+                    "e = eval\ne('1')",
+                    "from builtins import eval as e",
+                    "import builtins\ngetattr(builtins, 'eval')('1')",
+                    "__builtins__['eval']('1')",
+                    "import builtins as b\nb.eval('1')",
+                    "import importlib\nimportlib.import_module('ast')",
+                    "import builtins\nbuiltins.exec('1')",
+                    "from ast import parse",
+                    "f = compile",
+                    "g = __import__('os')"]:
+            self.assertNotEqual(banned_uses(src), [], src)
 
     def test_source_does_not_use_eval(self):
         path = os.path.join(os.path.dirname(os.path.abspath(calc.__file__)), "calc.py")

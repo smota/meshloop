@@ -4,5 +4,13 @@
   "difficulty": "medium",
   "kind": "implement",
   "description": "Implement check() in src/lib.rs of this Rust crate as SPEC.md describes. Change only src/lib.rs and leave tests/ and Cargo.toml unchanged; use no dependencies. Check with: cargo test --offline (from the repository root). When done, reply with one short sentence.",
-  "test_command": ["cargo", "test", "--offline", "--quiet"]
+  "test_command": [
+    "cargo",
+    "test",
+    "--offline",
+    "--quiet"
+  ],
+  "editable": [
+    "src/lib.rs"
+  ]
 }

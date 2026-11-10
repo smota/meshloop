@@ -80,10 +80,10 @@ cargo run -p xtask -- bench-world-s
 ```
 
 ### 2.4a Learning-plane baseline (`xtask bench-learning`, live, manual)
-Issue #144 fixes the task set and configuration that the learning-plane comparison (#140) is measured against. Everything is in [`benches/learning-plane/`](../../benches/learning-plane/): `taskset.json` (version `lp-2`, with the tier a plan reviewer sets for each task), eight tasks with a seed, hidden tests and a reference solution, `verify.py` (runs the hidden tests on a copy, so edits to `tests/` cannot pass a task), and `meshloop.toml` (codex, claude and pi with two models each). Results and proposed thresholds are in [`BASELINE.md`](../../benches/learning-plane/BASELINE.md). lp-1 is kept as a superseded record.
+Issue #144 fixes the task set and configuration that the learning-plane comparison (#140) is measured against. Everything is in [`benches/learning-plane/`](../../benches/learning-plane/): `taskset.json` (version `lp-3`, with the tier a plan reviewer sets for each task), eight tasks with a seed, hidden tests, a reference solution and the list of files a worker may edit, `verify.py` (tests a tree built from the pristine seed, the worker's editable files and the hidden tests, with Python run isolated, so edited tests or shadowing modules such as `unittest.py` or `sitecustomize.py` cannot pass a task), and `meshloop.toml` (codex, claude and pi with two models each). Results and proposed thresholds are in [`BASELINE.md`](../../benches/learning-plane/BASELINE.md). lp-1 and lp-2 are kept as superseded records.
 
 ```bash
-# Offline: each seed fails its hidden tests and passes them with the reference solution
+# Offline: each seed fails, each reference passes, and tamper cases (shadowing modules, edited tests) fail
 cargo run -p xtask -- bench-learning --validate
 # Live: uses harness quota; one disposable repository per task and repetition
 cargo run -p xtask -- bench-learning --live --reps 3 --bin <meshloop> --bin-commit <sha> \

@@ -228,16 +228,46 @@ fn validate(lp: &Path, tasks: &[TaskMeta]) -> ExitCode {
         let verify = lp.join("verify.py");
         let seed_exit = run_verify(&verify, &task_dir, &tmp, false);
         let reference_exit = run_verify(&verify, &task_dir, &tmp, true);
-        let _ = fs::remove_dir_all(&tmp);
-        let pass = seed_exit.is_some_and(|c| c == 1) && reference_exit == Some(0);
-        ok &= pass;
+        let mut pass = seed_exit.is_some_and(|c| c == 1) && reference_exit == Some(0);
         println!(
             "  [{}] {:<18} seed exit {:?} (want 1), reference exit {:?} (want 0)",
-            if pass { "PASS" } else { "FAIL" },
+            if seed_exit == Some(1) && reference_exit == Some(0) {
+                "PASS"
+            } else {
+                "FAIL"
+            },
             t.id,
             seed_exit,
             reference_exit
         );
+        // Tamper cases: an unsolved seed plus a file that would fake a pass under a naive
+        // driver must still fail verification (lp-3).
+        for (lang, name, file, body) in TAMPER_CASES {
+            if t.language != *lang {
+                continue;
+            }
+            let case = tmp.with_extension(name);
+            let _ = fs::remove_dir_all(&case);
+            let exit = copy_dir(&tmp, &case)
+                .and_then(|_| {
+                    if let Some(parent) = case.join(file).parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(case.join(file), body)
+                })
+                .ok()
+                .and_then(|_| run_verify(&verify, &task_dir, &case, false));
+            let _ = fs::remove_dir_all(&case);
+            let case_pass = exit == Some(1);
+            pass &= case_pass;
+            println!(
+                "  [{}] {:<18} tamper {name}: exit {exit:?} (want 1)",
+                if case_pass { "PASS" } else { "FAIL" },
+                t.id
+            );
+        }
+        let _ = fs::remove_dir_all(&tmp);
+        ok &= pass;
     }
     if ok {
         ExitCode::SUCCESS
@@ -245,6 +275,48 @@ fn validate(lp: &Path, tasks: &[TaskMeta]) -> ExitCode {
         ExitCode::FAILURE
     }
 }
+
+/// (case name, file written into an unsolved seed, content). Each would make a naive
+/// `python3 -m unittest` in the candidate tree report success.
+const TAMPER_CASES: &[(&str, &str, &str, &str)] = &[
+    (
+        "python",
+        "shadow-unittest",
+        "unittest.py",
+        "import sys\nprint('OK')\nsys.exit(0)\n",
+    ),
+    (
+        "python",
+        "sitecustomize",
+        "sitecustomize.py",
+        "import os\nos._exit(0)\n",
+    ),
+    (
+        "python",
+        "conftest",
+        "conftest.py",
+        "import os\nos._exit(0)\n",
+    ),
+    ("python", "pth", "zz-hook.pth", "import os; os._exit(0)\n"),
+    (
+        "python",
+        "edited-tests",
+        "tests/test_visible.py",
+        "import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n",
+    ),
+    (
+        "rust",
+        "edited-tests",
+        "tests/hidden.rs",
+        "#[test]\nfn ok() {}\n",
+    ),
+    (
+        "rust",
+        "edited-tests-visible",
+        "tests/visible.rs",
+        "#[test]\nfn ok() {}\n",
+    ),
+];
 
 fn run_verify(verify: &Path, task_dir: &Path, cwd: &Path, with_reference: bool) -> Option<i32> {
     let mut cmd = Command::new("python3");
@@ -538,7 +610,10 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
             let quota = record.quota_hit.clone();
             results.runs.push(record);
             results.summary = summarize(&results.runs);
-            write_results(&out.join("results.json"), &results, &[]);
+            if let Err(e) = write_results(&out.join("results.json"), &results, &[]) {
+                eprintln!("bench-learning: {e}; stopping");
+                return ExitCode::FAILURE;
+            }
             if let Some(q) = quota {
                 results.stopped_early = Some(format!(
                     "stopped after rep {rep} task {}: quota or rate limit signalled ({q})",
@@ -555,9 +630,15 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
     results.finished_unix = unix_now();
     results.summary = summarize(&results.runs);
     let redactions = redactions(root, &out);
-    write_results(&out.join("results.json"), &results, &[]);
+    if let Err(e) = write_results(&out.join("results.json"), &results, &[]) {
+        eprintln!("bench-learning: {e}");
+        return ExitCode::FAILURE;
+    }
     if let Some(path) = &opts.results {
-        write_results(path, &results, &redactions);
+        if let Err(e) = write_results(path, &results, &redactions) {
+            eprintln!("bench-learning: {e}");
+            return ExitCode::FAILURE;
+        }
         println!(
             "bench-learning: redacted results written to {}",
             path.display()
@@ -581,20 +662,20 @@ fn redactions(root: &Path, out: &Path) -> Vec<(String, String)> {
     r
 }
 
-fn write_results(path: &Path, results: &Results, redactions: &[(String, String)]) {
-    let Ok(mut text) = serde_json::to_string_pretty(results) else {
-        eprintln!("bench-learning: cannot serialize results");
-        return;
-    };
+fn write_results(
+    path: &Path,
+    results: &Results,
+    redactions: &[(String, String)],
+) -> Result<(), String> {
+    let mut text = serde_json::to_string_pretty(results)
+        .map_err(|e| format!("cannot serialize results: {e}"))?;
     for (from, to) in redactions {
         text = text.replace(from.as_str(), to);
     }
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    if let Err(e) = fs::write(path, text + "\n") {
-        eprintln!("bench-learning: cannot write {}: {e}", path.display());
-    }
+    fs::write(path, text + "\n").map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Whether a model tier as `doctor --json` parses it fits a task tier (`tier_fits`).
@@ -780,7 +861,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
     let _ = fs::remove_dir_all(&dir);
     if let Err(e) = seed_repo(ctx, task, &repo) {
         rec.errors.push(format!("seed: {e}"));
-        rec.repo_removed = fs::remove_dir_all(&repo).is_ok() || !repo.exists();
+        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
         return rec;
     }
     rec.seed_commit = capture_in(&repo, "git", &["rev-parse", "HEAD"]).map(|s| s.trim().into());
@@ -794,7 +875,7 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
     });
     if let Err(e) = written {
         rec.errors.push(format!("write config/plan: {e}"));
-        rec.repo_removed = fs::remove_dir_all(&repo).is_ok();
+        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
         return rec;
     }
     let db = repo.join(".meshloop").join("state.sqlite");
@@ -831,8 +912,13 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
     );
     rec.review_exit = review.code;
     if review.code != Some(0) {
-        rec.errors
-            .push(format!("review-plan exit {:?}", review.code));
+        rec.errors.push(format!(
+            "review-plan exit {:?}; task aborted before run",
+            review.code
+        ));
+        rec.total_wall_seconds = round2(total.elapsed().as_secs_f64());
+        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+        return rec;
     }
 
     let run_start = Instant::now();
@@ -1004,14 +1090,22 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
     rec.quota_state_after = read_quota(&db).unwrap_or_default();
     rec.quota_hit = quota_hit(&rec);
     rec.total_wall_seconds = round2(total.elapsed().as_secs_f64());
-    rec.repo_removed = match fs::remove_dir_all(&repo) {
+    rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+    rec
+}
+
+/// Deletes the disposable repository (worktrees included). True when it is gone.
+fn remove_repo(repo: &Path, errors: &mut Vec<String>) -> bool {
+    if !repo.exists() {
+        return true;
+    }
+    match fs::remove_dir_all(repo) {
         Ok(()) => true,
         Err(e) => {
-            rec.errors.push(format!("remove disposable repo: {e}"));
+            errors.push(format!("remove disposable repo: {e}"));
             false
         }
-    };
-    rec
+    }
 }
 
 fn seed_repo(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
@@ -1646,6 +1740,14 @@ fn summarize(runs: &[RunRecord]) -> Value {
                 .filter(|a| a.tokens.status.starts_with("reported"))
                 .filter_map(|a| a.tokens.total.map(|t| t as f64))
                 .collect();
+            let full = atts
+                .iter()
+                .filter(|a| a.tokens.status == "reported")
+                .count();
+            let recovered = atts
+                .iter()
+                .filter(|a| a.tokens.status.starts_with("reported (recovered"))
+                .count();
             let mut models: Vec<String> = atts
                 .iter()
                 .flat_map(|a| a.tokens.reported_models.clone())
@@ -1661,7 +1763,12 @@ fn summarize(runs: &[RunRecord]) -> Value {
                 "attempt_checks_passed": rate(passed, atts.len()),
                 "duration_seconds_p50": opt2(percentile(&dur, 0.5)),
                 "duration_seconds_p95": opt2(percentile(&dur, 0.95)),
-                "tokens_reported_attempts": tok.len(),
+                "tokens_reported_attempts": full,
+                "tokens_recovered_attempts": recovered,
+                "tokens_not_reported_attempts": atts.len() - full - recovered,
+                "tokens_figures_basis": if recovered == 0 { "fully reported" }
+                    else if full == 0 { "recovered only (truncated evidence)" }
+                    else { "mixed: fully reported and recovered" },
                 "tokens_total_sum": tok.iter().sum::<f64>(),
                 "tokens_total_mean": opt2(mean(&tok)),
                 "tokens_total_median": opt2(median(&tok)),
@@ -1718,7 +1825,10 @@ fn aggregate_file(root: &Path, path: &Path, out: Option<&Path>) -> ExitCode {
     results.summary = summarize(&results.runs);
     if let Some(out) = out {
         let dir = absolute(path.parent().unwrap_or(Path::new(".")));
-        write_results(out, &results, &redactions(root, &dir));
+        if let Err(e) = write_results(out, &results, &redactions(root, &dir)) {
+            eprintln!("bench-learning: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     print_summary(&results.summary);
     ExitCode::SUCCESS
@@ -1859,6 +1969,56 @@ mod tests {
             )
         );
         assert_eq!(parse_repair_session("other"), (None, None));
+    }
+
+    #[test]
+    fn write_results_reports_failure() {
+        let dir = std::env::temp_dir().join(format!("ml-lp-wr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("file");
+        fs::write(&blocker, "x").unwrap();
+        // A path below a regular file cannot be created.
+        assert!(write_results(&blocker.join("r.json"), &Results::default(), &[]).is_err());
+        assert!(write_results(&dir.join("ok.json"), &Results::default(), &[]).is_ok());
+        let mut errors = Vec::new();
+        assert!(remove_repo(&dir, &mut errors));
+        assert!(remove_repo(&dir, &mut errors));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn token_counts_split_reported_and_recovered() {
+        let att = |status: &str| AttemptRecord {
+            harness: Some("claude".into()),
+            model_ref: Some("sonnet".into()),
+            checks_passed: true,
+            tokens: TokenReport {
+                status: status.into(),
+                total: (status != "not reported").then_some(100),
+                ..TokenReport::default()
+            },
+            ..AttemptRecord::default()
+        };
+        let runs = vec![RunRecord {
+            task_id: "a".into(),
+            rep: 1,
+            success: true,
+            attempts: vec![
+                att("reported"),
+                att("reported (recovered from truncated evidence)"),
+                att("not reported"),
+            ],
+            ..RunRecord::default()
+        }];
+        let arm = &summarize(&runs)["by_harness_model"][0];
+        assert_eq!(arm["tokens_reported_attempts"], 1);
+        assert_eq!(arm["tokens_recovered_attempts"], 1);
+        assert_eq!(arm["tokens_not_reported_attempts"], 1);
+        assert_eq!(
+            arm["tokens_figures_basis"],
+            "mixed: fully reported and recovered"
+        );
     }
 
     #[test]

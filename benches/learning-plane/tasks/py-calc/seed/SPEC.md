@@ -26,8 +26,10 @@ Semantics:
   unbalanced parentheses, empty parentheses, a missing operand, two numbers in a row
   (`1 2`) or implicit multiplication (`2(3)`, `(1)(2)`).
 
-The built-in functions `eval`, `exec`, `compile` and `__import__` must not be called
-(`re.compile` and other module functions are fine), and the `ast` module must not be
-imported.
+`calc.py` must not use the built-ins `eval`, `exec`, `compile` or `__import__` in any
+form: no call, no alias (`e = eval`), no lookup by name (`getattr(builtins, "eval")`,
+`__builtins__["eval"]`), and no string literal equal to one of those names. It must not
+import `builtins`, `importlib` or `ast`. Functions of other modules, such as
+`re.compile`, are fine.
 
 Only `calc.py` may change.

@@ -4,5 +4,15 @@
   "difficulty": "hard",
   "kind": "implement",
   "description": "Implement parse(), compare() and satisfies() in semver.py as SPEC.md describes (Semantic Versioning 2.0.0 precedence and npm-style ranges). Change only semver.py and leave tests/ unchanged. Check with: python3 -m unittest discover -s tests (from the repository root). When done, reply with one short sentence.",
-  "test_command": ["python3", "-m", "unittest", "discover", "-s", "tests"]
+  "test_command": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests"
+  ],
+  "editable": [
+    "semver.py"
+  ]
 }

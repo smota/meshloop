@@ -1,6 +1,6 @@
 {
-  "version": "lp-2",
-  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier or meshloop.toml requires a new version and a new baseline. lp-2 supersedes lp-1: py-calc's no-eval check is an AST check (lp-1's regex also matched re.compile), and plans carry the tier a plan reviewer would set.",
+  "version": "lp-3",
+  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier, verify.py or meshloop.toml requires a new version and a new baseline. lp-3 supersedes lp-2 (integrity hardening): verify.py tests only the pristine seed plus the task's editable files plus the hidden tests, in an isolated interpreter, and py-calc's ban on eval/exec/compile/__import__ also covers aliases, lookups by name and imports of builtins, importlib and ast.",
   "tasks": [
     "py-median-bugfix",
     "py-wordfreq",
