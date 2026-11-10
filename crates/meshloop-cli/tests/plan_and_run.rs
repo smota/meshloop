@@ -2792,6 +2792,55 @@ impl Drop for DetachedReaper {
     }
 }
 
+/// Live (non-zombie) processes whose working directory lies under `root`. Linux only: the
+/// POSIX harness leads its own process group, so killing a detached driver does not kill
+/// it, and only a recorded attempt pid lets the reaper reclaim it (ADR 0025, #161).
+#[cfg(target_os = "linux")]
+fn live_processes_under(root: &Path) -> Vec<u32> {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let live = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let state = stat.rsplit_once(')')?.1.split_whitespace().next()?;
+                    Some(state != "Z" && state != "X")
+                })
+                .unwrap_or(false);
+            live && fs::read_link(format!("/proc/{pid}/cwd"))
+                .map(|cwd| cwd.starts_with(&root))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn live_processes_under(_root: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Asserts, within a bounded wait for SIGKILLed processes to be reaped, that nothing
+/// spawned for this test still runs under `root`. A survivor is an orphan that would
+/// otherwise outlive the suite and fail `conc.orphan_process_count` in `xtask bench`.
+fn assert_no_live_processes_under(root: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut live = live_processes_under(root);
+    while !live.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        live = live_processes_under(root);
+    }
+    assert!(
+        live.is_empty(),
+        "orphaned processes survive under {}: {live:?}",
+        root.display()
+    );
+}
+
 fn cli_json(dir: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
     let output = meshloop()
         .current_dir(dir)
@@ -2964,6 +3013,7 @@ fn killed_detached_driver_is_lost_within_one_heartbeat() {
     }
     assert!(alive, "detached driver was not reported alive");
     let conn = rusqlite::Connection::open(&db).unwrap();
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
     let pid: i64 = conn
         .query_row(
             "SELECT pid FROM run_driver_liveness WHERE graph_id='g_lost'",
@@ -2971,7 +3021,29 @@ fn killed_detached_driver_is_lost_within_one_heartbeat() {
             |row| row.get(0),
         )
         .unwrap();
+    // Kill the driver only after it has recorded the harness pid. On POSIX the harness
+    // leads its own process group, so a driver killed between spawning the harness and
+    // persisting its pid leaves an untracked `--hang` process nothing can reclaim (#161).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut harness_recorded = false;
+    while std::time::Instant::now() < deadline {
+        harness_recorded = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempts WHERE graph_id='g_lost' AND pid IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok_and(|count| count > 0);
+        if harness_recorded {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     drop(conn);
+    assert!(
+        harness_recorded,
+        "detached driver never recorded its harness pid"
+    );
     assert!(pid > 0);
     meshloop_adapters::process::kill_process_tree(pid as u32);
     let killed = std::time::Instant::now();
@@ -3028,6 +3100,7 @@ fn killed_detached_driver_is_lost_within_one_heartbeat() {
     assert_eq!(inspect["data"]["driver_log"], driver_log);
     assert_eq!(inspect["data"]["driver_hint"], "resume");
     reaper.reap();
+    assert_no_live_processes_under(&dir);
     fs::remove_dir_all(&dir).ok();
 }
 
