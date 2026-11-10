@@ -13,6 +13,8 @@
 - Tracking: [#74](https://github.com/smota/meshloop/issues/74), within [#71](https://github.com/smota/meshloop/issues/71)
 - Inspected source: `1e6a831e84c6b74528ecc7a4d88d7238e579e90f`
 
+> **Scope narrowed by ADR 0039 (proposed), 2026-11-10.** If [ADR 0039](0039-native-sub-agent-dispatch.md) is accepted, atomic job assignment and termination observation apply to subprocess attempts. Native worker attempts start no Meshloop-owned process, so this mechanism does not apply to them and gives them no cancellation proof. This note does not change this record's decision for subprocess attempts.
+
 ## Context and constraints
 
 At the inspected revision, `process/job.rs::spawn_owned` calls `Command::spawn`
