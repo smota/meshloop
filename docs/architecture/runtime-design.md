@@ -324,28 +324,47 @@ only when all of the following hold:
 - the routed harness has `dispatch = "native"`;
 - its `kind` is set and equals the origin harness;
 - an origin session is set;
-- that `kind` is in the set proven live by #152.
+- that `kind` is in the proven set (below).
 
 `kind` is optional in config (`HarnessConfig::kind`, config.rs:117-118), and a harness
 without one is never eligible. `doctor` refuses `native` for an unproven or unset kind, and
 `dispatch_warnings` reports a setting that can never apply. Planner, reviewer and
 model-review dispatch are never native.
 
+**Proven set.** The proven set is a compiled-in, read-only capability table in the
+composition root, for example `crates/meshloop-cli/src/native_support.rs`. Each entry has:
+- the harness `kind`;
+- the version range observed in the live proof;
+- a link to the #152 evidence and its date.
+
+How the table is maintained and used:
+- It is mirrored in docs/engineering/harnesses.md "Native dispatch support".
+- `doctor` and `dispatch_warnings` read it. `doctor` warns when a probed version is
+  outside the observed range.
+- It is not configurable through `meshloop.toml`. An operator cannot certify a harness.
+- It changes only by pull request with new live evidence.
+- Nodecode additionally needs an ADR 0038 amendment.
+- The table records observed capability. It is not a per-harness CLI flag, so ADR 0003's
+  rule that Meshloop ships no per-harness flags is unaffected.
+
 Which command acts on an eligible node:
 - **`meshloop next`** parks eligible nodes. It is the only command that does.
 - **`run`, `resume` and detached drivers** leave eligible nodes `ready`. They return
   `AwaitingNativePull`, or `AwaitingNativeReport` when only parked attempts remain, and
   `loop_until_idle` returns on both instead of re-ticking.
+- **`next`** returns `AwaitingSubprocessDriver` when the only ready nodes left are routed
+  to subprocess dispatch.
 
 **`meshloop next [--graph <id>] [--wait-seconds <n>] --json`.** It is origin-bound and
 never starts a subprocess worker, so it never holds an owned process when it returns.
 Subprocess-routed ready nodes are left for `run` or `resume`. `next` refuses while another
-driver is live on the graph: one ticking writer at a time. Steps, in order:
+driver is live on the graph: one ticking writer at a time. `report` only appends, so it is
+allowed while another driver is live. Steps, in order:
 1. For every parked attempt past `deadline_at`, append `ParkDeadlinePassed`.
 2. Run the loop steps that need no subprocess worker: verify reported attempts, merge,
    promote. Stop between ticks when `--wait-seconds` expires. The default is finite and
-   set by #148. The overrun is at most one verification, which is bounded by the check
-   timeout.
+   set by #148. One verification already running is not interrupted, so `next` can
+   overrun `--wait-seconds` by up to the check timeout (`task_timeout`, run_loop.rs:1616).
 3. For each eligible ready node within `max_concurrent_workers` (parked attempts occupy
    slots):
    1. If the task's previous attempt used the other mode, append `DispatchModeChanged`
@@ -354,8 +373,8 @@ driver is live on the graph: one ticking writer at a time. Steps, in order:
    3. Persist on the attempt: mode, origin harness and session, requested harness and
       model, base revision, `parked_at`, and
       `deadline_at = parked_at + [limits] task_timeout_seconds`.
-   4. Record the expected-state baseline: the integrate HEAD and the tracked-file
-      porcelain digest of the origin checkout.
+   4. Record the expected-state baseline: the integrate HEAD, the origin checkout HEAD,
+      and the origin checkout's tracked-file porcelain digest.
    5. Append `AttemptParked`. The attempt row and the event are written in one store
       transaction.
 
@@ -386,8 +405,9 @@ The origin binding is an unauthenticated claim, like `--as`.
    - The integrate worktree's HEAD must equal the last ledger-recorded
      `IntegrationOwnerMerge` result, or the park baseline if there is none, and its
      porcelain must be clean.
-   - The origin checkout's tracked-file porcelain digest must equal the park baseline.
-     HEAD moves recorded by a Meshloop integrate event are expected; any other move fails.
+   - The origin checkout's HEAD must equal the park baseline, or the result of a
+     ledger-recorded Meshloop integrate event since park. Its tracked-file porcelain digest
+     must equal the park baseline.
    - Any other difference fails the attempt and lists the paths.
    - Today neither `merge_accepted` nor `integrate_into` records the resulting HEAD
      (run_loop.rs:1347-1355, 2644-2652). #149 adds it.
@@ -419,9 +439,12 @@ but not required by ADR 0039, for subprocess attempts.
 - **Cancel.** `meshloop cancel` on `awaiting-report` appends `Cancel` with reason
   `native: tracking stopped; sub-agent not stopped by Meshloop`. It calls no harness
   method and uses no recorded PID. Its JSON names the attempt and the origin.
-- **Attestation.** `meshloop cancel --task <id> --attest-stopped --as <identity>` appends
-  `NativeStopAttested` on a native attempt in `failed` or `cancelled` (after `Cancel` when
-  the attempt is still parked). The executor is the identity.
+- **Attestation.** `meshloop cancel --task <id> --attempt <id> --attest-stopped --as <identity>`
+  appends `NativeStopAttested` for that native attempt.
+  - It is recorded as a self-transition on `failed`, `cancelled`, `accepted` or
+    `integrated`. When the attempt is still parked, `Cancel` is appended first.
+  - The executor is the identity.
+  - It covers only the named attempt.
 - **Cleanup.** A native attempt's worktree is eligible for cleanup (ADR 0033, #142) only
   in one of two cases:
   - a `NativeStopAttested` event exists;
@@ -449,11 +472,16 @@ but not required by ADR 0039, for subprocess attempts.
 - crash between park and report, then `resume`;
 - a report claiming success while checks fail;
 - an out-of-worktree change, versus a Meshloop merge that is not flagged;
+- a commit in the origin checkout during park that fails the attempt, versus a
+  ledger-recorded Meshloop integrate that does not;
 - a commit after report that is not integrated;
 - an empty diff;
 - a mode change event;
 - the `--wait-seconds` bound;
-- an unproven or unset kind refused by `doctor`;
+- an unproven or unset kind refused by `doctor`, and a probed version outside the
+  observed range warned about;
+- `AwaitingSubprocessDriver` from `next`, and `report` accepted while another driver is
+  live;
 - refusal of a ledger with an unknown state or event.
 
 Live proof per harness is #152, not CI.

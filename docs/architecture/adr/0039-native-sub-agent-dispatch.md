@@ -6,10 +6,10 @@
 - Author/executor: Claude (Opus 5.5), builder worker for #146
 - Reviewer: Claude (Opus) joint review round 1, fresh context, ACCEPT WITH CHANGES; all findings adopted by the coordinator and applied
 - Decision owner: Samuel
-- Approval evidence: none. The five owner decisions on goal #145 (2026-11-10) are inputs. The #149 deviation was accepted under delegated owner authority on 2026-11-10 (decision 6)
+- Approval evidence: none. The five owner decisions on goal #145 (2026-11-10) are inputs. ADR 0039 decision 6 is an architect decision under delegated owner authority (2026-11-10)
 - Supersedes: none. Narrows the scope of [ADR 0003](0003-harness-contracts.md) (dispatch through `HarnessCapabilities`), [0005](0005-execution-recovery.md) (process reconciliation), [0025](0025-process-tree-ownership.md) and [0035](0035-atomic-process-job-assignment.md) to subprocess attempts. [ADR 0007](0007-verification.md) applies to every mode unchanged
 - Superseded by: none
-- Related: ADR 0038 (#133, proposed), "Nodecode as learning plane and harness; kernel unchanged"; reviewed together with this record
+- Related: [ADR 0038](0038-nodecode-learning-plane-and-harness.md) (#133), "Nodecode as learning plane and harness; kernel authority unchanged"; reviewed together with this record
 - Tracking: [#146](https://github.com/smota/meshloop/issues/146), goal [#145](https://github.com/smota/meshloop/issues/145); implementation #147 to #153
 - Inspected source: `45ef6a4`
 
@@ -59,7 +59,8 @@ runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
      `Cancel`.
    - `DispatchModeChanged` is a ready → ready event with a mandatory reason, appended
      whenever a task's new attempt changes mode.
-   - `NativeStopAttested` is a self-transition on failed or cancelled; see decision 4.
+   - `NativeStopAttested` is a per-attempt self-transition on failed, cancelled, accepted
+     or integrated; see decision 4.
 2. **Eligibility and surface.**
    - **Eligibility.** A node is native-eligible when every condition holds:
      - its routed harness has `dispatch = "native"`;
@@ -67,12 +68,18 @@ runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
      - an origin session is set;
      - it is a run-loop worker attempt;
      - the `kind` is in the set proven by #152.
+
+     The proven set is a compiled-in capability table with evidence links, changed only by
+     PR; it is not configurable.
    - **`doctor`** refuses a `native` setting for an unproven or unset `kind`, and warns
      when the setting can never apply.
    - **`meshloop next`** is the only command that parks eligible nodes. `run`, `resume`
-     and detached drivers leave them `ready`. `next` never starts subprocess workers, and
-     `--wait-seconds` bounds how long it runs.
-   - **`meshloop report`** records that an attempt finished. It takes no verdict.
+     and detached drivers leave them `ready`. `next` never starts subprocess workers and
+     returns `AwaitingSubprocessDriver` when only subprocess-routed ready nodes remain.
+     `--wait-seconds` bounds how long it runs; a verification already running can overrun
+     the bound by up to the check timeout.
+   - **`meshloop report`** records that an attempt finished. It takes no verdict. It only
+     appends, so it is allowed while another driver is live.
    - Both commands are origin-bound. They are the contract; the MCP tools `meshloop_next`
      and `meshloop_report` wrap them.
 3. **Evidence rule.** Pass or fail comes only from observation:
@@ -95,7 +102,8 @@ runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
    - **Liveness.** None is observed.
    - **Restart.** `resume --restart` refuses while an attempt is `awaiting-report`.
    - **Cleanup.** Every native attempt's worktree is liveness-uncertain. Cleanup proceeds
-     only after `meshloop cancel --attest-stopped --as <identity>` (`NativeStopAttested`),
+     only after `meshloop cancel --task <id> --attempt <id> --attest-stopped --as <identity>`
+     (`NativeStopAttested`),
      or after the verified revision is landed and the worktree still equals it at cleanup
      preview. This is a dependency on #142's cleanup eligibility.
 5. **Status.** `status` and `inspect` show, for each native attempt, its mode, origin,
@@ -107,7 +115,7 @@ runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
    is amended to read "retries". A retry is native again unless routing or policy says
    otherwise, and a mode change is a `DispatchModeChanged` event. (Recorded architect
    decision under delegated owner authority, 2026-11-10.)
-7. **Feedback and learning (ADR 0038, #133, proposed).**
+7. **Feedback and learning ([ADR 0038](0038-nodecode-learning-plane-and-harness.md), #133).**
    - **Routing feedback.** The feedback key gains the dispatch mode. Every native outcome
      is recorded under model `unverified`, with the requested model stored beside it for
      display. This lasts until a harness offers a model observation that Meshloop reads
@@ -149,7 +157,8 @@ runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
   unproven until #152.
 - **Partial out-of-worktree detection.** Undetected writes include:
   - the home directory, other repositories and temporary files;
-  - sibling attempt worktrees, which are attributed to that sibling.
+  - sibling attempt worktrees, which are attributed to that sibling;
+  - untracked files in the origin checkout.
 
   Operator edits to tracked files in the origin checkout fail the attempt, a false
   positive by design.
@@ -185,5 +194,3 @@ None yet; this is a proposal. The planned scenarios are listed in runtime-design
 "Native dispatch (ADR 0039)". They include the named test "commit after report is not
 integrated". All of them run under `cargo test --workspace --locked --offline`. Live
 proof is #152 and the benchmark is #153.
-
-ADR 0038 is linked relatively once #133 merges.

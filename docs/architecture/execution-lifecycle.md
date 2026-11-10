@@ -82,8 +82,10 @@ flowchart LR
 | verifying | failed | deterministic-checks-failed event | also when the expected-state check fails, or the attempt worktree changed between the snapshot commit and the post-check re-read |
 | failed | failed | native-report-received event | late report after the deadline; stored, never verified. Refused when the attempt already has a native-report-received event |
 | cancelled | cancelled | native-report-received event | report after cancel; stored, never verified. Refused when the attempt already has a native-report-received event |
-| failed | failed | native-stop-attested event | `meshloop cancel --attest-stopped --as <identity>` on a native attempt; the executor is the identity; makes the worktree eligible for cleanup |
+| failed | failed | native-stop-attested event | `meshloop cancel --task <id> --attempt <id> --attest-stopped --as <identity>` on a native attempt; executor is the identity; makes that attempt's worktree eligible for cleanup |
 | cancelled | cancelled | native-stop-attested event | as above |
+| accepted | accepted | native-stop-attested event | as above |
+| integrated | integrated | native-stop-attested event | as above |
 | ready | ready | dispatch-mode-changed event | the new attempt's mode differs from the task's previous attempt; reason required |
 | awaiting-review | accepted | human-acceptance-recorded or verify-gate-passed event | additionally for native: the attempt branch tip equals the recorded `verified_revision`, else `accept` is refused |
 | accepted | integrated | integration-owner-merge event | additionally for native: merges `verified_revision`, not the branch tip, and records the resulting integrate HEAD |
