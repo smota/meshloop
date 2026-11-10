@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::state::{TaskState, transition};
+use meshloop_domain::state::{Event, TaskState, transition};
 use meshloop_domain::task_graph::TaskId;
 
 use crate::ports::{StoreError, TransitionRecord};
@@ -27,19 +27,40 @@ pub fn replay(records: &[TransitionRecord]) -> HashMap<AttemptKey, TaskState> {
 
 /// Legal per-task fold: events in order, grouped by `task_id`, through `transition()`.
 /// `attempt_id` is metadata on the row, not the projection key. This is what `tick`,
-/// `status`, and `resume` read.
+/// `status`, and `resume` read, and what the store checks every append against.
+///
+/// One tolerance, for ledgers written before compare-and-append (issue #167): a driver
+/// working from a stale view could append the cancelled attempt's own exit, check,
+/// verify-gate or retry events after `Cancelled`. Such a row is skipped and the task
+/// stays `Cancelled` only when all of these hold (see [`stale_after_cancel`]):
+/// the task is `Cancelled`, the row names the attempt the `Cancel` row named, the row
+/// is internally a legal transition from a state other than `Cancelled`, and its event
+/// is one a driver records for a running attempt. Any other row after `Cancelled` is
+/// still `Corrupt`. No legal event leaves `Cancelled`, so a ledger that folded before
+/// folds to exactly the same states now.
 pub fn replay_tasks(
     records: &[TransitionRecord],
 ) -> Result<HashMap<TaskId, TaskState>, StoreError> {
     let mut projection: HashMap<TaskId, TaskState> = HashMap::new();
+    let mut cancelled_attempt: HashMap<TaskId, AttemptId> = HashMap::new();
     for record in records {
         let from = projection
             .get(&record.task_id)
             .copied()
             .unwrap_or(record.from);
+        if from == TaskState::Cancelled
+            && stale_after_cancel(record, cancelled_attempt.get(&record.task_id).copied())
+        {
+            continue;
+        }
         match transition(from, record.event) {
             Ok(to) if to == record.to => {
                 projection.insert(record.task_id, to);
+                if record.event == Event::Cancel
+                    && let Some(attempt) = record.attempt_id
+                {
+                    cancelled_attempt.insert(record.task_id, attempt);
+                }
             }
             Ok(other) => {
                 return Err(StoreError::Corrupt(format!(
@@ -56,6 +77,26 @@ pub fn replay_tasks(
         }
     }
     Ok(projection)
+}
+
+/// The issue #167 signature: a row the driver wrote for the attempt `cancel` had
+/// already cancelled, from the state it last saw. See [`replay_tasks`].
+fn stale_after_cancel(record: &TransitionRecord, cancelled: Option<AttemptId>) -> bool {
+    let driver_event = matches!(
+        record.event,
+        Event::HarnessExited
+            | Event::HarnessCrashedOrTimeout
+            | Event::DeterministicChecksPassed
+            | Event::DeterministicChecksFailed
+            | Event::VerifyGatePassed
+            | Event::LiveWorkerSettled
+            | Event::RetryAuthorized
+    );
+    driver_event
+        && cancelled.is_some()
+        && record.attempt_id == cancelled
+        && record.from != TaskState::Cancelled
+        && transition(record.from, record.event) == Ok(record.to)
 }
 
 /// View only: a persisted `Running` attempt with no matching live process is annotated
@@ -271,5 +312,179 @@ mod tests {
         let tasks = replay_tasks(&records).expect("legal fold");
         assert_eq!(tasks[&TaskId(1)], TaskState::Pending);
         assert_eq!(tasks[&TaskId(2)], TaskState::Ready);
+    }
+
+    /// The exact ledger issue #167 left behind, plus the retry the same tick appended.
+    fn cancelled_then_stale_driver_rows() -> Vec<TransitionRecord> {
+        vec![
+            record(
+                1,
+                None,
+                TaskState::Pending,
+                TaskState::Ready,
+                E::DependencySatisfied,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Verifying,
+                E::HarnessExited,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::Cancelled,
+                E::Cancel,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Failed,
+                TaskState::Ready,
+                E::RetryAuthorized,
+            ),
+        ]
+    }
+
+    #[test]
+    fn issue_167_ledger_folds_to_cancelled() {
+        let tasks = replay_tasks(&cancelled_then_stale_driver_rows()).expect("readable");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Cancelled);
+    }
+
+    #[test]
+    fn issue_167_tolerates_an_exit_recorded_after_cancel_while_running() {
+        let records = vec![
+            record(
+                1,
+                Some(1),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Cancelled,
+                E::Cancel,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Verifying,
+                E::HarnessExited,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::AwaitingReview,
+                E::DeterministicChecksPassed,
+            ),
+        ];
+        let tasks = replay_tasks(&records).expect("readable");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Cancelled);
+    }
+
+    #[test]
+    fn rows_after_cancel_outside_the_issue_167_signature_stay_corrupt() {
+        let base = || cancelled_then_stale_driver_rows()[..4].to_vec();
+        let tails = [
+            // Another attempt.
+            record(
+                1,
+                Some(2),
+                TaskState::Verifying,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+            // No attempt.
+            record(
+                1,
+                None,
+                TaskState::Verifying,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+            // Not a driver event for a running attempt.
+            record(
+                1,
+                Some(1),
+                TaskState::AwaitingReview,
+                TaskState::Accepted,
+                E::HumanAcceptanceRecorded,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::Cancelled,
+                E::Cancel,
+            ),
+            // Written from Cancelled itself.
+            record(
+                1,
+                Some(1),
+                TaskState::Cancelled,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+            // Internally inconsistent row.
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::Accepted,
+                E::DeterministicChecksFailed,
+            ),
+        ];
+        for tail in tails {
+            let mut records = base();
+            records.push(tail.clone());
+            assert!(
+                matches!(replay_tasks(&records), Err(StoreError::Corrupt(_))),
+                "must stay corrupt: {tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancel_without_an_attempt_tolerates_nothing_after_it() {
+        let records = vec![
+            record(1, None, TaskState::Pending, TaskState::Cancelled, E::Cancel),
+            record(
+                1,
+                None,
+                TaskState::Verifying,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+        ];
+        assert!(replay_tasks(&records).is_err());
     }
 }

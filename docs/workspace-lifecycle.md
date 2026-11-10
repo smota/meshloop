@@ -125,7 +125,7 @@ These limits stay as they are.
 - Eligibility is per candidate. A generation can be eligible while a separate driver row is blocked because its process is active.
 - The journal column `expected_after_token` is the constant `absent-unregistered`.
 - `migrate_v6_to_v7` commits the version 7 schema, then `migrate_v7_to_v8` opens a second transaction. Each cleanup journal insert is its own autocommit statement.
-- Workspace command failures use stable codes (`config-io`, `config-parse`, `config-harness`, `config-not-found`, `current-directory`, `io`, `corrupt`, `read-only`, `schema-upgrade-required`, `legacy-ownership-unresolved`, `plan-revision-mismatch`, `lifecycle-busy`, `fence-busy`). The codes omit local paths.
+- Workspace command failures use stable codes (`config-io`, `config-parse`, `config-harness`, `config-not-found`, `current-directory`, `io`, `corrupt`, `read-only`, `schema-upgrade-required`, `legacy-ownership-unresolved`, `plan-revision-mismatch`, `lifecycle-busy`, `fence-busy`, `transition-refused`). The codes omit local paths.
 
 After a deletion, recovery completes the stored journal row. It does not recompute the candidate hash. There is no automatic repair that rebuilds a removed worktree or a missing ledger.
 

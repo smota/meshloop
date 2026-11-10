@@ -119,6 +119,17 @@ pub enum StoreError {
     LifecycleBusy,
     /// The exclusive repository fence is held by another writer. Retry later.
     FenceBusy,
+    /// Compare-and-append refused a task event (issue #167): `event` is not a legal
+    /// transition from `from`, or `from` is not the task's persisted state, because
+    /// another writer (a `cancel`, another driver) appended first. Nothing was written.
+    /// The writer's view is stale; it must re-read the ledger, not retry blindly.
+    TransitionRefused {
+        task_id: TaskId,
+        /// The task's state in the ledger at append time. `None` when it has no events.
+        persisted: Option<TaskState>,
+        from: TaskState,
+        event: Event,
+    },
     Io(String),
     Corrupt(String),
 }

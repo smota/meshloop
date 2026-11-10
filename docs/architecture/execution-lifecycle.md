@@ -55,6 +55,44 @@ would make evidence ambiguous about which run it validates.
 Timeout and cancellation terminate the owned process tree, preserve redacted evidence, and
 land in `failed`/`cancelled` — never `accepted` or `integrated`, even partially.
 
+## Compare-and-append (issue #167)
+
+A transition is applied to the task's **persisted** state, not to a writer's view of
+it. The store appends a task event only inside one immediate SQLite transaction that
+first folds the task's events (the same per-task fold `tick`, `status` and `resume`
+read) and checks that the record's `from` is that state and that `from + event` gives
+the recorded `to`. Otherwise nothing is written and the append fails with the typed
+`StoreError::TransitionRefused` (public code `transition-refused`), never with
+`Corrupt`. Every run-table event writer goes through this check: single appends,
+transition-plus-attempt writes and plan mutations with their events.
+
+- The driver treats a refusal as "another writer changed this task": it re-reads the
+  ledger and continues from there, at most three times per tick. A task that is now
+  `cancelled` is no longer driven; a graph with nothing left to drive ends idle.
+- `cancel` re-reads after a refusal, at most three times per task, and cancels from the
+  state the driver left. It never appends over `integrated` or `cancelled`. Cancelling
+  from `failed` stays legal, as in the table above.
+- Workers: `cancel` stops a running attempt's worker before it appends, and stops a
+  worker the driver recorded while the `Cancel` was being written. The driver re-reads
+  the task right after it records a new worker's PID and stops the worker itself when
+  the task is no longer `running`, so a cancelled task never keeps a worker.
+
+### Ledgers written before compare-and-append
+
+Before this check, a driver working from a stale view could append the cancelled
+attempt's own events after `Cancelled` (for example `Cancelled` then
+`deterministic-checks-failed`), which made the graph unreadable. The per-task fold
+reads such ledgers as `cancelled` by skipping a row only when all of these hold: the
+task is `cancelled`; the row names the attempt the `Cancel` row named; the row is
+itself a legal transition from a state other than `cancelled`; and its event is one a
+driver records for a running attempt (harness-exited, harness-crashed or timeout,
+deterministic-checks-passed or failed, verify-gate-passed, live-worker-settled,
+retry-authorized). Any other row after `cancelled` is still corrupt. No legal event
+leaves `cancelled`, so every ledger that was readable before folds to the same states.
+The skipped rows stay in the ledger. A ledger that is corrupt in any other way has no
+automatic repair; restore it from a backup or start the run again with `resume
+--restart` (the plan is kept).
+
 ## Amendment 2026-11-10: native attempts (ADR 0039, accepted; implementation pending)
 
 Accepted with ADR 0039; not yet implemented (#147 to #150). The table and rules above are unchanged for

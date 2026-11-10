@@ -399,6 +399,18 @@ fn terminal(state: TaskState) -> bool {
     )
 }
 
+/// How many times one `tick` or one task's `cancel` re-reads the ledger after the store
+/// refused a stale append (issue #167) before it reports the refusal.
+const STALE_APPEND_RETRIES: u32 = 3;
+
+/// Compare-and-append refused this writer's event: another writer changed the task.
+fn append_refused(error: &OrchestratorError) -> bool {
+    matches!(
+        error,
+        OrchestratorError::Store(StoreError::TransitionRefused { .. })
+    )
+}
+
 impl<'a> RunLoop<'a> {
     /// Transitional admission: legacy producers cannot mutate bound or migration-marked runs.
     /// A run-loop run (issue #142) is bound by its generation, not a run binding row.
@@ -1007,7 +1019,24 @@ impl<'a> RunLoop<'a> {
         Ok(graph)
     }
 
+    /// One step of the saga. When the store refuses an append because another writer
+    /// changed a task first (a `cancel` landing between a worker's exit and its check
+    /// result, issue #167), the tick is re-read from the ledger. A task that is now
+    /// `Cancelled` is no longer driven. Bounded by `STALE_APPEND_RETRIES`; after that
+    /// the refusal is returned, never treated as corruption.
     pub fn tick(&mut self) -> Result<Tick, OrchestratorError> {
+        let mut refusals = 0;
+        loop {
+            match self.tick_once() {
+                Err(error) if append_refused(&error) && refusals < STALE_APPEND_RETRIES => {
+                    refusals += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn tick_once(&mut self) -> Result<Tick, OrchestratorError> {
         let graph_id = self
             .active_graph
             .clone()
@@ -1710,6 +1739,29 @@ impl<'a> RunLoop<'a> {
                     .update_attempt_pid(attempt_id, handle.pid, image.as_deref())?;
                 self.store
                     .update_attempt_pane(attempt_id, handle.pane_id.as_deref())?;
+                // A cancel that read this attempt before its PID was recorded could not
+                // stop the worker. Its `Cancel` is then already in the ledger: stop the
+                // worker here, so a cancelled task never keeps one running (issue #167).
+                let now = self
+                    .tasks(graph_id)?
+                    .get(&task_id)
+                    .copied()
+                    .unwrap_or(TaskState::Pending);
+                if now != TaskState::Running {
+                    harness.cancel(&handle).map_err(|e| {
+                        OrchestratorError::Illegal(format!(
+                            "task {} is {now:?}; could not stop its attempt {}: {e:?}",
+                            task_id.0, attempt_id.0
+                        ))
+                    })?;
+                    return Ok(Tick::Transition {
+                        task: task_id,
+                        attempt: Some(attempt_id),
+                        from: TaskState::Ready,
+                        to: TaskState::Running,
+                        event: Event::AttemptStarted,
+                    });
+                }
                 match harness.try_collect(&handle) {
                     Err(e) => {
                         self.record_quota(&candidate.harness, &e)?;
@@ -2512,14 +2564,20 @@ impl<'a> RunLoop<'a> {
                 None => true,
             };
             if dead {
-                let _ = self.append(
+                match self.append(
                     graph_id,
                     node.id,
                     attempt.map(|a| a.attempt_id),
                     TaskState::Running,
                     Event::HarnessCrashedOrTimeout,
                     Some("resume: no live process".into()),
-                )?;
+                ) {
+                    // Another writer (a cancel) ended the task first (issue #167).
+                    Err(error) if append_refused(&error) => {}
+                    other => {
+                        other?;
+                    }
+                }
             }
         }
         Ok(())
@@ -2716,14 +2774,20 @@ impl<'a> RunLoop<'a> {
             }
             let count = self.store.attempts_for_task(graph_id, node.id)?.len() as u32;
             if count < self.limits.max_retries {
-                let _ = self.append(
+                match self.append(
                     graph_id,
                     node.id,
                     None,
                     TaskState::Failed,
                     Event::RetryAuthorized,
                     Some("resume --retry".into()),
-                )?;
+                ) {
+                    // Another writer (a cancel) moved the task on first (issue #167).
+                    Err(error) if append_refused(&error) => {}
+                    other => {
+                        other?;
+                    }
+                }
             }
         }
         Ok(())
@@ -2737,49 +2801,98 @@ impl<'a> RunLoop<'a> {
         self.require_legacy_mutation(graph_id)?;
         self.active_graph = Some(graph_id.into());
         let graph = self.graph(graph_id)?;
-        let tasks = self.tasks(graph_id)?;
         let ids: Vec<TaskId> = match task {
             Some(id) => vec![id],
             None => graph.nodes.iter().map(|n| n.id).collect(),
         };
         for id in ids {
-            let state = tasks.get(&id).copied().unwrap_or(TaskState::Pending);
-            if matches!(state, TaskState::Cancelled | TaskState::Integrated) {
-                continue;
-            }
+            self.cancel_task(graph_id, id)?;
+        }
+        Ok(())
+    }
+
+    /// Cancel one task from its persisted state. The store refuses the `Cancel` when a
+    /// driver appended first (issue #167); the state is then re-read, so `Cancel` never
+    /// lands on a state it did not see: an `Integrated` or `Cancelled` task is left
+    /// alone, any other state is cancelled from what the driver left. Bounded by
+    /// `STALE_APPEND_RETRIES`.
+    fn cancel_task(&mut self, graph_id: &str, id: TaskId) -> Result<(), OrchestratorError> {
+        let mut refusals = 0;
+        let (state, seen) = loop {
+            let state = self
+                .tasks(graph_id)?
+                .get(&id)
+                .copied()
+                .unwrap_or(TaskState::Pending);
             if transition(state, Event::Cancel).is_err() {
-                continue;
+                return Ok(());
             }
             let attempt = self.store.latest_attempt_for_task(graph_id, id)?;
             if state == TaskState::Running
                 && let Some(a) = &attempt
-                && let Some(name) = &a.harness
-                && let Some(h) = self.harnesses.get(name)
             {
-                let live_pid = a.pid.map(|pid| ProcessHint {
-                    pid,
-                    image_name: a.image_name.clone(),
-                });
-                let should_cancel = a.pane_id.is_some()
-                    || live_pid
-                        .as_ref()
-                        .is_some_and(|hint| self.processes.is_live(hint) == LiveCheck::Live);
-                if should_cancel {
-                    let _ = h.cancel(&crate::ports::HarnessHandle {
-                        attempt_id: a.attempt_id,
-                        pid: a.pid,
-                        pane_id: a.pane_id.clone(),
-                    });
-                }
+                self.stop_worker(a)?;
             }
-            let _ = self.append(
+            match self.append(
                 graph_id,
                 id,
                 attempt.as_ref().map(|a| a.attempt_id),
                 state,
                 Event::Cancel,
                 None,
-            )?;
+            ) {
+                Ok(_) => break (state, attempt),
+                Err(error) if append_refused(&error) && refusals < STALE_APPEND_RETRIES => {
+                    refusals += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        // A driver may have recorded its worker after the read above and before the
+        // `Cancel` committed. Stop what the ledger records now; the driver stops a
+        // worker it records after the `Cancel` (see `dispatch_ready`).
+        if state == TaskState::Running
+            && let Some(now) = self.store.latest_attempt_for_task(graph_id, id)?
+        {
+            let unchanged = seen.as_ref().is_some_and(|a| {
+                a.attempt_id == now.attempt_id && a.pid == now.pid && a.pane_id == now.pane_id
+            });
+            if !unchanged {
+                self.stop_worker(&now)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop an attempt's worker when it has a pane or a live recorded PID.
+    fn stop_worker(&self, a: &AttemptRow) -> Result<(), OrchestratorError> {
+        let Some(h) = a
+            .harness
+            .as_deref()
+            .and_then(|name| self.harnesses.get(name))
+        else {
+            return Ok(());
+        };
+        let live_pid = a.pid.map(|pid| ProcessHint {
+            pid,
+            image_name: a.image_name.clone(),
+        });
+        let should_cancel = a.pane_id.is_some()
+            || live_pid
+                .as_ref()
+                .is_some_and(|hint| self.processes.is_live(hint) == LiveCheck::Live);
+        if should_cancel {
+            h.cancel(&crate::ports::HarnessHandle {
+                attempt_id: a.attempt_id,
+                pid: a.pid,
+                pane_id: a.pane_id.clone(),
+            })
+            .map_err(|e| {
+                OrchestratorError::Illegal(format!(
+                    "cancel could not stop attempt {}: {e:?}",
+                    a.attempt_id.0
+                ))
+            })?;
         }
         Ok(())
     }
@@ -4405,6 +4518,9 @@ mod tests {
         events: Vec<TransitionRecord>,
         attempts: Vec<AttemptRow>,
         quotas: HashMap<String, QuotaState>,
+        /// Issue #167: a concurrent `cancel` commits just before the worker's PID is
+        /// recorded, as if it read the attempt while it had no PID yet.
+        cancel_before_pid: bool,
     }
 
     impl DispatchStore {
@@ -4423,6 +4539,7 @@ mod tests {
                 events: Vec::new(),
                 attempts: Vec::new(),
                 quotas: HashMap::new(),
+                cancel_before_pid: false,
             }
         }
     }
@@ -4521,6 +4638,25 @@ mod tests {
             pid: Option<u32>,
             image_name: Option<&str>,
         ) -> Result<(), StoreError> {
+            if self.cancel_before_pid {
+                let task_id = self
+                    .attempts
+                    .iter()
+                    .find(|saved| saved.attempt_id == attempt_id)
+                    .map(|saved| saved.task_id)
+                    .ok_or_else(|| StoreError::Corrupt("attempt missing".into()))?;
+                self.events.push(TransitionRecord {
+                    graph_id: "g".into(),
+                    task_id,
+                    attempt_id: Some(attempt_id),
+                    from: TaskState::Running,
+                    to: TaskState::Cancelled,
+                    event: Event::Cancel,
+                    reason: None,
+                    executor: "cancel".into(),
+                    occurred_at: "1".into(),
+                });
+            }
             let row = self
                 .attempts
                 .iter_mut()
@@ -4705,6 +4841,7 @@ mod tests {
         name: &'static str,
         scripts: HashMap<&'static str, ModelScript>,
         dispatched: std::sync::Mutex<HashMap<u32, String>>,
+        cancelled: std::sync::Mutex<Vec<HarnessHandle>>,
     }
 
     impl ScriptedModels {
@@ -4713,6 +4850,7 @@ mod tests {
                 name,
                 scripts: scripts.iter().cloned().collect(),
                 dispatched: std::sync::Mutex::new(HashMap::new()),
+                cancelled: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -4750,7 +4888,8 @@ mod tests {
                 }),
             }
         }
-        fn cancel(&self, _handle: &HarnessHandle) -> Result<(), HarnessError> {
+        fn cancel(&self, handle: &HarnessHandle) -> Result<(), HarnessError> {
+            self.cancelled.lock().unwrap().push(handle.clone());
             Ok(())
         }
         fn collect(
@@ -4878,6 +5017,68 @@ mod tests {
             .iter()
             .map(|(h, m)| (h.to_string(), m.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_cancel_committed_before_the_worker_pid_is_recorded_stops_that_worker() {
+        // Issue #167: `cancel` read the attempt before its PID existed, so it could not
+        // stop the worker. The driver records the PID, re-reads the task and stops the
+        // worker itself instead of leaving it running under a cancelled task.
+        let h = ScriptedModels::new("h", &[]);
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        store.cancel_before_pid = true;
+        let mut run = RunLoop {
+            harnesses: HashMap::from([("h".to_string(), &h as &dyn HarnessCapabilities)]),
+            candidates: vec![top("h", "a")],
+            workspace: &QuietWorkspace,
+            store: &mut store,
+            processes: &other,
+            checks: &other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(30),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: false,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+            micro_repair: None,
+            ownership: None,
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![gate_node(None, AcceptanceGate::Human)],
+        };
+        let tick = run
+            .dispatch_ready("g", &graph, TaskId(1))
+            .expect("dispatch");
+        drop(run);
+        assert_eq!(
+            tick,
+            Tick::Transition {
+                task: TaskId(1),
+                attempt: Some(AttemptId(1)),
+                from: TaskState::Ready,
+                to: TaskState::Running,
+                event: Event::AttemptStarted,
+            }
+        );
+        let stopped = h.cancelled.lock().unwrap().clone();
+        assert_eq!(
+            stopped,
+            vec![HarnessHandle {
+                attempt_id: AttemptId(1),
+                pid: Some(44901),
+                pane_id: None,
+            }]
+        );
+        let last = store.events.last().expect("events");
+        assert_eq!((last.event, last.to), (Event::Cancel, TaskState::Cancelled));
     }
 
     #[test]
