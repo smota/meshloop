@@ -2198,6 +2198,17 @@ impl<'a> RunLoop<'a> {
             let mut queued_action: Option<RepairAction> = None;
 
             loop {
+                // Each repair round starts a new worker. A task another writer moved on
+                // (a `cancel`, issue #167) is not repaired further; the check append
+                // below is then refused and no feedback is recorded. A round already
+                // running is not interrupted: it completes before this re-read.
+                if self
+                    .tasks(graph_id)?
+                    .get(&node.id)
+                    .is_some_and(|state| *state != TaskState::Verifying)
+                {
+                    break;
+                }
                 let action = match queued_action.take() {
                     Some(action) => action,
                     None => {
@@ -2349,13 +2360,16 @@ impl<'a> RunLoop<'a> {
             );
         }
 
+        let rec = self.append_deterministic_result(graph_id, node, attempt_id, passed, None)?;
+        // Routing feedback is cross-run learning (ADR 0038). It is recorded only once the
+        // check result is in the ledger: a refused append (the task was cancelled while
+        // the checks ran, issue #167) says nothing about the model.
         let key = FeedbackKey {
             harness: candidate.harness.clone(),
             model_ref: candidate.model_ref.clone(),
             tier: crate::ports::TierKey::from(tier),
         };
         let _ = self.store.record_outcome(&key, passed);
-        let rec = self.append_deterministic_result(graph_id, node, attempt_id, passed, None)?;
         if passed {
             Ok(Tick::Transition {
                 task: node.id,
@@ -2700,6 +2714,9 @@ impl<'a> RunLoop<'a> {
         for row in rows {
             self.store.record(row)?;
         }
+        let rec =
+            self.append_deterministic_result(graph_id, node, attempt.attempt_id, passed, None)?;
+        // Only a recorded result is feedback (issue #167; see `verify_attempt`).
         let tier = node.tier.unwrap_or(Tier::Tier2);
         let _ = self.store.record_outcome(
             &FeedbackKey {
@@ -2709,8 +2726,6 @@ impl<'a> RunLoop<'a> {
             },
             passed,
         );
-        let rec =
-            self.append_deterministic_result(graph_id, node, attempt.attempt_id, passed, None)?;
         Ok(Tick::Transition {
             task: node.id,
             attempt: rec.attempt_id,
@@ -4521,6 +4536,13 @@ mod tests {
         /// Issue #167: a concurrent `cancel` commits just before the worker's PID is
         /// recorded, as if it read the attempt while it had no PID yet.
         cancel_before_pid: bool,
+        /// Issue #167: a concurrent `cancel` commits while the first check evidence is
+        /// recorded, between the checks and the check result.
+        cancel_on_evidence: bool,
+        /// Refuse a stale append the way the SQLite store does.
+        compare_and_append: bool,
+        /// Routing feedback recorded, in order.
+        outcomes: Vec<(FeedbackKey, bool)>,
     }
 
     impl DispatchStore {
@@ -4540,12 +4562,28 @@ mod tests {
                 attempts: Vec::new(),
                 quotas: HashMap::new(),
                 cancel_before_pid: false,
+                cancel_on_evidence: false,
+                compare_and_append: false,
+                outcomes: Vec::new(),
             }
         }
     }
 
     impl crate::ports::EvidenceStore for DispatchStore {
-        fn record(&mut self, _evidence: Evidence) -> Result<(), StoreError> {
+        fn record(&mut self, evidence: Evidence) -> Result<(), StoreError> {
+            if std::mem::take(&mut self.cancel_on_evidence) {
+                self.events.push(TransitionRecord {
+                    graph_id: "g".into(),
+                    task_id: evidence.candidate().task_id,
+                    attempt_id: Some(evidence.candidate().attempt_id),
+                    from: TaskState::Verifying,
+                    to: TaskState::Cancelled,
+                    event: Event::Cancel,
+                    reason: None,
+                    executor: "cancel".into(),
+                    occurred_at: "1".into(),
+                });
+            }
             Ok(())
         }
         forbidden_port_calls! {
@@ -4554,7 +4592,8 @@ mod tests {
         }
     }
     impl crate::ports::RoutingFeedbackStore for DispatchStore {
-        fn record_outcome(&mut self, _key: &FeedbackKey, _success: bool) -> Result<(), StoreError> {
+        fn record_outcome(&mut self, key: &FeedbackKey, success: bool) -> Result<(), StoreError> {
+            self.outcomes.push((key.clone(), success));
             Ok(())
         }
         fn counters(&self, _key: &FeedbackKey) -> Result<FeedbackCounters, StoreError> {
@@ -4563,6 +4602,25 @@ mod tests {
     }
     impl crate::ports::EventLog for DispatchStore {
         fn append(&mut self, record: TransitionRecord) -> Result<(), StoreError> {
+            if self.compare_and_append {
+                let history: Vec<TransitionRecord> = self
+                    .events
+                    .iter()
+                    .filter(|e| e.graph_id == record.graph_id && e.task_id == record.task_id)
+                    .cloned()
+                    .collect();
+                let persisted = replay_tasks(&history)?.get(&record.task_id).copied();
+                if transition(record.from, record.event) != Ok(record.to)
+                    || persisted.is_some_and(|state| state != record.from)
+                {
+                    return Err(StoreError::TransitionRefused {
+                        task_id: record.task_id,
+                        persisted,
+                        from: record.from,
+                        event: record.event,
+                    });
+                }
+            }
             self.events.push(record);
             Ok(())
         }
@@ -4842,6 +4900,7 @@ mod tests {
         scripts: HashMap<&'static str, ModelScript>,
         dispatched: std::sync::Mutex<HashMap<u32, String>>,
         cancelled: std::sync::Mutex<Vec<HarnessHandle>>,
+        invoked: std::sync::Mutex<Vec<AttemptId>>,
     }
 
     impl ScriptedModels {
@@ -4851,6 +4910,7 @@ mod tests {
                 scripts: scripts.iter().cloned().collect(),
                 dispatched: std::sync::Mutex::new(HashMap::new()),
                 cancelled: std::sync::Mutex::new(Vec::new()),
+                invoked: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -4868,6 +4928,7 @@ mod tests {
             })
         }
         fn invoke(&self, spec: &crate::agent::AgentSpec) -> Result<HarnessHandle, HarnessError> {
+            self.invoked.lock().unwrap().push(spec.attempt_id);
             match self.scripts.get(spec.model_ref.as_str()) {
                 Some(ModelScript::InvokeFails(e)) => Err(e.clone()),
                 Some(ModelScript::CollectFails(_)) => {
@@ -5350,6 +5411,151 @@ mod tests {
             .expect("verify");
         drop(run);
         (tick, store)
+    }
+
+    /// Failing checks with a type error, so the repair loop starts.
+    struct TypeErrorChecks;
+
+    impl CheckRunner for TypeErrorChecks {
+        fn run(
+            &self,
+            _worktree: &Path,
+            _argv: &[String],
+            _timeout: Duration,
+        ) -> Result<DeterministicEvidence, crate::ports::CheckError> {
+            Ok(DeterministicEvidence {
+                candidate: CandidateRef {
+                    task_id: TaskId(1),
+                    attempt_id: AttemptId(1),
+                    revision: "rev".into(),
+                },
+                tool: "cargo".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: "error[E0308]: mismatched types\n --> src/lib.rs:1:1\n".into(),
+            })
+        }
+    }
+
+    fn verify_after_cancel(
+        cancel: bool,
+    ) -> (Result<Tick, OrchestratorError>, DispatchStore, usize) {
+        let h = ScriptedModels::new("fixture", &[]);
+        let workspace = GateWorkspace {
+            files: vec!["a.txt".into()],
+        };
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        store.compare_and_append = true;
+        store.cancel_on_evidence = cancel;
+        for (from, event, to, attempt) in [
+            (
+                TaskState::Pending,
+                Event::DependencySatisfied,
+                TaskState::Ready,
+                None,
+            ),
+            (
+                TaskState::Ready,
+                Event::AttemptStarted,
+                TaskState::Running,
+                Some(AttemptId(1)),
+            ),
+            (
+                TaskState::Running,
+                Event::HarnessExited,
+                TaskState::Verifying,
+                Some(AttemptId(1)),
+            ),
+        ] {
+            store.events.push(TransitionRecord {
+                graph_id: "g".into(),
+                task_id: TaskId(1),
+                attempt_id: attempt,
+                from,
+                to,
+                event,
+                reason: None,
+                executor: "test".into(),
+                occurred_at: "1".into(),
+            });
+        }
+        let node = gate_node(None, AcceptanceGate::Human);
+        let mut run = RunLoop {
+            harnesses: HashMap::from([("fixture".to_string(), &h as &dyn HarnessCapabilities)]),
+            candidates: vec![],
+            workspace: &workspace,
+            store: &mut store,
+            processes: &other,
+            checks: &TypeErrorChecks,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command: vec!["cargo".into()],
+            worktree_base: PathBuf::from("wt-base"),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+            micro_repair: None,
+            ownership: None,
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![node.clone()],
+        };
+        let result = run.verify_attempt(
+            "g",
+            &graph,
+            &node,
+            AttemptId(1),
+            Path::new("wt"),
+            "base",
+            Tier::Tier2,
+            &top("fixture", "m"),
+            &HarnessOutcome {
+                exit_code: 0,
+                output_redacted: String::new(),
+                stderr_redacted: String::new(),
+                worktree_changed: true,
+            },
+        );
+        drop(run);
+        let repairs = h.invoked.lock().unwrap().len();
+        (result, store, repairs)
+    }
+
+    #[test]
+    fn a_cancel_during_checks_starts_no_repair_worker_and_records_no_feedback() {
+        // Control: without the cancel, the failing checks start a repair worker and the
+        // failure is routing feedback.
+        let (result, store, repairs) = verify_after_cancel(false);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(repairs >= 1, "the repair loop dispatches a worker");
+        assert_eq!(store.outcomes.len(), 1);
+
+        // Issue #167: the cancel lands after the checks ran.
+        let (result, store, repairs) = verify_after_cancel(true);
+        assert!(
+            matches!(
+                result,
+                Err(OrchestratorError::Store(StoreError::TransitionRefused {
+                    persisted: Some(TaskState::Cancelled),
+                    ..
+                }))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(repairs, 0, "no repair worker for a cancelled task");
+        assert!(
+            store.outcomes.is_empty(),
+            "a cancel is not routing feedback"
+        );
+        let last = store.events.last().expect("events");
+        assert_eq!((last.event, last.to), (Event::Cancel, TaskState::Cancelled));
     }
 
     #[test]

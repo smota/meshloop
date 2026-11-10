@@ -75,19 +75,28 @@ transition-plus-attempt writes and plan mutations with their events.
 - Workers: `cancel` stops a running attempt's worker before it appends, and stops a
   worker the driver recorded while the `Cancel` was being written. The driver re-reads
   the task right after it records a new worker's PID and stops the worker itself when
-  the task is no longer `running`, so a cancelled task never keeps a worker.
+  the task is no longer `running`.
+- Repair: the driver re-reads the task before each repair round and starts no further
+  repair worker once the task is no longer `verifying`. Limit: a repair worker's PID is
+  not recorded, so `cancel` cannot stop a repair round that is already running; that
+  round runs to completion (bounded by the task timeout) before the driver notices the
+  cancel. Its result is then refused like any other stale append.
+- Routing feedback (ADR 0038) is recorded only after the check result is in the ledger,
+  so a cancelled attempt is never counted against its model.
 
 ### Ledgers written before compare-and-append
 
 Before this check, a driver working from a stale view could append the cancelled
 attempt's own events after `Cancelled` (for example `Cancelled` then
 `deterministic-checks-failed`), which made the graph unreadable. The per-task fold
-reads such ledgers as `cancelled` by skipping a row only when all of these hold: the
-task is `cancelled`; the row names the attempt the `Cancel` row named; the row is
-itself a legal transition from a state other than `cancelled`; and its event is one a
-driver records for a running attempt (harness-exited, harness-crashed or timeout,
-deterministic-checks-passed or failed, verify-gate-passed, live-worker-settled,
-retry-authorized). Any other row after `cancelled` is still corrupt. No legal event
+reads such ledgers as `cancelled` by skipping rows after `cancelled` only as one
+unbroken chain: each row names the attempt the `Cancel` row named, is itself a legal
+transition, is one a driver records for a running attempt (harness-exited,
+harness-crashed or timeout, deterministic-checks-passed or failed, verify-gate-passed,
+live-worker-settled, retry-authorized), and starts from the state the previous row of
+the chain left; the first starts from the state the ledger held when `Cancel` was
+folded. Any other row after `cancelled`, including a second, contradictory result for
+the same attempt, is still corrupt. No legal event
 leaves `cancelled`, so every ledger that was readable before folds to the same states.
 The skipped rows stay in the ledger. A ledger that is corrupt in any other way has no
 automatic repair; restore it from a backup or start the run again with `resume

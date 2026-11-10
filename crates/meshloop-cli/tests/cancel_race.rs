@@ -213,6 +213,21 @@ fn cancel_between_worker_exit_and_check_append_leaves_a_legal_readable_ledger() 
     );
     assert_eq!(driver.status.code(), Some(1), "{driver_out}");
 
+    // A human cancel is not a verdict on the model: routing feedback (cross-run
+    // learning, ADR 0038) is unchanged for that harness and model.
+    let feedback: i64 = rusqlite::Connection::open(&run.db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM routing_feedback WHERE harness = 'fixture' AND model_ref = 'fixture-model'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        feedback, 0,
+        "the cancelled attempt must not be routing feedback"
+    );
+
     // `status` reads the graph.
     let status = run.meshloop(&["status", "--json", "--graph", &run.graph_id]);
     let stdout = String::from_utf8_lossy(&status.stdout);
