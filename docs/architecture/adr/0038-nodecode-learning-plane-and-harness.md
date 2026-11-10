@@ -1,15 +1,16 @@
 # 0038 Nodecode as learning plane and harness; kernel authority unchanged
 
-- Status: Proposed
+- Status: Accepted
+- Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
 - Author/executor: Claude (builder sub-agent)
-- Reviewer: fresh-context Claude review, round 1 (accept with changes, applied); human acceptance pending
+- Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039
 - Decision owner: Samuel
-- Approval evidence: none. The owner decisions of 2026-11-10 in [#132](https://github.com/smota/meshloop/issues/132) are inputs, not acceptance of this record.
+- Approval evidence: accepted 2026-11-10 by the coordinator (Claude) under authority delegated by the repository owner, who waived human approvals for goal #132 ([claim comment](https://github.com/smota/meshloop/issues/132#issuecomment-6770755409)). No human read this record before acceptance.
 - Supersedes: none
 - Superseded by: none
-- Related: [ADR 0039 (#146, proposed)](https://github.com/smota/meshloop/issues/146), reviewed together with this record
+- Related: [ADR 0039](0039-native-sub-agent-dispatch.md) ([#146](https://github.com/smota/meshloop/issues/146)), reviewed together with this record
 - Tracking: [#133](https://github.com/smota/meshloop/issues/133), goal [#132](https://github.com/smota/meshloop/issues/132)
 
 ## Context and constraints
