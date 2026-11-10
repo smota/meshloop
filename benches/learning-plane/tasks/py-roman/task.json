@@ -14,5 +14,6 @@
   ],
   "editable": [
     "roman.py"
-  ]
+  ],
+  "expected_tests": 7
 }

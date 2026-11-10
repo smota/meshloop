@@ -1,6 +1,6 @@
 # Learning-plane baseline (task set lp-1) — superseded
 
-> **Superseded by lp-2 ([BASELINE-lp-2.md](BASELINE-lp-2.md)), itself superseded by lp-3 ([BASELINE.md](BASELINE.md)), 2026-11-10:** lp-1 could not tell a learning effect apart: all 24 runs went to a single (harness, model), none were retried, and priors bounded at ±0.25 cannot reach mid or top models at Tier1. The lp-1 task set and runner are at commit `a2e944e`; in this record, `taskset.json`, `meshloop.toml` and `verify.py` mean their versions at that commit.
+> **Superseded by lp-2 ([BASELINE-lp-2.md](BASELINE-lp-2.md)), then lp-3 ([BASELINE-lp-3.md](BASELINE-lp-3.md)) and lp-4 ([BASELINE.md](BASELINE.md)), 2026-11-10:** lp-1 could not tell a learning effect apart: all 24 runs went to a single (harness, model), none were retried, and priors bounded at ±0.25 cannot reach mid or top models at Tier1. The lp-1 task set and runner are at commit `a2e944e`; in this record, `taskset.json`, `meshloop.toml` and `verify.py` mean their versions at that commit.
 
 Issue [#144](https://github.com/smota/meshloop/issues/144). The baseline that the
 learning-plane comparison in [#140](https://github.com/smota/meshloop/issues/140) is

@@ -14,5 +14,6 @@
   ],
   "editable": [
     "wordfreq.py"
-  ]
+  ],
+  "expected_tests": 12
 }

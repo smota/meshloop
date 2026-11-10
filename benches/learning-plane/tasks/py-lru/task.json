@@ -14,5 +14,6 @@
   ],
   "editable": [
     "lru.py"
-  ]
+  ],
+  "expected_tests": 10
 }

@@ -14,5 +14,6 @@
   ],
   "editable": [
     "calc.py"
-  ]
+  ],
+  "expected_tests": 13
 }

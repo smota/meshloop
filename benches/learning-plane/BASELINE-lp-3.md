@@ -1,6 +1,8 @@
-# Learning-plane baseline (task set lp-3)
+# Learning-plane baseline (task set lp-3) — superseded
 
-Issue [#144](https://github.com/smota/meshloop/issues/144). This is the baseline of
+> **Superseded by lp-4 ([BASELINE.md](BASELINE.md)), 2026-11-10:** the second review found that lp-3's `verify.py` trusted a bare exit 0, and the editable code runs in the test process, so `os._exit(0)` at import (or `process::exit(0)` in Rust) counted as a pass. The lp-3 task set and runner are at commit `20a1277`. Every kept lp-3 success (and every lp-1 and lp-2 success) printed a full test summary with the right count, so no lp-3 number shows that inflation.
+
+Issue [#144](https://github.com/smota/meshloop/issues/144). This was the baseline of
 record that the learning-plane comparison in [#140](https://github.com/smota/meshloop/issues/140)
 is measured against, recorded before the learning loop ([#139](https://github.com/smota/meshloop/issues/139))
 exists. No learning-plane code was involved: none exists at the Meshloop commit used.

@@ -12,5 +12,6 @@
   ],
   "editable": [
     "src/lib.rs"
-  ]
+  ],
+  "expected_tests": 13
 }

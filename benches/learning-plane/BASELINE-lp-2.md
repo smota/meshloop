@@ -1,6 +1,6 @@
 # Learning-plane baseline (task set lp-2) — superseded
 
-> **Superseded by lp-3 ([BASELINE.md](BASELINE.md)), 2026-11-10:** an independent review found that lp-2's `verify.py` could be passed by a shadowing `unittest.py` and that py-calc's ban missed aliases. The lp-2 task set and runner are at commit `3525ea0`, and `verify.py` and `taskset.json` in this record mean those versions. No lp-2 attempt added any file besides its editable file (checked against the kept git-diff evidence), so the lp-2 numbers show no sign of that inflation.
+> **Superseded by lp-3 ([BASELINE-lp-3.md](BASELINE-lp-3.md)), itself superseded by lp-4 ([BASELINE.md](BASELINE.md)), 2026-11-10:** an independent review found that lp-2's `verify.py` could be passed by a shadowing `unittest.py` and that py-calc's ban missed aliases. The lp-2 task set and runner are at commit `3525ea0`, and `verify.py` and `taskset.json` in this record mean those versions. No lp-2 attempt added any file besides its editable file (checked against the kept git-diff evidence), so the lp-2 numbers show no sign of that inflation.
 
 Issue [#144](https://github.com/smota/meshloop/issues/144). This was the baseline of
 record that the learning-plane comparison in [#140](https://github.com/smota/meshloop/issues/140)

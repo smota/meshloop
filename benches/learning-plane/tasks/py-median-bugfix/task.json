@@ -14,5 +14,6 @@
   ],
   "editable": [
     "stats.py"
-  ]
+  ],
+  "expected_tests": 11
 }

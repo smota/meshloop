@@ -14,5 +14,6 @@
   ],
   "editable": [
     "semver.py"
-  ]
+  ],
+  "expected_tests": 15
 }

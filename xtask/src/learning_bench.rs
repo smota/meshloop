@@ -77,6 +77,12 @@ struct TaskMeta {
     description: String,
     #[allow(dead_code)]
     test_command: Vec<String>,
+    /// Files SPEC.md lets the worker change (lp-3).
+    #[serde(default)]
+    editable: Vec<String>,
+    /// Number of hidden tests verify.py requires to pass (lp-4).
+    #[serde(default)]
+    expected_tests: u32,
 }
 
 #[derive(Debug, Default)]
@@ -246,6 +252,19 @@ fn validate(lp: &Path, tasks: &[TaskMeta]) -> ExitCode {
             if t.language != *lang {
                 continue;
             }
+            let file = if *file == "<editable>" {
+                match t.editable.first() {
+                    Some(f) => f.as_str(),
+                    None => {
+                        println!("  [FAIL] {:<18} tamper {name}: no editable file", t.id);
+                        pass = false;
+                        continue;
+                    }
+                }
+            } else {
+                file
+            };
+            let body = body.replace("<expected>", &t.expected_tests.to_string());
             let case = tmp.with_extension(name);
             let _ = fs::remove_dir_all(&case);
             let exit = copy_dir(&tmp, &case)
@@ -253,7 +272,7 @@ fn validate(lp: &Path, tasks: &[TaskMeta]) -> ExitCode {
                     if let Some(parent) = case.join(file).parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    fs::write(case.join(file), body)
+                    fs::write(case.join(file), &body)
                 })
                 .ok()
                 .and_then(|_| run_verify(&verify, &task_dir, &case, false));
@@ -315,6 +334,32 @@ const TAMPER_CASES: &[(&str, &str, &str, &str)] = &[
         "edited-tests-visible",
         "tests/visible.rs",
         "#[test]\nfn ok() {}\n",
+    ),
+    // lp-4: the editable module runs inside the test process. `<editable>` is the task's
+    // editable file and `<expected>` its expected_tests count.
+    (
+        "python",
+        "exit-at-import",
+        "<editable>",
+        "import os\nos._exit(0)\n",
+    ),
+    (
+        "python",
+        "forged-result",
+        "<editable>",
+        "import os, sys\nsys.stdout.write('RESULT ok tests=<expected> nonce=x\\n')\nsys.stdout.flush()\nos._exit(0)\n",
+    ),
+    (
+        "python",
+        "read-stdin",
+        "<editable>",
+        "import os, sys\nn = ''\ntry:\n    n = sys.stdin.read()\nexcept Exception:\n    pass\ntry:\n    n = n or os.read(0, 64).decode()\nexcept Exception:\n    pass\nsys.stdout.write('RESULT ok tests=<expected> nonce=%s\\n' % n.strip())\nsys.stdout.flush()\nos._exit(0)\n",
+    ),
+    (
+        "rust",
+        "exit-with-forged-summary",
+        "<editable>",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Mismatch {\n    Unexpected { at: usize, found: char },\n    Unclosed { at: usize, open: char },\n    UnterminatedString { at: usize },\n}\n\npub fn check(_input: &str) -> Result<(), Mismatch> {\n    use std::io::Write;\n    let _ = std::io::stdout().write_all(b\"test result: ok. <expected> passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\\n\");\n    std::process::exit(0)\n}\n",
     ),
 ];
 
@@ -2081,6 +2126,8 @@ mod tests {
             kind: "implement".into(),
             description: "do it".into(),
             test_command: vec![],
+            editable: vec![],
+            expected_tests: 0,
         };
         let p = plan_json("lp-x-r1", &t, None);
         assert_eq!(p["nodes"][0]["tier"], Value::Null);

@@ -14,5 +14,6 @@
   ],
   "editable": [
     "intervals.py"
-  ]
+  ],
+  "expected_tests": 20
 }

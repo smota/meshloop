@@ -1,6 +1,6 @@
 {
-  "version": "lp-3",
-  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier, verify.py or meshloop.toml requires a new version and a new baseline. lp-3 supersedes lp-2 (integrity hardening): verify.py tests only the pristine seed plus the task's editable files plus the hidden tests, in an isolated interpreter, and py-calc's ban on eval/exec/compile/__import__ also covers aliases, lookups by name and imports of builtins, importlib and ast.",
+  "version": "lp-4",
+  "description": "Learning-plane benchmark task set (issue #144). Changing a task, a seed, a hidden test, a planned tier, verify.py or meshloop.toml requires a new version and a new baseline. lp-4 supersedes lp-3: verify.py no longer trusts a bare exit code, because the editable code runs in the test process. A Python pass needs the runner's result line carrying a nonce that the tested code cannot read from stdin; a Rust pass needs cargo's summaries adding up to expected_tests. Both check the expected_tests count from task.json.",
   "tasks": [
     "py-median-bugfix",
     "py-wordfreq",
