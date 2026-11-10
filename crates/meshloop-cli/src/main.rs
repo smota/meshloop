@@ -2161,6 +2161,9 @@ struct EventsRead {
     more: bool,
     max_seq: i64,
     worktrees: HashMap<u32, String>,
+    /// For a bound graph, the event ids its readers fold: the active generation's.
+    /// `None` for an unbound graph, whose visible rows are all folded.
+    counted: Option<std::collections::HashSet<i64>>,
 }
 
 /// `meshloop events`: a graph's run-table events in append order with their stable
@@ -2170,9 +2173,11 @@ struct EventsRead {
 /// name, time, the attempt's worktree as meshloop recorded it), never a reason, note
 /// or worker output, so a projection such as the nodecode cell's Board can keep a
 /// cursor on `seq` and post each one once. The whole log is folded as every reader
-/// folds it (`replay_tasks`): `nodes` is each task's folded state, `latest` the seq
-/// of its newest counted row, and a row the fold skips (a pre-#167 stale chain after
-/// `Cancel`) is marked `superseded`. `max_seq` and
+/// folds it (`replay_tasks`) over the rows status folds (every visible row of an
+/// unbound graph; only the active generation's of a bound one): `nodes` is each
+/// task's folded state, `latest` the seq of its newest counted row, and a row not
+/// counted (another generation's, or a pre-#167 stale chain after `Cancel` the fold
+/// skips) is marked `superseded`. `max_seq` and
 /// `ledger_id` let a cursor see that the ledger was replaced.
 fn cmd_events(
     request: EventsRequest,
@@ -2227,6 +2232,26 @@ fn cmd_events(
             .event_window(&run.graph_id, after, limit)
             .map_err(|e| format!("{e:?}"))?;
         let max_seq = store.max_event_id().map_err(|e| format!("{e:?}"))?;
+        // A bound graph's status folds only its active generation's scoped events
+        // (workspace/read.rs); a restart's earlier generations are history, not
+        // transitions of the run status shows.
+        let graph_id = meshloop_domain::workspace::GraphId::new(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?;
+        let counted = match store.run_binding(&graph_id).map_err(|e| format!("{e:?}"))? {
+            None => None,
+            Some(binding) => {
+                let active = binding.active_generation.map(|g| g.as_str().to_string());
+                Some(
+                    store
+                        .event_generations(&run.graph_id)
+                        .map_err(|e| format!("{e:?}"))?
+                        .into_iter()
+                        .filter(|(_, generation)| active.is_some() && *generation == active)
+                        .map(|(seq, _)| seq)
+                        .collect(),
+                )
+            }
+        };
         let worktrees = store
             .attempts_for_graph(&run.graph_id)
             .map_err(|e| format!("{e:?}"))?
@@ -2243,6 +2268,7 @@ fn cmd_events(
             more,
             max_seq,
             worktrees,
+            counted,
         }))
     };
     let mut result = None;
@@ -2261,17 +2287,31 @@ fn cmd_events(
         Some(Err(e)) => return read_error(COMMAND, origin, json, e),
         None => return read_error(COMMAND, origin, json, "read snapshot did not run"),
     };
-    let records: Vec<_> = read.all.iter().map(|(_, r)| r.clone()).collect();
+    // The rows status folds: every visible row of an unbound graph, the active
+    // generation's of a bound one. Every other row, and every row the fold skips, is
+    // `superseded`: shown, never a transition of the run status shows.
+    let folded_rows: Vec<&(i64, meshloop_engine::ports::TransitionRecord)> = read
+        .all
+        .iter()
+        .filter(|(seq, _)| read.counted.as_ref().is_none_or(|c| c.contains(seq)))
+        .collect();
+    let records: Vec<_> = folded_rows.iter().map(|(_, r)| r.clone()).collect();
     let (folded, skipped) = match meshloop_engine::recovery::replay_tasks_marked(&records) {
         Ok(v) => v,
         Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
     };
+    let transitions: Vec<(i64, u32)> = folded_rows
+        .iter()
+        .zip(&skipped)
+        .filter(|(_, skip)| !**skip)
+        .map(|((seq, r), _)| (*seq, r.task_id.0))
+        .collect();
+    let counted: std::collections::HashSet<i64> = transitions.iter().map(|(s, _)| *s).collect();
     let superseded: std::collections::HashSet<i64> = read
         .all
         .iter()
-        .zip(&skipped)
-        .filter(|(_, skip)| **skip)
-        .map(|((seq, _), _)| *seq)
+        .map(|(seq, _)| *seq)
+        .filter(|seq| !counted.contains(seq))
         .collect();
     let mut nodes: Vec<_> = folded.into_iter().collect();
     nodes.sort_by_key(|(task, _)| task.0);
@@ -2309,10 +2349,8 @@ fn cmd_events(
         // Each task's newest row the fold counted, over the whole log, so a reader of
         // one page can tell whether an event is still its node's current state.
         let mut latest = serde_json::Map::new();
-        for ((seq, e), skip) in read.all.iter().zip(&skipped) {
-            if !skip {
-                latest.insert(e.task_id.0.to_string(), (*seq).into());
-            }
+        for (seq, task) in &transitions {
+            latest.insert(task.to_string(), (*seq).into());
         }
         println!(
             "{}",

@@ -36,6 +36,11 @@
   (unless ok (incf *failures*))
   (format t "[~:[FAIL~;pass~]] ~a~@[: ~a~]~%" ok name (and (not ok) detail)))
 
+(defun file-text-at (path)
+  (with-open-file (in path :external-format :utf-8)
+    (let ((text (make-string (file-length in))))
+      (subseq text 0 (read-sequence text in)))))
+
 (defun file-text (name)
   (with-open-file (in (merge-pathnames (format nil "~a.lisp" name) *cell*) :external-format :utf-8)
     (let ((text (make-string (file-length in))))
@@ -365,7 +370,12 @@ define-cell) are nodecode's and are only read.")
                     (and (equal read '(("g1" 7 "PlanAccepted" 1 nil nil))) (null sessions))))
 (pure-test::check "cursor: a file this cell did not write is refused, not read as empty"
                   (pure-test::refuses (parse-cursor "something else")))
-(dolist (line '("graph g1 x - 0 - -" "graph g1 1 - 0 ledger! -" "graph g1 1 - 0 - x9" "session @s-X" "graph --all 1 - 0 - -"))
+(pure-test::check "cursor: a plan post in flight names its plan state"
+                  (and (pending-word-p "p2:AwaitingPlanReview") (pending-word-p "e17")
+                       (not (pending-word-p "p2")) (not (pending-word-p "e1:x")) (not (pending-word-p "p2:a b"))
+                       (equal (parse-cursor (format nil "~a~%graph g1 3 PlanAccepted 1 - p2:AwaitingPlanReview~%" +board-cursor-header+))
+                              '(("g1" 3 "PlanAccepted" 1 nil "p2:AwaitingPlanReview")))))
+(dolist (line '("graph g1 x - 0 - -" "graph g1 1 - 0 ledger! -" "graph g1 1 - 0 - x9" "graph g1 1 - 0 - p2" "session @s-X" "graph --all 1 - 0 - -"))
   (pure-test::check (format nil "cursor: a broken line is refused: ~a" line)
                     (pure-test::refuses (parse-cursor (format nil "~a~%~a~%" +board-cursor-header+ line)))))
 (pure-test::check "cursor: kept on another ledger, or past its newest event, starts over"
@@ -412,6 +422,20 @@ define-cell) are nodecode's and are only read.")
                                while start
                                always (let ((verb (subseq board (+ start 5) (+ start 14))))
                                         (or (search "\"events\"" verb) (search "\"status\"" verb)))))))
+
+;;; The pinned nodecode release's board cell defines what this cell calls by name
+;;; (JOIN, POST, MEMBER-BOARD of one session, SETTING). Read from its source when
+;;; that release is installed here; nothing is loaded or run.
+(let ((source (merge-pathnames ".local/share/nodecode/98dd6dc80/src/cells/board/cell.lisp"
+                                (user-homedir-pathname))))
+  (if (probe-file source)
+      (let ((text (pure-test::file-text-at source)))
+        (pure-test::check "pinned nodecode 98dd6dc80: the board cell defines member-board (session), join, post and setting"
+                          (and (search "(defun member-board (session)" text)
+                               (search "(define-verb join (name)" text)
+                               (search "(define-verb post (text)" text)
+                               (search "(\"post_chars\" :integer" text))))
+      (format t "[note] pinned nodecode 98dd6dc80 not installed here: the board cell's source was not checked~%")))
 
 (in-package #:pure-test)
 (format t "~d of ~d checks passed~%" (- *checks* *failures*) *checks*)

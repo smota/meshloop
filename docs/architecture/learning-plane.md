@@ -94,10 +94,11 @@ has the operator detail. These are the decisions:
   attempt's worktree. It never returns a reason, note or worker output. `watch` was not
   enough: it diffs polled status, so it misses transitions between polls and has no stable
   id. A restart that hides a generation's earlier rows (#142) cannot move a cursor kept on
-  `event_id`. The verb folds the whole log with `replay_tasks`, as status does, and
-  returns `nodes` (folded states) and `latest` (each task's newest counted row). Rows the
-  fold skips, such as pre-#167 stale rows after `Cancel`, are marked `superseded`, and the
-  cell never posts them. `--limit` (default 1000) pages in SQL with `more`. `max_seq` and
+  `event_id`. The verb folds the rows status folds with `replay_tasks`, as status does:
+  all visible rows of an unbound graph, only the active generation's of a bound graph. It
+  returns `nodes` (folded states) and `latest` (each task's newest counted row). Every
+  other row is marked `superseded` and never posted by the cell: an earlier generation's
+  row after a restart, or a pre-#167 stale row after `Cancel`. `--limit` (default 1000) pages in SQL with `more`. `max_seq` and
   `ledger_id` (from the graph id and its run row's `created_at`) reveal a replaced
   ledger. The cell contract has an `events` case, and the read-only suites cover the
   verb on absent, empty, live-WAL, closed-WAL and pre-v6 ledgers.

@@ -158,6 +158,26 @@ impl SqliteStore {
         Ok((rows, more))
     }
 
+    /// Each of `graph_id`'s events by id with the generation it was recorded in, `None`
+    /// for an unscoped row (#137). Read-only. A bound graph's readers fold only the
+    /// active generation's rows, so `meshloop events` uses this to fold the same rows.
+    pub fn event_generations(
+        &self,
+        graph_id: &str,
+    ) -> Result<std::collections::HashMap<i64, Option<String>>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT event_id, generation_id FROM events WHERE graph_id = ?1")
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![graph_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| StoreError::Io(e.to_string()))
+    }
+
     /// The highest event id this ledger holds, 0 when it holds none (#137): a cursor
     /// above it was kept on another ledger.
     pub fn max_event_id(&self) -> Result<i64, StoreError> {

@@ -1046,6 +1046,49 @@ fn run_refuses_leftover_integrate_branch_before_staging() {
     );
 }
 
+/// #137 review: after `resume --restart` (and `run --reset`) of an owned run-loop
+/// graph, `meshloop events` folds what status folds: the moved history is not a
+/// transition of the current run, and `nodes` equals status's node states.
+#[test]
+fn events_after_a_run_loop_restart_fold_as_status_does() {
+    let fixture = Fixture::landing("events-restart", "");
+    let plan = fixture.plan_arg();
+    fixture.ok(&["review-plan", "--plan", &plan, "--accept", "--as", "probe"]);
+    fixture.ok(&["run", "--plan", &plan]);
+    // Read as the cell reads them (status and events carry worktree paths, so not
+    // through `json`, which is for the workspace verbs).
+    let read = |verb: &str| {
+        let out = fixture.meshloop(&[verb, "--graph", GRAPH, "--json"]);
+        assert!(out.status.success(), "{verb}: {out:?}");
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let events_of = || read("events");
+    let before = events_of();
+    fixture.ok(&["resume", "--restart"]);
+    let _ = fixture.meshloop(&["run", "--plan", &plan, "--reset"]);
+    let events = events_of();
+    let status = read("status");
+    let nodes = status["data"]["nodes"].as_array().unwrap();
+    assert!(!nodes.is_empty());
+    for node in nodes {
+        // A node with no transition yet is Pending in status and absent from the fold.
+        match events["data"]["nodes"].get(node["id"].to_string()) {
+            Some(state) => assert_eq!(state, &node["state"], "{events:#}\n{status:#}"),
+            None => assert_eq!(node["state"], "Pending", "{events:#}\n{status:#}"),
+        }
+    }
+    // The restarts hid the earlier rows; every row shown is a transition of this run,
+    // and its seqs come after the first run's.
+    let rows = events["data"]["events"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|e| e["superseded"] == false), "{events:#}");
+    let first_max = before["data"]["last_seq"].as_i64().unwrap();
+    assert!(
+        rows.iter().all(|e| e["seq"].as_i64().unwrap() > first_max),
+        "{events:#}"
+    );
+}
+
 /// Restart (`resume --restart`, `run --reset`) of an owned run keeps its records:
 /// history moves into a generation, a new generation is pinned to the plan, and
 /// only worktrees confirmed gone are retired. The restarted run still reclaims.

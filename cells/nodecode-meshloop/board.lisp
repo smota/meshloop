@@ -156,7 +156,8 @@ SHA-256 of ROOT, its real path without a trailing /."
 ;;; A text file: the header, `board NAME', `repository ROOT', a `session ID' line
 ;;; for each session /meshloop board-sync put on the board, then one line a
 ;;; graph: `graph ID SEQ PLAN-STATE PLAN-POSTS LEDGER PENDING', - for none.
-;;; PENDING is the post in flight: eSEQ for an event, pN for the Nth plan post.
+;;; PENDING is the post in flight: eSEQ for an event, pN:STATE for the Nth plan
+;;; post, of the plan reaching STATE, so a later plan change is never taken for it.
 ;;; Ids, states and numbers hold no blank, so a line is its words. An entry is
 ;;; the list (GRAPH SEQ PLAN POSTS LEDGER PENDING).
 
@@ -174,6 +175,15 @@ SHA-256 of ROOT, its real path without a trailing /."
 
 (defun count-word-p (word)
   (and word (plusp (length word)) (<= (length word) 18) (every #'digit-char-p word)))
+
+(defun pending-word-p (word)
+  "Whether WORD is a post in flight: eSEQ, or pN:STATE."
+  (let ((colon (position #\: word)))
+    (case (char word 0)
+      (#\e (and (null colon) (count-word-p (subseq word 1))))
+      (#\p (and colon (count-word-p (subseq word 1 colon))
+                (not (equal "?" (safe-word (subseq word (1+ colon)))))))
+      (t nil))))
 
 (defun parse-cursor (text)
   "The cursor file TEXT. => (values ENTRIES SESSIONS); a refusal when TEXT is
@@ -195,7 +205,7 @@ none of them."
                                 (or (null ledger) (equal ledger "-")
                                     (and (<= 1 (length ledger) 64) (every (lambda (c) (digit-char-p c 16)) ledger)))
                                 (or (null pending) (equal pending "-")
-                                    (and (find (char pending 0) "ep") (count-word-p (subseq pending 1)))))
+                                    (pending-word-p pending)))
                      (broken))
                    (push (list graph (parse-integer seq) (undash plan) (parse-integer posts)
                                (undash ledger) (undash pending))
@@ -362,7 +372,7 @@ newest row meshloop's fold counts for TASK (LATEST) and TO is the folded state
                    (if (equal pending (sixth entry)) nil mention)))
           (unless (equal plan (third entry))
             (let* ((change (1+ (fourth entry)))
-                   (pending (format nil "p~d" change)))
+                   (pending (format nil "p~d:~a" change (safe-word plan))))
               (when (post (plan-post graph plan change (unwoken pending (mention-of plan t wake supervisor)) limit)
                           pending)
                 (save (entry-with entry :plan plan :posts change :pending nil)))))

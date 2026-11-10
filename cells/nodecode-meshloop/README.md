@@ -234,10 +234,12 @@ reads a post.
   `seq`, the event log's own id. The id is unique and increasing and is never renumbered.
   Each event carries the task, attempt, states, event name and the attempt's worktree. It
   never carries a reason, a note or worker output. `watch` was not enough: it polls
-  status and sees only the transitions between two polls. The verb folds the whole log the
-  way status does (`replay_tasks`) and returns each node's folded state (`nodes`) and its
-  newest counted row (`latest`). A row the fold skips is marked `superseded`: on a ledger
-  written before #167, a cancelled attempt's stale check result after its `Cancel`. The
+  status and sees only the transitions between two polls. The verb folds the rows status
+  folds, the way status does (`replay_tasks`). For an unbound graph those are its visible
+  rows. For a bound graph they are only the active generation's. It returns each node's
+  folded state (`nodes`) and its newest counted row (`latest`). Every other row is marked
+  `superseded`: an earlier generation's row after a restart, or, on a ledger written
+  before #167, a cancelled attempt's stale check result after its `Cancel`. The
   cell never posts a superseded row and moves its cursor past it, so the board never
   shows a state that status does not, and never wakes anyone for one. `--limit` (default
   1000; the cell passes 200) pages the rows in SQL, and `more` says that rows remain.
@@ -444,7 +446,10 @@ list. To read a new field, add it to `contract.json` first.
   foreign or broken file, format 1, sessions, ledger, pending), when a cursor counts as kept
   on another ledger, when an event is current (newest counted row reaching the folded
   state, so not a pre-#167 stale row), paths outside the repository and with `\`, the
-  mention never cut, and which graphs a command names. It also reads the sources to check
+  mention never cut, a plan post in flight naming its plan state (`pN:STATE`, so a later
+  plan change is never taken for it), and which graphs a command names. When the pinned
+  nodecode release is installed, it also reads that release's board source for the
+  functions this cell calls by name (`member-board`, `join`, `post`, `post_chars`). It also reads the sources to check
   that the cell is one-way: no source names the Board's post facts, its `:round` delivery
   or its post readers, the only Board verbs called are `JOIN` and `POST`, and the
   projection asks meshloop only for `events` and `status`. Neither `cargo test` nor
