@@ -20,6 +20,8 @@ use crate::ports::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
     pub harness: String,
+    /// The candidate's model; one harness may list several (issue #134).
+    pub model_ref: String,
     pub reason: String,
 }
 
@@ -138,7 +140,7 @@ impl RoutingSignal for CouplingSignal {
 
 /// Restless-bandit exploration plus online-knapsack density.
 ///
-/// Each harness is an arm whose state evolves whether or not it is pulled
+/// Each (harness, model) candidate is an arm whose state evolves whether or not it is pulled
 /// (cooldown timers, sliding quota windows). Historical success stays in
 /// [`HistoricalSuccessSignal`]; this signal is the information-value bonus and
 /// the remaining-window density. Missing headroom contributes 0 (never invents
@@ -260,6 +262,7 @@ impl Router {
                 };
                 Some(Rejection {
                     harness: c.harness.clone(),
+                    model_ref: c.model_ref.clone(),
                     reason,
                 })
             })
@@ -676,6 +679,68 @@ mod tests {
         assert!(rejected[0].reason.contains("model_tier"));
         assert_eq!(rejected[1].reason, "probe timed out after 15s");
         assert_eq!(rejected[2].reason, "not probed");
+    }
+
+    #[test]
+    fn one_harness_with_two_models_is_two_arms_with_separate_feedback() {
+        // Issue #134: one harness entry lists two models; each is its own arm keyed by
+        // (harness, model_ref, tier), so feedback on one never moves the other.
+        let configured = vec![
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "gpt-a".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "gpt-b".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        let headroom = HashMap::new();
+        let mut feedback = crate::ports::InMemoryFeedbackStore::default();
+        let key = |model: &str| FeedbackKey {
+            harness: "codex".into(),
+            model_ref: model.into(),
+            tier: TierKey::Tier1,
+        };
+        for _ in 0..3 {
+            feedback.record_outcome(&key("gpt-a"), false).unwrap();
+        }
+        feedback.record_outcome(&key("gpt-b"), true).unwrap();
+        assert_eq!(feedback.counters(&key("gpt-a")).unwrap().failure, 3);
+        assert_eq!(feedback.counters(&key("gpt-a")).unwrap().success, 0);
+        assert_eq!(feedback.counters(&key("gpt-b")).unwrap().success, 1);
+        assert_eq!(feedback.counters(&key("gpt-b")).unwrap().failure, 0);
+
+        let selected = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &ctx(Tier::Tier1, &headroom, &feedback),
+        );
+        let arms: Vec<_> = selected
+            .iter()
+            .map(|c| (c.harness.as_str(), c.model_ref.as_str()))
+            .collect();
+        assert_eq!(arms, [("codex", "gpt-b"), ("codex", "gpt-a")]);
+
+        // A model whose tier does not fit is rejected on its own, naming its model.
+        let mut mixed = configured.clone();
+        mixed[0].model_tier = ModelCapabilityTier::MidTier;
+        let rejected = Router::rejections(
+            &mixed,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            Tier::Tier3,
+        );
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].harness, "codex");
+        assert_eq!(rejected[0].model_ref, "gpt-a");
     }
 
     fn codex() -> Candidate {
