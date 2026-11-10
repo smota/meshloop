@@ -48,12 +48,37 @@ Owner decision 6 in #132.
   loads the cell on a throwaway home (temporary `HOME`, `--ephemeral`) and runs the
   cell's tests. It is `continue-on-error`, is never called from `xtask check` or
   `cargo test`, and does not gate merge. The runner needs glibc 2.38 or newer.
-- **As built (#135).** The shared file is
+- **As built (#135, #136).** The shared file is
   [`cells/nodecode-meshloop/contract.json`](../../cells/nodecode-meshloop/contract.json), a
   list of field paths and types rather than golden output, asserted by
   `crates/meshloop-cli/tests/nodecode_cell_contract.rs` and checked by the cell on every
   answer. The optional job is `nodecode-cell` in `.github/workflows/ci.yml`; it runs
   `cells/nodecode-meshloop/test/load_test.py`.
+
+## Driving runs from the cell (#136)
+
+The cell's commands that write (`plan`, `review-plan`, `run`, `resume`, `cancel`, `accept`,
+`integrate`) are `/meshloop` slash commands only, off until `meshloop.write_commands` is set.
+They are thin calls to the binary; the [cell's README](../../cells/nodecode-meshloop/README.md#commands)
+lists them. How the decisions in ADR 0038 were built:
+
+- **Human gates.** `accept` and each `review-plan` decision take `--as` typed in that
+  command; there is no default identity. `review-plan` without a decision only shows the
+  plan. `run` never passes `--accept-plan`. `run` and `resume` start a detached driver, and
+  nothing accepts, resumes or integrates on its own. `integrate` lands only with
+  `--accept-integrate` typed.
+- **Detached resume.** `meshloop resume --detach --graph <id>` was added for the cell. It
+  starts the same driver `run --detach` starts. A foreground resume would run past the cell's
+  timeout, and killing its process group would leave harness workers, which meshloop starts
+  in their own process groups, running.
+- **The `:tool` veto.** One hook refuses organism tool calls whose text runs accept,
+  review-plan or integrate. It is defence in depth, not a boundary: the Board spike showed a
+  woken session is not bounded by its wake template, and nothing in the cell reacts to Board
+  posts. It was tested by running the installed hook function on synthetic calls, since a
+  real tool call needs a model turn.
+- **Run report.** `/meshloop report` lists the (harness, `model_ref`) pairs a run's attempts
+  recorded and the selected harnesses it did not exercise. `model_ref` stays a label until
+  [#134](https://github.com/smota/meshloop/issues/134)'s model list passes it to a harness.
 
 ## Platform
 

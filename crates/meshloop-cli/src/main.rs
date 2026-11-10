@@ -201,16 +201,35 @@ fn dispatch(inv: Invocation) -> ExitCode {
             db,
             worktree_base,
             fixture_only,
-        } => cmd_resume(
-            graph,
-            retry,
-            restart,
-            config,
-            db,
-            worktree_base,
-            fixture_only,
-            inv.origin,
-        ),
+            detach,
+        } => {
+            if detach {
+                cmd_resume_detached(
+                    graph,
+                    retry,
+                    restart,
+                    DriverOptions {
+                        config,
+                        db,
+                        worktree_base,
+                        fixture_only,
+                    },
+                    inv.json,
+                    inv.origin,
+                )
+            } else {
+                cmd_resume(
+                    graph,
+                    retry,
+                    restart,
+                    config,
+                    db,
+                    worktree_base,
+                    fixture_only,
+                    inv.origin,
+                )
+            }
+        }
         Command::Cancel {
             driver,
             graph,
@@ -1034,74 +1053,20 @@ fn cmd_run(
         .clone()
         .unwrap_or_else(|| graph_id.clone());
     if detach {
-        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("meshloop"));
-        let mut cmd = std::process::Command::new(current_exe);
-        cmd.arg("resume").arg("--graph").arg(&gid);
-        if let Some(cfg) = &config {
-            cmd.arg("--config").arg(cfg);
-        }
-        if let Some(d) = &db {
-            cmd.arg("--db").arg(d);
-        }
-        if let Some(wb) = &worktree_base {
-            cmd.arg("--worktree-base").arg(wb);
-        }
-        if fixture_only {
-            cmd.arg("--fixture-only");
-        }
-        let log_path = driver_liveness::driver_log_path(&root, db.as_deref(), &gid);
-        let log_path = match driver_liveness::prepare_log(&log_path) {
-            Ok(path) => path,
-            Err(e) => {
-                let message = format!("Failed to open driver log: {e}");
-                if json {
-                    println!("{}", json_out::err("meshloop:run", origin, message));
-                } else {
-                    eprintln!("{message}");
-                }
-                return ExitCode::from(1);
-            }
-        };
-        cmd.env(driver_liveness::LOG_ENV, &log_path);
-        match meshloop_adapters::process::spawn_detached(cmd, &log_path) {
-            Ok(_) => {
-                if json {
-                    println!(
-                        "{}",
-                        json_out::ok(
-                            "meshloop:run",
-                            origin,
-                            serde_json::json!({
-                                "session_id": gid,
-                                "graph_id": gid,
-                                "status": "running",
-                                "detached": true,
-                                "driver_log": log_path.display().to_string(),
-                            }),
-                        )
-                    );
-                } else {
-                    println!("Detached session started: {gid}");
-                    println!("driver log: {}", log_path.display());
-                }
-                return ExitCode::SUCCESS;
-            }
-            Err(e) => {
-                if json {
-                    println!(
-                        "{}",
-                        json_out::err(
-                            "meshloop:run",
-                            origin,
-                            format!("Failed to spawn detached process: {e}")
-                        )
-                    );
-                } else {
-                    eprintln!("Failed to spawn detached process: {e}");
-                }
-                return ExitCode::from(1);
-            }
-        }
+        return spawn_driver(
+            "meshloop:run",
+            &root,
+            &gid,
+            &[],
+            &DriverOptions {
+                config,
+                db,
+                worktree_base,
+                fixture_only,
+            },
+            json,
+            origin,
+        );
     }
     let telemetry_start = std::time::Instant::now();
     match saga.loop_until_idle() {
@@ -1164,6 +1129,138 @@ fn cmd_run(
             ExitCode::from(1)
         }
     }
+}
+
+/// Where a detached driver runs: the flags `run` and `resume` pass on to it.
+struct DriverOptions {
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    worktree_base: Option<PathBuf>,
+    fixture_only: bool,
+}
+
+/// Start `meshloop resume --graph <gid>` as a detached driver logging to the run's driver
+/// log, and report it under `command` (`run --detach`, `resume --detach`).
+fn spawn_driver(
+    command: &str,
+    root: &std::path::Path,
+    gid: &str,
+    extra: &[&str],
+    options: &DriverOptions,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("meshloop"));
+    let mut cmd = std::process::Command::new(current_exe);
+    cmd.arg("resume").arg("--graph").arg(gid).args(extra);
+    if let Some(cfg) = &options.config {
+        cmd.arg("--config").arg(cfg);
+    }
+    if let Some(d) = &options.db {
+        cmd.arg("--db").arg(d);
+    }
+    if let Some(wb) = &options.worktree_base {
+        cmd.arg("--worktree-base").arg(wb);
+    }
+    if options.fixture_only {
+        cmd.arg("--fixture-only");
+    }
+    let log_path = driver_liveness::driver_log_path(root, options.db.as_deref(), gid);
+    let log_path = match driver_liveness::prepare_log(&log_path) {
+        Ok(path) => path,
+        Err(e) => {
+            let message = format!("Failed to open driver log: {e}");
+            if json {
+                println!("{}", json_out::err(command, origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+    cmd.env(driver_liveness::LOG_ENV, &log_path);
+    match meshloop_adapters::process::spawn_detached(cmd, &log_path) {
+        Ok(_) => {
+            if json {
+                println!(
+                    "{}",
+                    json_out::ok(
+                        command,
+                        origin,
+                        serde_json::json!({
+                            "session_id": gid,
+                            "graph_id": gid,
+                            "status": "running",
+                            "detached": true,
+                            "driver_log": log_path.display().to_string(),
+                        }),
+                    )
+                );
+            } else {
+                println!("Detached session started: {gid}");
+                println!("driver log: {}", log_path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let message = format!("Failed to spawn detached process: {e}");
+            if json {
+                println!("{}", json_out::err(command, origin, message));
+            } else {
+                eprintln!("{message}");
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `resume --detach --graph <id>`: the same resume, run by a detached driver. The driver
+/// checks the run itself, as `run --detach`'s does; this only refuses a graph the store
+/// does not hold.
+fn cmd_resume_detached(
+    graph: Option<String>,
+    retry: bool,
+    restart: bool,
+    options: DriverOptions,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    let command = "meshloop:resume";
+    let Some(gid) = graph else {
+        return read_error(
+            command,
+            origin,
+            json,
+            "meshloop:resume --detach requires --graph <id>",
+        );
+    };
+    if let Err(message) = legacy_mutation_preflight(options.db.as_deref(), Some(&gid)) {
+        return read_error(command, origin, json, message);
+    }
+    let known = with_read_only_saga(
+        ReadRequest {
+            config: options.config.clone(),
+            db: options.db.clone(),
+            command,
+            empty_status: false,
+            requested_graph: Some(&gid),
+            json,
+            origin: origin.clone(),
+        },
+        |saga| match saga.resolve_graph_id(Some(&gid)) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => read_error(command, origin.clone(), json, format!("{e:?}")),
+        },
+    );
+    if known != ExitCode::SUCCESS {
+        return known;
+    }
+    let extra: &[&str] = match (retry, restart) {
+        (true, _) => &["--retry"],
+        (_, true) => &["--restart"],
+        _ => &[],
+    };
+    spawn_driver(command, &repo_root(), &gid, extra, &options, json, origin)
 }
 
 fn with_saga(
