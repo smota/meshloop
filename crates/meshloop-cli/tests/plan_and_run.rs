@@ -4486,3 +4486,205 @@ fn harness_output_row_does_not_hide_an_empty_diff_failure() {
         "empty diff must still fail when empty_diff_ok is false: {inspected}"
     );
 }
+
+/// One `[harnesses.fixture]` entry that lists two models (issue #134). The template
+/// passes `{model_ref}` through the fixture's `--model` flag, which echoes it and fails
+/// for a model whose name starts with `fail-`.
+fn write_two_model_config(dir: &Path) -> PathBuf {
+    let config_path = dir.join("meshloop.toml");
+    let contents = format!(
+        r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+max_retries = 2
+task_timeout_seconds = 30
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "{}"
+version_args = ["--version"]
+invoke_args_template = ["--model", "{{model_ref}}", "--prompt-file", "{{prompt_file}}"]
+models = [
+  {{ model_ref = "fail-mid-model", model_tier = "mid" }},
+  {{ model_ref = "good-top-model", model_tier = "top" }},
+]
+"#,
+        fixture_path().replace('\\', "\\\\"),
+    );
+    fs::write(&config_path, contents).unwrap();
+    config_path
+}
+
+#[test]
+fn one_harness_with_two_models_records_each_dispatched_model_in_evidence() {
+    // Issue #134: one harness entry lists two models; the router expands them into two
+    // candidates. Seeded history makes the mid model the router's first choice even
+    // after it fails here, so the retry reaching the other model proves that retry
+    // tracks (harness, model) arms, not the harness name. Each attempt records the
+    // model it actually ran, and the harness's own output shows that model on its argv.
+    use meshloop_adapters::store::SqliteStore;
+    use meshloop_engine::ports::{FeedbackKey, RoutingFeedbackStore, TierKey};
+
+    let dir = disposable_repo("two-models");
+    let config_path = write_two_model_config(&dir);
+    let db_path = dir.join("state.sqlite");
+    {
+        let mut store = SqliteStore::open(&db_path).expect("open store");
+        let key = FeedbackKey {
+            harness: "fixture".into(),
+            model_ref: "fail-mid-model".into(),
+            // A node without a tier is routed at Tier1 here.
+            tier: TierKey::Tier1,
+        };
+        for _ in 0..100 {
+            store.record_outcome(&key, true).unwrap();
+        }
+    }
+    run_fixture_plan(&dir, &config_path, &db_path, "gmodels");
+    let retried = meshloop()
+        .current_dir(&dir)
+        .args([
+            "resume",
+            "--graph",
+            "gmodels",
+            "--retry",
+            "--fixture-only",
+            "--config",
+        ])
+        .arg(&config_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--worktree-base")
+        .arg(dir.join("worktrees"))
+        .guarded_output()
+        .expect("resume --retry");
+    assert!(
+        retried.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&retried.stdout),
+        String::from_utf8_lossy(&retried.stderr)
+    );
+
+    let inspected = json_cmd(
+        &dir,
+        &config_path,
+        &db_path,
+        &["inspect", "--graph", "gmodels", "--task", "1", "--attempts"],
+    );
+    let attempts = inspected["data"]["attempts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("attempts missing: {inspected}"));
+    assert_eq!(attempts.len(), 2, "{inspected}");
+    let models: Vec<&str> = attempts
+        .iter()
+        .map(|a| a["model_ref"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(models, ["fail-mid-model", "good-top-model"], "{inspected}");
+    for attempt in attempts {
+        assert_eq!(attempt["harness"], "fixture", "{attempt}");
+        let model = attempt["model_ref"].as_str().unwrap();
+        let output = attempt["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["tool"] == "harness-output")
+            .unwrap_or_else(|| panic!("no harness-output row: {attempt}"));
+        let summary = output["summary_redacted"].as_str().unwrap();
+        assert!(
+            summary.contains(&format!("FIXTURE_MODEL:{model}\n")),
+            "attempt recorded {model} but its argv carried something else: {summary}"
+        );
+    }
+    assert_eq!(inspected["data"]["state"], "AwaitingReview", "{inspected}");
+
+    // Feedback rows are keyed by the model that ran, not the harness label.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT harness, model_ref, success_count, failure_count, tier FROM routing_feedback ORDER BY model_ref")
+        .unwrap();
+    let rows: Vec<(String, String, i64, i64, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let keyed: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|(h, m, _, _, t)| (h.as_str(), m.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(
+        keyed,
+        [
+            ("fixture", "fail-mid-model", "Tier1"),
+            ("fixture", "good-top-model", "Tier1")
+        ],
+        "{rows:?}"
+    );
+    assert_eq!((rows[0].2, rows[0].3), (100, 1), "{rows:?}");
+    assert!(rows[1].2 >= 1 && rows[1].3 == 0, "{rows:?}");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn doctor_reports_each_configured_harness_model_pair() {
+    let dir = disposable_repo("doctor-models");
+    let config_path = write_two_model_config(&dir);
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--json", "--config"])
+        .arg(&config_path)
+        .guarded_output()
+        .expect("doctor");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("doctor json");
+    assert_eq!(
+        v["data"]["harnesses"][0]["models"],
+        serde_json::json!([
+            {"model_ref": "fail-mid-model", "model_tier": "mid", "tier": "MidTier"},
+            {"model_ref": "good-top-model", "model_tier": "top", "tier": "TopTier"},
+        ]),
+        "{stdout}"
+    );
+    // Routed at Tier3 by default: only the top model fits, so the harness can plan.
+    assert_eq!(
+        v["data"]["planner"]["eligible"],
+        serde_json::json!(["fixture"]),
+        "{stdout}"
+    );
+
+    let text = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--config"])
+        .arg(&config_path)
+        .guarded_output()
+        .expect("doctor text");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("model fixture/fail-mid-model (model_tier \"mid\" -> MidTier)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("model fixture/good-top-model (model_tier \"top\" -> TopTier)"),
+        "{text}"
+    );
+
+    // A legacy single-model entry reports its one pair.
+    let legacy = write_config(&dir, r#"["--prompt-file", "{prompt_file}"]"#);
+    let output = meshloop()
+        .current_dir(&dir)
+        .args(["doctor", "--json", "--config"])
+        .arg(&legacy)
+        .guarded_output()
+        .expect("doctor legacy");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor json");
+    assert_eq!(
+        v["data"]["harnesses"][0]["models"],
+        serde_json::json!([{"model_ref": "fixture-model", "model_tier": "top", "tier": "TopTier"}])
+    );
+    fs::remove_dir_all(&dir).ok();
+}

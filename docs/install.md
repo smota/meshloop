@@ -124,6 +124,10 @@ They were copied from each CLI's own help and are not a claim that live dispatch
 - pi `1.4.0`, `pi --help` shows `-p` / `--print` and example `pi -p "..."`: `prompt_via = "arg"`, `["-p", "{prompt}"]`.
 - agy `1.4.12`, `agy --help` shows `--print` but not where the prompt text goes. Not verified; no template.
 
+These templates do not pass `{model_ref}`, so each CLI runs its default model. To choose
+the model, or to route several models of one harness with a `models` list, see
+[Model selection](engineering/harnesses.md#model-selection).
+
 - **Planner harness:** `plan` routes the planner as a Tier3 task, so by default only a
   harness with `model_tier = "top"` can plan. To plan with a cheaper model, name it, or
   lower the routing tier (set one key, not both):

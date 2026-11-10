@@ -6,7 +6,18 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // `--model <MODEL> <mode...>`: echo the model the dispatcher passed on argv (issue
+    // #134), then run the remaining mode. A model named `fail-*` stands in for a model
+    // that cannot do the task: it exits 1 without touching the worktree.
+    if args.first().map(String::as_str) == Some("--model") {
+        let model = args.get(1).cloned().unwrap_or_default();
+        println!("FIXTURE_MODEL:{model}");
+        if model.starts_with("fail-") {
+            std::process::exit(1);
+        }
+        args.drain(..args.len().min(2));
+    }
     match args.first().map(String::as_str) {
         Some("--inspect-spawn") => {
             let environment: std::collections::BTreeMap<_, _> = env::vars().collect();
