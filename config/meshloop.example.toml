@@ -33,8 +33,14 @@ verify_command = []
 # Optional worktree root for new runs. Relative paths resolve from the repository.
 # Absolute paths are allowed. Omit this table to use `<repo>/.meshloop/worktrees`
 # after a fail-closed Git layout probe. Existing runs stay on their registered roots.
+# auto_reclaim (default true): once a run is fully integrated and its result is
+# reachable from the checked-out base branch, reclaim its worktrees and
+# meshloop/<graph>/ branches through digest-bound cleanup. Set false to keep them
+# and print the exact `meshloop workspace apply --cleanup ...` command instead.
+# Failed, cancelled, unowned and dirty worktrees are never reclaimed.
 # [workspace]
 # root = "shorter-root"
+# auto_reclaim = true
 
 # Optional. The planner is routed as a Tier3 task, which only model_tier = "top" fits.
 # Name a harness to plan with whatever its tier, or lower the routing tier; not both.

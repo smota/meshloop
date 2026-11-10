@@ -1636,6 +1636,7 @@ fn run_mutation_rollback_tests(root: &Path) -> Result<f64, String> {
         planner: Default::default(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
 
     #[derive(PartialEq, Eq, Debug)]

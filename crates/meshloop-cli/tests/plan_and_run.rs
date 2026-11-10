@@ -3981,6 +3981,7 @@ fn scripted_owned_plan(
         planner: meshloop_engine::run_loop::PlannerSelection::default(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     let result = run.plan("private-objective-marker", "scope", &mut lease);
     (result, harness.prompts.into_inner().unwrap())

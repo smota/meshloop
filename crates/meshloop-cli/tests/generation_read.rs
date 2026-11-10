@@ -295,6 +295,8 @@ fn activate(store: &mut SqliteStore, lease: &dyn RepositoryFence, number: u32) {
                     root_alias: RootAlias::new("worktrees").unwrap(),
                     relative_path: RelativePath::new(format!("runs/run-1/gen-{number}")).unwrap(),
                     layout_version: 1,
+                    producer: None,
+                    base_ref: None,
                 },
                 authorization: auth(rev.metadata.id.as_str()),
                 revision: rev,
@@ -779,6 +781,7 @@ fn with_reader<T>(
         planner: Default::default(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     observe(&saga)
 }

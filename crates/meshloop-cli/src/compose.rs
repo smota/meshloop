@@ -207,6 +207,29 @@ pub fn planning_access(
     Ok(lease)
 }
 
+/// Run-loop ownership writer for this checkout, ledger and worktree root (issue #142).
+/// It takes the repository fence only for each ownership write.
+pub fn run_ownership(composed: &Composed) -> meshloop_adapters::workspace::RunLoopOwnershipAccess {
+    use meshloop_engine::ports::WorkspacePort;
+    let root = composed.git.repo_root();
+    meshloop_adapters::workspace::RunLoopOwnershipAccess::new(
+        "git",
+        root,
+        anchored(root, &composed.db_path),
+        anchored(root, &composed.worktree_base),
+    )
+}
+
+/// A relative `--db` or `--worktree-base` is relative to the invocation directory,
+/// which is the repository root for every composed command.
+pub fn anchored(repo_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    }
+}
+
 fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Composed>, String> {
     let mut harnesses = HashMap::new();
     let mut candidates = Vec::new();

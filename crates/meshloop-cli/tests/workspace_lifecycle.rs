@@ -395,6 +395,8 @@ fn inventory_and_preview_report_reason_codes_without_writes() {
                     root_alias: alias,
                     relative_path: RelativePath::new("absent-gen").unwrap(),
                     layout_version: 1,
+                    producer: None,
+                    base_ref: None,
                 },
             )
             .unwrap();
@@ -582,6 +584,8 @@ fn cleanup_apply_prints_git_remove_failure() {
                     root_alias: alias,
                     relative_path: RelativePath::new("clean-wt").unwrap(),
                     layout_version: 1,
+                    producer: None,
+                    base_ref: None,
                 },
             )
             .unwrap();
@@ -692,6 +696,8 @@ fn cleanup_scenario(apply: bool) {
                         root_alias: alias.clone(),
                         relative_path: RelativePath::new(path).unwrap(),
                         layout_version: 1,
+                        producer: None,
+                        base_ref: None,
                     },
                 )
                 .unwrap();
@@ -992,6 +998,8 @@ fn compatibility_adopts_verified_legacy_and_keeps_roots() {
         root_alias: alias.clone(),
         relative_path: RelativePath::new("kept.txt").unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     let missing = GenerationRecord {
         id: LifecycleId::new("missing-generation").unwrap(),
@@ -1002,6 +1010,8 @@ fn compatibility_adopts_verified_legacy_and_keeps_roots() {
         root_alias: alias,
         relative_path: RelativePath::new("missing.txt").unwrap(),
         layout_version: 1,
+        producer: None,
+        base_ref: None,
     };
     store.insert_generation(&lease, &kept).unwrap();
     store.insert_generation(&lease, &missing).unwrap();

@@ -34,6 +34,8 @@ use crate::verify::{
     all_paths_allowed, annotate_with_lattice, git_diff_exit_code, verification_passed,
 };
 
+mod ownership;
+
 #[derive(Debug)]
 pub enum OrchestratorError {
     UnknownHarness(String),
@@ -139,6 +141,8 @@ pub enum IdleReason {
     NoCapableCandidate,
     FailedTerminal,
     WaitingOnLiveWorker,
+    /// The repository fence was busy; nothing was recorded. Resume later (issue #142).
+    FenceBusy,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -183,6 +187,9 @@ pub struct RunLoop<'a> {
     pub pending_outcomes: HashMap<AttemptId, HarnessOutcome>,
     /// `None` leaves both repair arms on the heavy dispatch path.
     pub micro_repair: Option<MicroRepair>,
+    /// Run-loop ownership writer (issue #142). `None` creates legacy-unbound runs,
+    /// which cleanup never selects.
+    pub ownership: Option<&'a dyn crate::workspace::RunOwnership>,
 }
 
 /// Why a node is not progressing on its own.
@@ -352,6 +359,7 @@ fn terminal(state: TaskState) -> bool {
 
 impl<'a> RunLoop<'a> {
     /// Transitional admission: legacy producers cannot mutate bound or migration-marked runs.
+    /// A run-loop run (issue #142) is bound by its generation, not a run binding row.
     /// This observes current ownership only; it is not a repository fence.
     fn require_legacy_mutation(&self, graph_id: &str) -> Result<(), OrchestratorError> {
         let graph = meshloop_domain::workspace::GraphId::new(graph_id)
@@ -641,6 +649,7 @@ impl<'a> RunLoop<'a> {
         run_base: String,
     ) -> Result<(), OrchestratorError> {
         self.require_legacy_mutation(&graph.graph_id)?;
+        self.require_owned_root(&graph.graph_id)?;
         graph
             .validate()
             .map_err(|e| OrchestratorError::Illegal(format!("{e:?}")))?;
@@ -704,7 +713,11 @@ impl<'a> RunLoop<'a> {
             .map(|_| ())
     }
 
-    fn ensure_integrate(&self, graph_id: &str, run_base: &str) -> Result<(), OrchestratorError> {
+    fn ensure_integrate(
+        &mut self,
+        graph_id: &str,
+        run_base: &str,
+    ) -> Result<(), OrchestratorError> {
         let integrate = self.integrate_path(graph_id);
         let ibranch = self.integrate_branch(graph_id);
         if self.workspace.worktree_exists(&integrate) {
@@ -716,9 +729,59 @@ impl<'a> RunLoop<'a> {
                     .into(),
             ));
         }
+        // Ownership precedes the first worktree of the run (issue #142), under one
+        // fence held through the add.
+        let fresh = self.fresh_for_ownership(graph_id)?;
+        let owned = !fresh && self.run_loop_owned(graph_id)?;
+        let ownership = self.ownership;
+        let mut lease = match ownership {
+            Some(ownership) if fresh || owned => Some(ownership.acquire()?),
+            _ => None,
+        };
+        let mut artifact = None;
+        if let Some(lease) = lease.as_mut() {
+            if owned && std::fs::symlink_metadata(&integrate).is_ok() {
+                return Err(OrchestratorError::Illegal(
+                    "integrate path exists without a worktree; refusing to take ownership of it"
+                        .into(),
+                ));
+            }
+            if fresh {
+                self.bind_new_run(lease.as_mut(), graph_id)?;
+            }
+            artifact = self.own_artifact_held(
+                lease.as_mut(),
+                graph_id,
+                meshloop_domain::workspace::ArtifactKind::Integration,
+                "integrate",
+                None,
+            )?;
+        }
         let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
-        self.workspace
-            .add_worktree_from(&integrate, &ibranch, run_base)?;
+        let added = self
+            .workspace
+            .add_worktree_from(&integrate, &ibranch, run_base);
+        if let (Err(_), Some(lease)) = (&added, lease.as_mut()) {
+            self.retire_not_created(lease.as_mut(), artifact, &integrate)?;
+        }
+        added?;
+        Ok(())
+    }
+
+    /// `run --accept-plan` on a new graph: refuse leftover `integrate` state before
+    /// anything is staged, as `start` does for a graph it creates.
+    pub fn require_fresh_integrate(&self, graph_id: &str) -> Result<(), OrchestratorError> {
+        let integrate = self.integrate_path(graph_id);
+        if self.workspace.worktree_exists(&integrate)
+            || std::fs::symlink_metadata(&integrate).is_ok()
+            || self
+                .workspace
+                .branch_exists(&self.integrate_branch(graph_id))?
+        {
+            return Err(OrchestratorError::Illegal(
+                "integrate worktree/branch exists without a runs row".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -791,6 +854,10 @@ impl<'a> RunLoop<'a> {
             row.review_note = note;
         }
         self.store.save_run(&row)?;
+        if next == PlanState::PlanAccepted {
+            // A re-accepted plan of an owned run gets its own generation (ADR 0033).
+            self.advance_generation(graph_id)?;
+        }
         self.active_graph = Some(graph_id.into());
         Ok(next)
     }
@@ -882,6 +949,9 @@ impl<'a> RunLoop<'a> {
         }
 
         self.store.save_run_and_events(&row, &mutation_events)?;
+        if row.plan_state == PlanState::PlanAccepted {
+            self.advance_generation(graph_id)?;
+        }
 
         let mesh = self.workspace.repo_root().join(".meshloop");
         let _ = std::fs::create_dir_all(&mesh);
@@ -1441,11 +1511,33 @@ impl<'a> RunLoop<'a> {
         let attempt_id = self.store.next_attempt_id()?;
         let wt = self.attempt_path(graph_id, task_id, attempt_id);
         let branch = self.attempt_branch(graph_id, task_id, attempt_id);
-        if self.workspace.worktree_exists(&wt) || self.workspace.branch_exists(&branch)? {
+        let owned = self.run_loop_owned(graph_id)?;
+        if self.workspace.worktree_exists(&wt)
+            || self.workspace.branch_exists(&branch)?
+            || (owned && std::fs::symlink_metadata(&wt).is_ok())
+        {
             return Err(OrchestratorError::Illegal(format!(
                 "leftover worktree or branch for attempt {}",
                 attempt_id.0
             )));
+        }
+        // An owned run takes its fence before recording the attempt, so a busy or
+        // unavailable fence stops this tick without changing any state (issue #142).
+        let ownership = self.ownership;
+        let mut lease = match ownership {
+            Some(ownership) if owned => match ownership.acquire() {
+                Ok(lease) => Some(lease),
+                Err(StoreError::FenceBusy) => {
+                    return Ok(Tick::Idle {
+                        reason: IdleReason::FenceBusy,
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            },
+            _ => None,
+        };
+        if let Some(lease) = lease.as_deref() {
+            self.require_pinned_root(lease, graph_id)?;
         }
         let _started = self.append(
             graph_id,
@@ -1467,19 +1559,7 @@ impl<'a> RunLoop<'a> {
                     .unwrap_or_default()
             }
         };
-        if let Err(e) = self.workspace.add_worktree_from(&wt, &branch, &start) {
-            let fail = self.append(
-                graph_id,
-                task_id,
-                Some(attempt_id),
-                TaskState::Running,
-                Event::HarnessCrashedOrTimeout,
-                Some(format!("{e:?}")),
-            )?;
-            return self.maybe_fallback(graph_id, task_id, fail, &selected);
-        }
-
-        self.store.save_attempt(&AttemptRow {
+        let attempt_row = AttemptRow {
             attempt_id,
             graph_id: graph_id.into(),
             task_id,
@@ -1492,7 +1572,49 @@ impl<'a> RunLoop<'a> {
             started_at: Some(stamp()),
             ended_at: None,
             outcome: Some(format!("base:{start}")),
-        })?;
+        };
+        // An owned run records the attempt and its artifact before the worktree
+        // exists (issue #142); the artifact references the attempt row.
+        let owned = lease.is_some();
+        let registered = match lease.as_mut() {
+            Some(lease) => {
+                self.store.save_attempt(&attempt_row)?;
+                self.own_artifact_held(
+                    lease.as_mut(),
+                    graph_id,
+                    meshloop_domain::workspace::ArtifactKind::Attempt,
+                    &format!("task-{}-attempt-{}", task_id.0, attempt_id.0),
+                    Some(attempt_id),
+                )
+            }
+            None => Ok(None),
+        };
+        let added = match &registered {
+            Ok(_) => self
+                .workspace
+                .add_worktree_from(&wt, &branch, &start)
+                .map_err(|e| format!("{e:?}")),
+            Err(e) => Err(format!("{e:?}")),
+        };
+        if let (Err(_), Some(lease), Ok(artifact)) = (&added, lease.as_mut(), registered) {
+            self.retire_not_created(lease.as_mut(), artifact, &wt)?;
+        }
+        drop(lease);
+        if let Err(reason) = added {
+            let fail = self.append(
+                graph_id,
+                task_id,
+                Some(attempt_id),
+                TaskState::Running,
+                Event::HarnessCrashedOrTimeout,
+                Some(reason),
+            )?;
+            return self.maybe_fallback(graph_id, task_id, fail, &selected);
+        }
+
+        if !owned {
+            self.store.save_attempt(&attempt_row)?;
+        }
 
         let spec = build_agent_spec(
             graph,
@@ -2231,6 +2353,14 @@ impl<'a> RunLoop<'a> {
         restart: bool,
     ) -> Result<IdleReason, OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
+        // On Windows a held fence also blocks this unfenced registry read; it is
+        // the same busy stop as the fenced tick, before any state changes.
+        match self.require_owned_root(graph_id) {
+            Err(OrchestratorError::Store(StoreError::FenceBusy)) => {
+                return Ok(IdleReason::FenceBusy);
+            }
+            result => result?,
+        }
         if retry && restart {
             return Err(OrchestratorError::Illegal(
                 "use either --retry or --restart, not both".into(),
@@ -2240,6 +2370,9 @@ impl<'a> RunLoop<'a> {
         if restart {
             self.restart(graph_id)?;
         } else {
+            // Reconcile ownership with the worktrees before resuming (issue #142).
+            self.advance_generation(graph_id)?;
+            self.reconcile_owned(graph_id)?;
             self.crash_fail(graph_id)?;
             if retry {
                 self.retry_failed(graph_id)?;
@@ -2252,6 +2385,7 @@ impl<'a> RunLoop<'a> {
     /// worktrees so the same graph_id can execute again (no replan).
     pub fn restart(&mut self, graph_id: &str) -> Result<(), OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
+        self.require_owned_root(graph_id)?;
         let row = self
             .store
             .load_run(graph_id)?
@@ -2285,7 +2419,10 @@ impl<'a> RunLoop<'a> {
         if self.workspace.worktree_exists(&integrate) {
             let _ = self.workspace.reset_hard(&integrate, &row.run_base);
         }
-        self.store.reset_graph_execution(graph_id)?;
+        // An owned run keeps its history in a new generation (issue #142).
+        if !self.restart_owned(graph_id)? {
+            self.store.reset_graph_execution(graph_id)?;
+        }
         self.active_graph = Some(graph_id.into());
         Ok(())
     }
@@ -2647,6 +2784,8 @@ impl<'a> RunLoop<'a> {
         git_ref: &str,
     ) -> Result<(), OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
+        self.require_owned_root(graph_id)?;
+        self.reconcile_owned(graph_id)?;
         let integrate = self.integrate_path(graph_id);
         self.land_worktree(&integrate, git_ref)
     }
@@ -2720,6 +2859,7 @@ impl<'a> RunLoop<'a> {
         tag: &str,
     ) -> Result<DeliverableView, OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
+        self.require_owned_root(graph_id)?;
         if !meshloop_domain::task_graph::graph_id_is_legal(tag) {
             return Err(OrchestratorError::UnknownDeliverable(tag.into()));
         }
@@ -2739,12 +2879,42 @@ impl<'a> RunLoop<'a> {
 
         let wt = self.deliverable_path(graph_id, tag);
         let branch = self.deliverable_branch(graph_id, tag);
+        // Registered before the old build is replaced; a live record at the same
+        // location is reused. The fence is held through the add.
+        let ownership = self.ownership;
+        let mut lease = match ownership {
+            Some(ownership) if self.run_loop_owned(graph_id)? => Some(ownership.acquire()?),
+            _ => None,
+        };
+        let mut artifact = None;
+        if let Some(lease) = lease.as_mut() {
+            // Only an earlier build (a registered worktree) may be replaced; never
+            // take ownership of anything else at the deliverable path.
+            if !self.workspace.worktree_exists(&wt) && std::fs::symlink_metadata(&wt).is_ok() {
+                return Err(OrchestratorError::Illegal(format!(
+                    "deliverable path for {tag} exists without a worktree; refusing to take ownership of it"
+                )));
+            }
+            artifact = self.own_artifact_held(
+                lease.as_mut(),
+                graph_id,
+                meshloop_domain::workspace::ArtifactKind::Deliverable,
+                &format!("integrate-{tag}"),
+                None,
+            )?;
+        }
         self.workspace.remove_worktree(&wt)?;
         self.workspace.prune()?;
         self.workspace.delete_branch(&branch)?;
         let _ = std::fs::create_dir_all(self.graph_dir(graph_id));
-        self.workspace
-            .add_worktree_from(&wt, &branch, &run.run_base)?;
+        let added = self
+            .workspace
+            .add_worktree_from(&wt, &branch, &run.run_base);
+        if let (Err(_), Some(lease)) = (&added, lease.as_mut()) {
+            self.retire_not_created(lease.as_mut(), artifact, &wt)?;
+        }
+        drop(lease);
+        added?;
 
         for id in &order {
             let attempt = self
@@ -2790,6 +2960,7 @@ impl<'a> RunLoop<'a> {
         git_ref: &str,
     ) -> Result<(), OrchestratorError> {
         self.require_legacy_mutation(graph_id)?;
+        self.require_owned_root(graph_id)?;
         let wt = self.deliverable_path(graph_id, tag);
         if !self.workspace.worktree_exists(&wt) {
             self.prepare_deliverable(graph_id, tag)?;
@@ -3134,7 +3305,7 @@ pub fn idle_exit_code(reason: IdleReason, status: &RunStatus) -> i32 {
             }
         }
         IdleReason::WaitingOnLiveWorker => 0,
-        IdleReason::NoCapableCandidate | IdleReason::FailedTerminal => 1,
+        IdleReason::NoCapableCandidate | IdleReason::FailedTerminal | IdleReason::FenceBusy => 1,
     }
 }
 
@@ -3370,6 +3541,7 @@ mod tests {
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
             micro_repair: None,
+            ownership: None,
         }
     }
     fn admission_graph() -> TaskGraph {
@@ -3943,6 +4115,7 @@ mod tests {
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
             micro_repair: None,
+            ownership: None,
         }
     }
 
@@ -4051,6 +4224,7 @@ mod tests {
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
             micro_repair: None,
+            ownership: None,
         }
     }
 
@@ -4414,6 +4588,7 @@ mod tests {
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
             micro_repair: None,
+            ownership: None,
         };
         let graph = TaskGraph {
             graph_id: "g".into(),
@@ -4555,6 +4730,7 @@ mod tests {
             planner: PlannerSelection::default(),
             pending_outcomes: HashMap::new(),
             micro_repair: None,
+            ownership: None,
         };
         let graph = TaskGraph {
             graph_id: "g".into(),
@@ -4794,6 +4970,7 @@ mod tests {
                 planner: PlannerSelection::default(),
                 pending_outcomes: HashMap::new(),
                 micro_repair: None,
+                ownership: None,
             };
             run.finish_orphaned_verification("g", &node, Some(attempt))
                 .expect("orphan gate")
@@ -4845,6 +5022,7 @@ mod tests {
                 planner: PlannerSelection::default(),
                 pending_outcomes: HashMap::new(),
                 micro_repair: None,
+                ownership: None,
             };
             run.finish_orphaned_verification("g", &node, again)
                 .expect_err("already accepted")

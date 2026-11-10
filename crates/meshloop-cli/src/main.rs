@@ -10,6 +10,7 @@ mod driver_liveness;
 mod gitignore;
 mod json_out;
 mod mcp;
+mod reclaim;
 mod report;
 mod session_bundle;
 mod workspace_cmd;
@@ -23,7 +24,9 @@ use meshloop_domain::state::{PlanDecision, PlanState, TaskState};
 use meshloop_domain::task_graph::{TaskGraph, TaskId, Tier};
 use meshloop_engine::ports::{HarnessCapabilities, RunStore, WorkspacePort};
 use meshloop_engine::router::Router;
-use meshloop_engine::run_loop::{OrchestratorError, RunLoop, RunStatus, idle_exit_code};
+use meshloop_engine::run_loop::{
+    IdleReason, OrchestratorError, RunLoop, RunStatus, idle_exit_code,
+};
 
 use crate::args::{Command, Invocation};
 
@@ -98,6 +101,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             cleanup,
             apply,
             digest,
+            graph,
             config,
             db,
             worktree_base,
@@ -106,6 +110,7 @@ fn dispatch(inv: Invocation) -> ExitCode {
             cleanup,
             apply,
             digest,
+            graph,
             config,
             db,
             worktree_base,
@@ -496,6 +501,7 @@ fn cmd_plan(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     eprintln!(
         "meshloop:plan probing {} harness(es) in parallel (timeout {}s)",
@@ -680,6 +686,8 @@ fn cmd_review_plan(
             return ExitCode::from(1);
         }
     };
+    // Re-acceptance pins a new generation of an owned run (issue #142).
+    let ownership = compose::run_ownership(&composed);
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -696,6 +704,7 @@ fn cmd_review_plan(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: Some(&ownership),
     };
 
     let mut graph = graph;
@@ -917,6 +926,13 @@ fn cmd_run(
             return ExitCode::from(1);
         }
     };
+    let ownership = compose::run_ownership(&composed);
+    let reclaim_context = reclaim::ReclaimContext {
+        checkout: composed.git.repo_root().to_path_buf(),
+        ledger: compose::anchored(composed.git.repo_root(), &composed.db_path),
+        worktree_root: compose::anchored(composed.git.repo_root(), &composed.worktree_base),
+        auto: cfg.workspace.auto_reclaim,
+    };
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -933,6 +949,7 @@ fn cmd_run(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: Some(&ownership),
     };
     if json {
         eprintln!(
@@ -963,6 +980,21 @@ fn cmd_run(
             plan.display()
         );
         return ExitCode::from(2);
+    }
+    // `--accept-plan` is the human acceptance. Record it before `start`, so the run's
+    // ownership is registered before its first worktree (issue #142).
+    if existing_state != Some(PlanState::PlanAccepted) {
+        // A new graph must not inherit leftover integrate state.
+        let staged = if existing_state.is_none() {
+            saga.require_fresh_integrate(&graph_id)
+                .and_then(|()| saga.stage_plan(graph.clone(), run_base.clone()).map(|_| ()))
+        } else {
+            Ok(())
+        };
+        if let Err(e) = staged.and_then(|()| saga.accept_plan(&graph_id)) {
+            eprintln!("accept-plan failed: {e:?}");
+            return ExitCode::from(1);
+        }
     }
     if let Err(e) = saga.start(graph, run_base) {
         match e {
@@ -1001,12 +1033,6 @@ fn cmd_run(
         .active_graph
         .clone()
         .unwrap_or_else(|| graph_id.clone());
-    if existing_state != Some(PlanState::PlanAccepted)
-        && let Err(e) = saga.accept_plan(&gid)
-    {
-        eprintln!("accept-plan failed: {e:?}");
-        return ExitCode::from(1);
-    }
     if detach {
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("meshloop"));
         let mut cmd = std::process::Command::new(current_exe);
@@ -1083,6 +1109,9 @@ fn cmd_run(
             let status = saga.status(&gid).ok();
             observe_graph_loop("graph.run", status.as_ref(), telemetry_start.elapsed());
             let git_export = saga.export_git_metadata(&gid).ok().flatten();
+            let reclaimed = (reason == IdleReason::GraphComplete)
+                .then(|| reclaim::after_run(&reclaim_context, &gid))
+                .flatten();
             if json {
                 let row = saga.store.load_run(&gid).ok().flatten();
                 let plan_id = row.as_ref().map(|r| r.plan_id.clone());
@@ -1099,11 +1128,17 @@ fn cmd_run(
                     data["git_export"] =
                         serde_json::to_value(export).unwrap_or(serde_json::Value::Null);
                 }
+                if let Some(note) = &reclaimed {
+                    data["reclaim"] = note.json();
+                }
                 println!("{}", json_out::ok("meshloop:run", origin, data,));
             } else {
                 println!("{}", report::format_idle(reason, status.as_ref()));
                 if let Some(s) = &status {
                     print!("{}", report::format_status(s));
+                }
+                for line in reclaimed.iter().flat_map(|note| &note.lines) {
+                    println!("{line}");
                 }
             }
             let code = status
@@ -1139,6 +1174,25 @@ fn with_saga(
     origin: meshloop_engine::origin::Origin,
     f: impl FnOnce(&mut RunLoop<'_>) -> ExitCode,
 ) -> ExitCode {
+    with_owned_saga(
+        config,
+        db,
+        worktree_base,
+        fixture_only,
+        origin,
+        |saga, _| f(saga),
+    )
+}
+
+/// Writable saga with run-loop ownership (issue #142) and the reclamation context.
+fn with_owned_saga(
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    worktree_base: Option<PathBuf>,
+    fixture_only: bool,
+    origin: meshloop_engine::origin::Origin,
+    f: impl FnOnce(&mut RunLoop<'_>, &reclaim::ReclaimContext) -> ExitCode,
+) -> ExitCode {
     let (cfg, _) = match load_cfg(config) {
         Ok(v) => v,
         Err(c) => return c,
@@ -1162,6 +1216,13 @@ fn with_saga(
         .iter()
         .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
         .collect();
+    let ownership = compose::run_ownership(&composed);
+    let context = reclaim::ReclaimContext {
+        checkout: composed.git.repo_root().to_path_buf(),
+        ledger: compose::anchored(composed.git.repo_root(), &composed.db_path),
+        worktree_root: compose::anchored(composed.git.repo_root(), &composed.worktree_base),
+        auto: cfg.workspace.auto_reclaim,
+    };
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -1178,8 +1239,9 @@ fn with_saga(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: Some(&ownership),
     };
-    f(&mut saga)
+    f(&mut saga, &context)
 }
 
 struct ReadRequest<'a> {
@@ -1265,6 +1327,7 @@ fn with_read_only_saga(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: None,
     };
     f(&mut saga)
 }
@@ -1502,63 +1565,78 @@ fn cmd_resume(
         eprintln!("{message}");
         return ExitCode::from(1);
     }
-    with_saga(config, db, worktree_base, fixture_only, origin, |saga| {
-        let id = match saga.resolve_graph_id(graph.as_deref()) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("{e:?}");
-                return ExitCode::from(2);
-            }
-        };
-        if let Err(message) = legacy_mutation_admission(saga.store, &id) {
-            eprintln!("{message}");
-            return ExitCode::from(1);
-        }
-        let tracked = std::env::var_os(driver_liveness::LOG_ENV);
-        if let Some(log) = &tracked {
-            if let Err(error) =
-                driver_liveness::register(saga.store, &id, std::path::Path::new(log))
-            {
-                eprintln!("driver liveness: {error:?}");
+    with_owned_saga(
+        config,
+        db,
+        worktree_base,
+        fixture_only,
+        origin,
+        |saga, context| {
+            let id = match saga.resolve_graph_id(graph.as_deref()) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("{e:?}");
+                    return ExitCode::from(2);
+                }
+            };
+            if let Err(message) = legacy_mutation_admission(saga.store, &id) {
+                eprintln!("{message}");
                 return ExitCode::from(1);
             }
-            driver_liveness::panic_if_requested(fixture_only);
-        }
-        let telemetry_start = std::time::Instant::now();
-        match saga.resume(&id, retry, restart) {
-            Ok(reason) => {
-                let status = saga.status(&id).ok();
-                observe_graph_loop("graph.resume", status.as_ref(), telemetry_start.elapsed());
-                let code = status
-                    .as_ref()
-                    .map(|s| idle_exit_code(reason, s))
-                    .unwrap_or(1);
-                if tracked.is_some() {
-                    driver_liveness::finish(saga.store, &id, code);
+            let tracked = std::env::var_os(driver_liveness::LOG_ENV);
+            if let Some(log) = &tracked {
+                if let Err(error) =
+                    driver_liveness::register(saga.store, &id, std::path::Path::new(log))
+                {
+                    eprintln!("driver liveness: {error:?}");
+                    return ExitCode::from(1);
                 }
-                println!("{}", report::format_idle(reason, status.as_ref()));
-                if let Some(s) = &status {
-                    print_driver(saga, s);
-                    print!("{}", report::format_status(s));
-                    ExitCode::from(code as u8)
-                } else {
-                    ExitCode::SUCCESS
+                driver_liveness::panic_if_requested(fixture_only);
+            }
+            let telemetry_start = std::time::Instant::now();
+            match saga.resume(&id, retry, restart) {
+                Ok(reason) => {
+                    let status = saga.status(&id).ok();
+                    observe_graph_loop("graph.resume", status.as_ref(), telemetry_start.elapsed());
+                    let code = status
+                        .as_ref()
+                        .map(|s| idle_exit_code(reason, s))
+                        .unwrap_or(1);
+                    if tracked.is_some() {
+                        driver_liveness::finish(saga.store, &id, code);
+                    }
+                    println!("{}", report::format_idle(reason, status.as_ref()));
+                    let exit = if let Some(s) = &status {
+                        print_driver(saga, s);
+                        print!("{}", report::format_status(s));
+                        ExitCode::from(code as u8)
+                    } else {
+                        ExitCode::SUCCESS
+                    };
+                    if reason == IdleReason::GraphComplete
+                        && let Some(note) = reclaim::after_run(context, &id)
+                    {
+                        for line in &note.lines {
+                            println!("{line}");
+                        }
+                    }
+                    exit
+                }
+                Err(e) => {
+                    meshloop_adapters::telemetry::record(
+                        "graph.resume",
+                        "error",
+                        Some(telemetry_start.elapsed().as_secs_f64()),
+                    );
+                    if tracked.is_some() {
+                        driver_liveness::finish(saga.store, &id, 1);
+                    }
+                    eprintln!("resume failed: {e:?}");
+                    ExitCode::from(1)
                 }
             }
-            Err(e) => {
-                meshloop_adapters::telemetry::record(
-                    "graph.resume",
-                    "error",
-                    Some(telemetry_start.elapsed().as_secs_f64()),
-                );
-                if tracked.is_some() {
-                    driver_liveness::finish(saga.store, &id, 1);
-                }
-                eprintln!("resume failed: {e:?}");
-                ExitCode::from(1)
-            }
-        }
-    })
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2142,26 +2220,39 @@ fn cmd_integrate(
         }
         return ExitCode::from(1);
     }
-    with_saga(config, db, worktree_base, false, origin.clone(), |saga| {
-        if let Err(message) = legacy_mutation_admission(saga.store, &graph) {
-            if json {
-                println!("{}", json_out::err("meshloop:integrate", origin, message));
-            } else {
-                eprintln!("{message}");
+    with_owned_saga(
+        config,
+        db,
+        worktree_base,
+        false,
+        origin.clone(),
+        |saga, context| {
+            if let Err(message) = legacy_mutation_admission(saga.store, &graph) {
+                if json {
+                    println!("{}", json_out::err("meshloop:integrate", origin, message));
+                } else {
+                    eprintln!("{message}");
+                }
+                return ExitCode::from(1);
             }
-            return ExitCode::from(1);
-        }
-        match saga.integrate_into(&graph, &into) {
-            Ok(()) => {
-                println!("integrated graph {graph} into {into}");
-                ExitCode::SUCCESS
+            match saga.integrate_into(&graph, &into) {
+                Ok(()) => {
+                    println!("integrated graph {graph} into {into}");
+                    // The run's result is now on `into`: reclaim it when allowed.
+                    if let Some(note) = reclaim::after_run(context, &graph) {
+                        for line in &note.lines {
+                            println!("{line}");
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e:?}");
+                    ExitCode::from(1)
+                }
             }
-            Err(e) => {
-                eprintln!("{e:?}");
-                ExitCode::from(1)
-            }
-        }
-    })
+        },
+    )
 }
 
 /// `integrate --deliverable`: without `--accept-integrate`, (re)build the deliverable
@@ -2901,6 +2992,8 @@ fn cmd_mutate_plan(
         .iter()
         .map(|(k, v)| (k.clone(), v as &dyn HarnessCapabilities))
         .collect();
+    // Re-acceptance pins a new generation of an owned run (issue #142).
+    let ownership = compose::run_ownership(&composed);
     let mut saga = RunLoop {
         harnesses: harness_refs,
         candidates: composed.candidates.clone(),
@@ -2917,6 +3010,7 @@ fn cmd_mutate_plan(
         planner: composed.planner.clone(),
         pending_outcomes: std::collections::HashMap::new(),
         micro_repair: None,
+        ownership: Some(&ownership),
     };
 
     let graph_id = match graph_arg {
