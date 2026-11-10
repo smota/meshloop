@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smota/meshloop/schemas/advisory-priors.v1.schema.json",
+  "title": "advisory-priors v1",
+  "description": "Advisory input file for the Meshloop kernel (ADR 0038, amendment 2026-11-10 for #139). The nodecode-meshloop cell writes it as a proposal; it has effect only after `meshloop priors accept --file F --as <identity>` and only while the latest promotion record's SHA-256 equals the accepted copy. The kernel loader, not this schema, is the authority: it also checks the evidence floor, provenance length == attempts, successes <= attempts, the configured candidate set and the `{model_ref}` template. A file-level failure (not JSON, wrong schema or version, over 1 MiB) means no priors; an entry-level failure ignores that entry only; unknown fields are ignored. Every case yields a diagnostic, never a failed command. No field carries worker output.",
+  "type": "object",
+  "required": ["schema", "version", "generated_at", "generator", "priors", "tier_hints", "notes"],
+  "properties": {
+    "schema": { "const": "meshloop/advisory-priors" },
+    "version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "generator": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "source": {
+      "description": "Optional pointers to what was folded. Display only.",
+      "type": "object",
+      "properties": {
+        "meshloop_version": { "type": "string", "maxLength": 64 },
+        "graph_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/graph_id" }
+        }
+      }
+    },
+    "priors": {
+      "description": "Routing priors. The kernel derives pi = (successes + 1) / (attempts + 2) and passes it through the PredictiveSuccessOracle port into fused_historical_mean; the file never states pi.",
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/prior" }
+    },
+    "tier_hints": {
+      "description": "Raise-only suggestions shown at plan review. Never read at routing time.",
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/tier_hint" }
+    },
+    "notes": {
+      "description": "Planning lessons and repair constraints. Advisory text shown at plan review only; never parsed into policy, prompts, paths or checks.",
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/note" }
+    }
+  },
+  "$defs": {
+    "graph_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "tier": { "enum": ["Tier1", "Tier2", "Tier3"] },
+    "count": { "type": "integer", "minimum": 0, "maximum": 4096 },
+    "attempt_ref": {
+      "description": "An attempt Meshloop dispatched as subprocess and verified itself.",
+      "type": "object",
+      "required": ["graph_id", "task_id", "attempt_id"],
+      "properties": {
+        "graph_id": { "$ref": "#/$defs/graph_id" },
+        "task_id": { "type": "integer", "minimum": 0 },
+        "attempt_id": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decision_ref": {
+      "description": "A plan decision Meshloop recorded, identified by graph and plan digest.",
+      "type": "object",
+      "required": ["graph_id", "plan_sha256", "decision"],
+      "properties": {
+        "graph_id": { "$ref": "#/$defs/graph_id" },
+        "plan_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "decision": { "enum": ["accept", "decline", "adjust"] }
+      }
+    },
+    "prior": {
+      "type": "object",
+      "required": ["harness", "model_ref", "tier", "dispatch_mode", "attempts", "successes", "provenance"],
+      "properties": {
+        "harness": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model_ref": {
+          "description": "The model recorded on the attempt rows (#134). Empty, whitespace-bearing, '-'-prefixed, over 256 bytes and `unverified` (ADR 0039) are refused.",
+          "type": "string",
+          "pattern": "^[^\\s-]\\S{0,255}$",
+          "not": { "const": "unverified" }
+        },
+        "tier": { "$ref": "#/$defs/tier" },
+        "dispatch_mode": {
+          "description": "Positive marker. Only subprocess attempts are evidence for #139.",
+          "const": "subprocess"
+        },
+        "attempts": { "$ref": "#/$defs/count" },
+        "successes": { "$ref": "#/$defs/count" },
+        "provenance": {
+          "description": "One reference per counted attempt; the loader requires length == attempts.",
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/attempt_ref" }
+        }
+      }
+    },
+    "tier_hint": {
+      "type": "object",
+      "required": ["path_prefix", "from_tier", "to_tier", "attempts", "failures", "provenance"],
+      "properties": {
+        "path_prefix": {
+          "description": "Repository-relative prefix matched against a node's allowed_paths.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^/\\s][^\\s]*$"
+        },
+        "from_tier": { "enum": ["Tier1", "Tier2"] },
+        "to_tier": {
+          "description": "Must be higher than from_tier; the loader ignores any other entry.",
+          "enum": ["Tier2", "Tier3"]
+        },
+        "attempts": { "$ref": "#/$defs/count" },
+        "failures": { "$ref": "#/$defs/count" },
+        "provenance": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/attempt_ref" }
+        }
+      }
+    },
+    "note": {
+      "type": "object",
+      "required": ["kind", "text", "evidence_count", "provenance"],
+      "properties": {
+        "kind": { "enum": ["plan", "repair"] },
+        "text": {
+          "description": "One line from a deterministic cell template over counts and ids. Never quotes worker output, evidence summaries or node descriptions.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "path_prefix": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\s][^\\s]*$" },
+        "evidence_count": { "$ref": "#/$defs/count" },
+        "provenance": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/attempt_ref" },
+              { "$ref": "#/$defs/decision_ref" }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

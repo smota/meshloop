@@ -5,3 +5,7 @@ Add versioned execution graph, event, evidence, and configuration schemas only a
 ## Implemented Schemas
 
 - [`run-record.v1.json`](run-record.v1.json): Canonical schema for benchmark and scorecard telemetry runs (`SPEC-ML-BENCH-001`, `ADR 0023`). Enforces metric structures, provenance tracking (Git SHA, rustc, OS, crate versions), execution phases breakdown, and pass/fail gate status.
+
+## Proposed Schemas (pending ADR amendment acceptance)
+
+- [`advisory-priors.v1.schema.json`](advisory-priors.v1.schema.json): Advisory input file (routing priors, raise-only tier hints, advisory notes) for ADR 0038's #139 amendment, which is Proposed — pending review. The kernel loader, not this schema, is the authority; mechanism in `docs/architecture/learning-plane.md#advisory-input-139`. Not implemented.

@@ -82,6 +82,210 @@ lists them. How the decisions in ADR 0038 were built:
   dispatched when the operator's template passes it (a `models` list and
   `--model {model_ref}`); otherwise it is the entry's label.
 
+## Advisory input (#139)
+
+This section describes the mechanism behind the ADR 0038 amendment of 2026-11-10 (#139). That
+amendment is **Proposed — pending review**, and nothing here is built yet. The file format
+is [`schemas/advisory-priors.v1.schema.json`](../../schemas/advisory-priors.v1.schema.json).
+Code references are at base `ac87e7a`.
+
+### What counts as evidence
+
+The fold counts an attempt only if every one of these holds:
+
+- `dispatch_mode` is `"subprocess"`;
+- `model_ref` is non-empty and not `unverified`;
+- the task is not `Cancelled`;
+- the kernel recorded a result for it.
+
+The result decides how the attempt counts:
+
+- **Pass.** `DeterministicChecksPassed` is recorded.
+- **Fail.** `DeterministicChecksFailed` or `HarnessCrashedOrTimeout` is recorded.
+
+This mirrors `routing_feedback` after #167, which records feedback only after the check
+result is in the ledger (`run_loop.rs:2364-2372`, `run_loop.rs:2719-2728`).
+
+The fold reports every excluded attempt by reason: `not_subprocess`, `model_unverified`,
+`cancelled` or `no_result`.
+
+**Positive mode marker.** The attempt JSON (`report.rs:154`, `attempt_json`) has no
+`dispatch_mode` field today. The kernel side of #139 adds one, and `contract.json`
+requires it for `inspect_attempts`. The value depends on the build:
+
+- At this base it is the constant `"subprocess"`, because the binary has only one
+  dispatch path.
+- Once #147 adds the attempt mode column, the value is read from the row, and an unknown
+  mode is `null`.
+
+An older binary without the field produces an empty proposal, never a wrong one.
+
+**Plan decisions.** `review-plan` answers only the decision it just recorded
+(`main.rs:823`), and `runs` keeps only `review_note`. A history of decisions with their
+identities needs a read-only CLI field under ADR 0034, added in the #139 build. Until
+then, plan lessons use `plan_state` and the decisions the cell itself issued.
+
+### From entry to routing
+
+1. **Derive π.** For each entry the kernel computes
+   π = (successes + 1) / (attempts + 2). The result is never 0 or 1, and the file never
+   states π.
+2. **Look up the arm.** The priors oracle answers `OracleQuery.arm`, which has the form
+   `harness\nmodel_ref\nTierN` (`router.rs:104`). It looks the arm up among the loaded
+   entries. With no entry, it returns an error, which the router treats as the local
+   mean (`router.rs:112`).
+3. **Fuse.** `fused_historical_mean` computes (s + 4π) / (n + 4) and clips the result to
+   μ_local ± 0.25 (`router.rs:76-78`).
+   - On a fresh store (n = 0, μ_local = 0.5), the fused mean is π, limited to
+     0.25–0.75.
+   - With local history, π's weight falls to 4 / (n + 4).
+4. **Score.** The fused mean is one term of the sum. The tier-efficiency, load-balance,
+   coupling and bandit signals are unchanged.
+
+The composition passes `spend: None` while the only oracle is the priors oracle.
+
+### Loader diagnostics
+
+Every case below produces a diagnostic, never a failure, and leaves the exit code
+unchanged.
+
+File-level cases mean no priors are applied:
+
+| Code | Cause |
+|---|---|
+| `not_promoted` | There is no `accept` record. |
+| `revoked` | The latest record is `revoke`. |
+| `digest_mismatch` | `accepted.json` does not hash to the latest `accept` record. |
+| `too_large` | The file is over 1 MiB. |
+| `not_json` | The file does not parse as JSON. |
+| `wrong_schema` | `schema` is not `meshloop/advisory-priors`. |
+| `wrong_version` | `version` is not 1. |
+
+Entry-level cases ignore that entry only:
+
+| Code | Cause |
+|---|---|
+| `below_evidence_floor` | `attempts` is below 5. |
+| `count_mismatch` | The length of `provenance` differs from `attempts`. |
+| `successes_exceed_attempts` | `successes` is greater than `attempts`. |
+| `not_subprocess` | `dispatch_mode` is not `subprocess`. |
+| `model_unverified` | The model is `unverified`, empty or malformed. |
+| `model_not_passed` | The harness's `invoke_args_template` lacks `{model_ref}` (`config.rs:156`, `harness.rs:100`). |
+| `hint_not_raising` | `to_tier` is not higher than `from_tier`. |
+
+Report-only cases:
+
+| Code | Cause |
+|---|---|
+| `not_a_candidate` | No configured candidate matches the entry. The entry is inert, since `select` never looks it up. |
+| `unknown_field` | The file has a field this version does not define. The field is ignored. |
+| `provenance_unresolved` | A reference is not in the local ledger. `check` only. |
+
+The last case does not block, because #140 promotes into fresh stores.
+
+Diagnostics appear in two places:
+
+- `priors show|check` always lists them.
+- `doctor` adds a warning only when a file or record exists but is not in effect.
+
+With no file and no record, every output is unchanged.
+
+### Promotion ledger
+
+The promotion ledger is a new append-only table, added by a forward migration. Each record
+has these fields:
+
+- sequence number;
+- action (`accept` or `revoke`);
+- SHA-256 of the accepted bytes;
+- identity;
+- time;
+- source path.
+
+Rows are never updated or deleted.
+
+`priors accept` refuses a file that fails at file level, and prints the entry-level
+diagnostics before it records anything. It writes `.meshloop/priors/accepted.json`
+atomically. The cell writes its proposals anywhere except `.meshloop/priors/`.
+
+Before each worker routing decision, the kernel reads the latest record and computes the
+SHA-256 of a file of at most 1 MiB. While priors are in effect, each routed attempt
+records the digest in use as an evidence row of kind `advisory_prior`.
+
+### Plan review
+
+When a promoted file is in effect, `review-plan` (show) and the `plan` answer add an
+advisory section, and the JSON adds `data.advisory`. Neither appears without a promoted
+file. The section lists two things:
+
+- **Tier hints.** For each node, the hints whose `path_prefix` covers one of its
+  `allowed_paths` and whose `to_tier` is above the node's current tier. A hint never
+  lowers a tier, never edits `plan_json` and never changes `plan_sha256`.
+- **Notes.** Each note as one line of data, with control characters stripped.
+
+To apply a hint, a human uses `--adjust` and then accepts the plan.
+
+### Cell side
+
+- **Commands.** `/meshloop priors accept --file F --as <name>` and
+  `/meshloop priors revoke --as <name>` are operator-typed only. They are off until
+  `meshloop.write_commands` is set. `/meshloop priors show|check` are read-only.
+- **Veto.** The `:tool` veto (`gates.lisp:45-48`) also refuses `priors accept` and
+  `priors revoke`.
+- **Lessons.** Lessons are stored as nodecode memories or skills and are never loaded
+  as code.
+- **Note text.** Notes come from fixed templates over counts, ids and paths. They never
+  quote worker output, evidence summaries or node descriptions.
+
+### Digest
+
+After each run, the cell lists:
+
+- the proposal path and its SHA-256;
+- one row per prior key with attempts, successes, failures and whether it clears the
+  floor;
+- exclusion counts by reason;
+- each tier hint and note with its evidence count;
+- Accept, Decline and Adjust tallies;
+- the promoted digest in effect, if any.
+
+The digest holds pointers and counts only.
+
+### Required regression tests
+
+All tests run under `cargo test --workspace --locked --offline`, except the cell fixture
+tests, which run in the cell's own suite. Each test proves one of the following:
+
+1. A file never adds or removes a candidate. For any file content, `select` returns the
+   same candidate set, possibly in another order.
+2. For any π and any n, |fused − μ_local| ≤ 0.25.
+3. Each exclusion holds for both the fold and the loader: missing or `null` mode,
+   `native` mode, model `unverified`, a cancelled task, and no result.
+4. An entry below the floor has no effect and is reported.
+5. A tier hint never lowers a tier and is never read when routing.
+6. Routing and planning are unchanged in each of these cases:
+   - no promoted file;
+   - an unpromoted file present;
+   - a revoked file;
+   - a file whose digest does not match.
+
+   The existing baseline tests pass unmodified.
+7. Wrong version, malformed JSON and unknown fields produce diagnostics and exit 0.
+8. A zero-budget spend ledger does not turn the priors off.
+9. The digest after a fixture run lists each lesson with its evidence counts.
+
+### Known limit for #140
+
+A prior encodes success only. lp-4 is at the success ceiling (24/24), so the arms that
+were dispatched get similar priors. An arm with no entry stays at 0.5 on a fresh store,
+while an incumbent with a high prior rises to as much as 0.75. A warm-up batch that only
+repeats the baseline's first dispatches therefore reinforces the incumbent and cannot
+change it.
+
+Time and token effects are not encoded in a prior. They can appear only if a
+first-dispatch change happens for success reasons. Whether the warm-up should explore
+non-incumbent arms is #140's decision.
+
 ## Platform
 
 The cell and nodecode workers run on Linux and on WSL2 with all state, worktrees and the

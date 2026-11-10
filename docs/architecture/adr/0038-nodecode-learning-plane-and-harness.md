@@ -4,7 +4,7 @@
 - Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
-- Amended: 2026-11-10 (#134)
+- Amended: 2026-11-10 (#134); 2026-11-10 (#139, advisory input contract: Proposed — pending review)
 - Author/executor: Claude (builder sub-agent)
 - Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039
 - Decision owner: Samuel
@@ -163,6 +163,136 @@ expands each into its own (harness, model, tier) candidate and substitutes it in
 ran and diffs it read, never a session's or sub-agent's report, with native and
 subprocess evidence under separate keys; specifics are #149's. Native dispatch for
 nodecode is refused until #152 proves it and the containment rule of this record is met.
+
+### Amendment 2026-11-10 (#139): advisory input contract
+
+**Proposed — pending review.** It freezes the "Advisory input" outline above before any
+kernel code is written. The record's Accepted status is unchanged. Names may be refined
+in the build; the rules may not. Mechanism, counting rules, diagnostics and the test
+list are in [learning-plane.md](../learning-plane.md#advisory-input-139). The file format
+is [`schemas/advisory-priors.v1.schema.json`](../../../schemas/advisory-priors.v1.schema.json).
+Code cited at base `ac87e7a`.
+
+1. **Evidence scope: subprocess and verified only.** This deviates from the owner's
+   ordering on #132. #149 (the native evidence rule, goal #145) is not built before
+   #139. The fold and the file count only attempts that Meshloop dispatched as
+   subprocess and verified itself. An attempt is excluded if any of these holds:
+   - its dispatch mode is not positively `subprocess` (a missing or null field counts
+     as not subprocess);
+   - its model is `unverified` or empty;
+   - its task is `Cancelled`;
+   - it has no recorded result.
+
+   ADR 0039 decision 7 forbids native outcomes in priors. Without #149, nothing else
+   enforces that rule, so #139 enforces it here as a guard. That is why the ordering
+   can be relaxed. Every exclusion needs a regression test. Coordinator decision under
+   delegated owner authority, 2026-11-10.
+2. **Effect only through the oracle port, bounded once.** A promoted file feeds one
+   engine `PredictiveSuccessOracle` (`ports.rs:582`).
+   - The kernel computes π = (successes + 1) / (attempts + 2) from the entry's counts.
+     The file never states π.
+   - π enters only as the prior in `fused_historical_mean` (`router.rs:76-78`). The
+     clip to the local mean ± 0.25 is the only bound, and it is applied once.
+   - The priors oracle is the only oracle in the composition. Combining it with a live
+     System 1 oracle needs an amendment, and must produce one π, never two clips.
+   - It is consulted with `spend: None`. The store's ledger has a budget of 0
+     (`store.rs:39,68`), so a charge always fails (`router.rs:99-102`) and would turn
+     the priors off without a sign.
+   - It applies only to run-loop worker routing (`run_loop.rs:1554`). Planner-dispatch
+     routing (`run_loop.rs:661`) keeps `oracle: None`. ADR 0032 invariant 5 is
+     unchanged.
+3. **Candidate set fixed.** `select` filters before scoring (`router.rs:214-226`), so an
+   entry can only reorder candidates that survived the filters. An entry for anything
+   else is never looked up, and no entry removes a candidate. An entry is ignored when
+   its harness's `invoke_args_template` does not substitute `{model_ref}`, because the
+   model is then only a label (invariant 9).
+4. **Key.** The key is (harness, `model_ref`, tier, dispatch mode = `subprocess`), which
+   matches `FeedbackKey` (`ports.rs:301`) plus the mode. Language and task kind are
+   deferred. Neither the attempt row (`schema.rs:42-55`) nor `TaskNode`
+   (`task_graph.rs:50-73`) records them. Adding them needs a new schema version.
+5. **Evidence floor: n ≥ 5 counted attempts per key.** The floor is a compiled-in kernel
+   constant, never read from the file, and it applies to tier hints too.
+   - Why 5: an entry must stand for more attempts than the 4 pseudo-observations
+     `fused_historical_mean` gives π (`router.rs:77`). A 3-repetition lp-4 batch gives
+     its first-dispatch arm 6 (Tier 1 and 3) or 12 (Tier 2) attempts (#144), so 5 is
+     reachable.
+   - An entry below the floor has no effect. `priors check|show` and the run digest
+     report it as `below_evidence_floor` with its count.
+6. **Tier hints.** A tier hint is never read when routing.
+   - It is raise-only: `to_tier` > `from_tier`, checked by the schema and the loader. It
+     is keyed by `from_tier` and a path prefix matched against a node's
+     `allowed_paths`.
+   - It appears only as a suggestion at plan review. The plan JSON and `plan_sha256`
+     are not touched, and the risk ratchet (`planner.rs:605-662`) is unchanged.
+   - It takes effect only when a human adjusts the plan and accepts it (ADR 0009).
+7. **Planning lessons and repair constraints.** These are advisory text: at most 64
+   notes of at most 500 characters each. They appear at plan review only, marked
+   advisory. They are never parsed into kernel policy, prompts, `allowed_paths` or
+   checks.
+8. **File.** The file is versioned JSON, at most 1 MiB. Each entry carries its evidence
+   count and provenance: attempt or plan-decision references, never worker text.
+   Problems are ignored with a diagnostic, never a failure or a changed exit code:
+   - a file-level problem (not JSON, wrong `schema` or `version`, too large) means no
+     priors;
+   - a problem in one entry, such as a count mismatch, a floor miss or a non-raising
+     hint, ignores that entry only;
+   - an unknown field is ignored.
+9. **Promotion is a kernel verb.** `meshloop priors accept --file F --as <identity>`:
+   - checks F;
+   - copies its bytes to `.meshloop/priors/accepted.json`;
+   - appends an `accept` record (SHA-256, identity, time, source path) to a new
+     append-only ledger table. It is not an `events` row, because `events` rows are
+     graph and task transitions (`schema.rs:19-31`).
+
+   `meshloop priors revoke --as <identity>` appends a `revoke` record. `--as` is
+   required and never defaulted. The kernel uses priors only when the latest record is
+   `accept` and its digest equals the SHA-256 of `accepted.json`. It checks this before
+   every worker routing decision, so a revoke or a changed file takes effect at once.
+   `meshloop priors show|check [--file F]` are read-only (ADR 0034).
+   - The cell never invokes `priors accept` or `priors revoke`. They are operator-typed
+     `/meshloop` slash commands only.
+   - The `:tool` veto (`gates.lisp:45-48`) is extended to cover them.
+   - No MCP tool promotes or revokes.
+10. **No promoted file, no change.** If there is no `accept` record, the latest record
+    is a revoke, or the digest does not match, the composition passes `oracle: None`
+    as today. Routing order and the plan, review-plan and run outputs are then
+    byte-for-byte unchanged. The existing router, planner and CLI tests run unmodified,
+    plus one test with an unpromoted file present. While priors are in effect, each
+    routed attempt records the promotion digest it was routed under, so an effect can
+    be traced (#140).
+11. **Lesson provenance.** The fold is deterministic cell code. It reads:
+    - the attempt's harness, `model_ref`, dispatch mode and outcome;
+    - each evidence row's `kind` and `exit_code`;
+    - node tier and `allowed_paths` from the plan a human accepted;
+    - task state;
+    - plan decisions (Accept, Decline, Adjust) with the identity Meshloop recorded.
+
+    It excludes model-review verdicts (ADR 0007), evidence summaries, node descriptions,
+    worker output and Board posts. A missing field gets a read-only CLI field (ADR 0034),
+    not a store read.
+12. **Placement.** Each crate keeps its role:
+    - `meshloop-domain` holds the value types, validation, π derivation and the floor.
+    - `meshloop-adapters` holds the file reader, the digest and the ledger table.
+    - `meshloop-engine` holds the port and the priors oracle.
+    - The CLI composes them and adds the verbs.
+
+    Offline CI stays socket-free and needs no nodecode.
+13. **Digest.** After each run, the cell lists:
+    - the proposal path and its SHA-256;
+    - each prior key with its attempts, successes, failures and floor status;
+    - exclusion counts by reason;
+    - each tier hint and note with its evidence count;
+    - plan-decision tallies;
+    - the promoted digest in effect, if any.
+
+    It holds pointers and counts only.
+14. **#140.** The "with" arm promotes one file folded from a separate warm-up batch of
+    the lp-4 task set. The file is accepted into each measured run's fresh store before
+    the run starts. Measured runs are never folded into the file they run under. The
+    rest of the design is #140's.
+
+Build order within #139: priors, then tier hints, then notes. Each step needs this
+amendment accepted first.
 
 ## Consequences
 
