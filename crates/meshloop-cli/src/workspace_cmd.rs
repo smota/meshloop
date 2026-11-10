@@ -318,6 +318,7 @@ fn public_store_error(error: &StoreError) -> &'static str {
         StoreError::PlanRevisionMismatch => "plan-revision-mismatch",
         StoreError::LifecycleBusy => "lifecycle-busy",
         StoreError::FenceBusy => "fence-busy",
+        StoreError::TransitionRefused { .. } => "transition-refused",
         StoreError::Io(_) => "io",
         StoreError::Corrupt(_) => "corrupt",
     }
