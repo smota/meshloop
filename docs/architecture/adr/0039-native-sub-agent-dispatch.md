@@ -1,12 +1,13 @@
 # 0039 Native sub-agent dispatch from the origin session
 
-- Status: Proposed
+- Status: Accepted
+- Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
 - Author/executor: Claude (Opus 5.5), builder worker for #146
-- Reviewer: Claude (Opus) joint review round 1, fresh context, ACCEPT WITH CHANGES; all findings adopted by the coordinator and applied
+- Reviewer: fresh-context Claude architecture review (opus), jointly with ADR 0038: round 1 ACCEPT WITH CHANGES (all adopted and applied), round 2 ACCEPT WITH CHANGES (N1 and minors applied, verified by the coordinator)
 - Decision owner: Samuel
-- Approval evidence: none. The five owner decisions on goal #145 (2026-11-10) are inputs. ADR 0039 decision 6 is an architect decision under delegated owner authority (2026-11-10)
+- Approval evidence: accepted 2026-11-10 by the coordinator (Claude) under authority delegated by the repository owner, who waived human approvals ([#132 comment](https://github.com/smota/meshloop/issues/132#issuecomment-6770755409)); no human read this record before acceptance. The five owner decisions on goal #145 (2026-11-10) are inputs. ADR 0039 decision 6 is an architect decision under delegated owner authority (2026-11-10)
 - Supersedes: none. Narrows the scope of [ADR 0003](0003-harness-contracts.md) (dispatch through `HarnessCapabilities`), [0005](0005-execution-recovery.md) (process reconciliation), [0025](0025-process-tree-ownership.md) and [0035](0035-atomic-process-job-assignment.md) to subprocess attempts. [ADR 0007](0007-verification.md) applies to every mode unchanged
 - Superseded by: none
 - Related: [ADR 0038](0038-nodecode-learning-plane-and-harness.md) (#133), "Nodecode as learning plane and harness; kernel authority unchanged"; reviewed together with this record
@@ -49,7 +50,7 @@ mode, ADR 0003's rule that no per-harness flags ship, and socket-free offline CI
 
 ## Decision or proposal
 
-Proposed: add a **native** dispatch mode beside **subprocess**. The mechanism is in
+Add a **native** dispatch mode beside **subprocess**. The mechanism is in
 runtime-design.md §3 "Native dispatch (ADR 0039)" and execution-lifecycle.md
 "Amendment 2026-11-10".
 

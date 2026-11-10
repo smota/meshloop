@@ -49,7 +49,7 @@ Routing behavior for the local record:
 
 ## Native dispatch support
 
-Proposed with ADR 0039; this section has no effect until that ADR is accepted.
+Accepted with ADR 0039 (2026-11-10); the table is empty until #152 records live evidence.
 
 This is a mirror of the compiled-in proven set in the composition root (for example
 `crates/meshloop-cli/src/native_support.rs`). Native dispatch is honoured only for a

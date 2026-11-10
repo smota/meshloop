@@ -55,9 +55,9 @@ would make evidence ambiguous about which run it validates.
 Timeout and cancellation terminate the owned process tree, preserve redacted evidence, and
 land in `failed`/`cancelled` — never `accepted` or `integrated`, even partially.
 
-## Amendment 2026-11-10: native attempts (ADR 0039, proposed)
+## Amendment 2026-11-10: native attempts (ADR 0039, accepted; implementation pending)
 
-Not in effect until ADR 0039 is accepted. The table and rules above are unchanged for
+Accepted with ADR 0039; not yet implemented (#147 to #150). The table and rules above are unchanged for
 subprocess attempts. This amendment adds one state and its rows for native worker
 attempts, which run as sub-agents started by the origin session. Mechanism is in
 runtime-design.md §3 "Native dispatch (ADR 0039)".

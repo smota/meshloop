@@ -9,7 +9,7 @@
 - Supersedes: none
 - Superseded by: [ADR 0035](0035-atomic-process-job-assignment.md), accepted 2026-10-31, for the Windows post-launch assignment mechanism only; all other decisions remain unchanged
 
-> **Scope narrowed by ADR 0039 (proposed), 2026-11-10.** If [ADR 0039](0039-native-sub-agent-dispatch.md) is accepted, host process-tree ownership applies to subprocess attempts. Native worker attempts have no process Meshloop owns, so no ownership, termination or cleanup-on-crash guarantee applies to them; ADR 0039 lists that loss. This note does not change this record's decision for subprocess attempts.
+> **Scope narrowed by [ADR 0039](0039-native-sub-agent-dispatch.md) (accepted 2026-11-10; implementation pending).** Once native dispatch ships, host process-tree ownership applies to subprocess attempts. Native worker attempts have no process Meshloop owns, so no ownership, termination or cleanup-on-crash guarantee applies to them; ADR 0039 lists that loss. This note does not change this record's decision for subprocess attempts.
 
 ## Context and constraints
 CLI harnesses (Codex, Claude Code, Pi, Agy, Grok) and deterministic checks (`cargo check`, `npm test`) routinely spawn child and grandchild processes (`rustc.exe`, `cargo.exe`, `node.exe`, `esbuild.exe`). When a run times out, is aborted by user cancellation, or is terminated due to an invariant violation, calling standard Rust `Child::kill()` terminates only the parent process.

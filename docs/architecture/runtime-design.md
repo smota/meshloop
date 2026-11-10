@@ -263,14 +263,14 @@ CI. Prompt-construction tests assert no context outside a node's declared depend
 leaks into its prompt. A fixture harness returning a clean exit code with a broken worktree
 (or the reverse) must prove the worktree diff, not exit code, gates `verifying`.
 
-> **Amendment 2026-11-10 (ADR 0039, proposed; not in effect until accepted).** Native
+> **Amendment 2026-11-10 (ADR 0039, accepted 2026-11-10; implementation pending #147–#153).** Native
 > attempts do not pass through `HarnessCapabilities`. Meshloop does not call `invoke`,
 > `try_collect` or `cancel` for them, and the port is unchanged. The worktree-diff rule
 > above applies to native attempts without exception. See §3 "Native dispatch (ADR 0039)".
 
 ## 3. Execution, transport, isolation, and recovery (ADR 0005)
 
-> **Amendment 2026-11-10 (ADR 0039, proposed; not in effect until accepted).** This
+> **Amendment 2026-11-10 (ADR 0039, accepted 2026-11-10; implementation pending #147–#153).** This
 > section's subprocess-only rule stays in force for every attempt except the native worker
 > attempts described in "Native dispatch (ADR 0039)" at the end of this section. The
 > subprocess-only rule is the v1 "CLI-subprocess only" statement, which became direct CLI
@@ -316,8 +316,8 @@ attempt — never a duplicate integration.
 
 ### Native dispatch (ADR 0039)
 
-Proposed, dated 2026-11-10. This is the mechanism for ADR 0039. Nothing here applies until
-that record is accepted, and #147 to #150 implement it.
+Accepted with ADR 0039 on 2026-11-10. This is the mechanism for that record; it is not yet
+implemented, and #147 to #150 implement it.
 
 **Eligibility.** Routing (§5) runs unchanged. A run-loop worker node is native-eligible
 only when all of the following hold:
