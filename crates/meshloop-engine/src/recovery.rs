@@ -31,25 +31,27 @@ pub fn replay(records: &[TransitionRecord]) -> HashMap<AttemptKey, TaskState> {
 ///
 /// One tolerance, for ledgers written before compare-and-append (issue #167): a driver
 /// working from a stale view could append the cancelled attempt's own exit, check,
-/// verify-gate or retry events after `Cancelled`. Such a row is skipped and the task
-/// stays `Cancelled` only when all of these hold (see [`stale_after_cancel`]):
-/// the task is `Cancelled`, the row names the attempt the `Cancel` row named, the row
-/// is internally a legal transition from a state other than `Cancelled`, and its event
-/// is one a driver records for a running attempt. Any other row after `Cancelled` is
-/// still `Corrupt`. No legal event leaves `Cancelled`, so a ledger that folded before
-/// folds to exactly the same states now.
+/// verify-gate or retry events after `Cancelled`. Such rows are skipped and the task
+/// stays `Cancelled` only as one unbroken chain (see [`StaleChain`]): each row names the
+/// attempt the `Cancel` row named, is one a driver records for a running attempt, is
+/// itself a legal transition, and starts from the state the previous row of the chain
+/// left, the first one from the state the ledger held when `Cancel` was folded. Any
+/// other row after `Cancelled`, including a second contradictory result, is still
+/// `Corrupt`. No legal event leaves `Cancelled`, so a ledger that folded before folds
+/// to exactly the same states now.
 pub fn replay_tasks(
     records: &[TransitionRecord],
 ) -> Result<HashMap<TaskId, TaskState>, StoreError> {
     let mut projection: HashMap<TaskId, TaskState> = HashMap::new();
-    let mut cancelled_attempt: HashMap<TaskId, AttemptId> = HashMap::new();
+    let mut stale: HashMap<TaskId, StaleChain> = HashMap::new();
     for record in records {
         let from = projection
             .get(&record.task_id)
             .copied()
             .unwrap_or(record.from);
         if from == TaskState::Cancelled
-            && stale_after_cancel(record, cancelled_attempt.get(&record.task_id).copied())
+            && let Some(chain) = stale.get_mut(&record.task_id)
+            && chain.continues_with(record)
         {
             continue;
         }
@@ -59,7 +61,13 @@ pub fn replay_tasks(
                 if record.event == Event::Cancel
                     && let Some(attempt) = record.attempt_id
                 {
-                    cancelled_attempt.insert(record.task_id, attempt);
+                    stale.insert(
+                        record.task_id,
+                        StaleChain {
+                            attempt,
+                            state: from,
+                        },
+                    );
                 }
             }
             Ok(other) => {
@@ -79,24 +87,38 @@ pub fn replay_tasks(
     Ok(projection)
 }
 
-/// The issue #167 signature: a row the driver wrote for the attempt `cancel` had
-/// already cancelled, from the state it last saw. See [`replay_tasks`].
-fn stale_after_cancel(record: &TransitionRecord, cancelled: Option<AttemptId>) -> bool {
-    let driver_event = matches!(
-        record.event,
-        Event::HarnessExited
-            | Event::HarnessCrashedOrTimeout
-            | Event::DeterministicChecksPassed
-            | Event::DeterministicChecksFailed
-            | Event::VerifyGatePassed
-            | Event::LiveWorkerSettled
-            | Event::RetryAuthorized
-    );
-    driver_event
-        && cancelled.is_some()
-        && record.attempt_id == cancelled
-        && record.from != TaskState::Cancelled
-        && transition(record.from, record.event) == Ok(record.to)
+/// The issue #167 signature after a `Cancel`: the driver's own view of the cancelled
+/// attempt, carried on as if the cancel had not happened. See [`replay_tasks`].
+struct StaleChain {
+    /// The attempt the `Cancel` row named.
+    attempt: AttemptId,
+    /// Where the driver's view stands: the state the ledger held when `Cancel` was
+    /// folded, then the `to` of each skipped row.
+    state: TaskState,
+}
+
+impl StaleChain {
+    /// Skips `record` (and advances the chain) when it is the chain's next row.
+    fn continues_with(&mut self, record: &TransitionRecord) -> bool {
+        let driver_event = matches!(
+            record.event,
+            Event::HarnessExited
+                | Event::HarnessCrashedOrTimeout
+                | Event::DeterministicChecksPassed
+                | Event::DeterministicChecksFailed
+                | Event::VerifyGatePassed
+                | Event::LiveWorkerSettled
+                | Event::RetryAuthorized
+        );
+        let next = driver_event
+            && record.attempt_id == Some(self.attempt)
+            && record.from == self.state
+            && transition(record.from, record.event) == Ok(record.to);
+        if next {
+            self.state = record.to;
+        }
+        next
+    }
 }
 
 /// View only: a persisted `Running` attempt with no matching live process is annotated
@@ -471,6 +493,73 @@ mod tests {
                 "must stay corrupt: {tail:?}"
             );
         }
+    }
+
+    #[test]
+    fn issue_167_rows_are_tolerated_only_as_one_chain() {
+        // A second, contradictory result for the same attempt does not continue the
+        // chain the first one left (Failed), so it stays corrupt.
+        let mut records = cancelled_then_stale_driver_rows()[..5].to_vec();
+        records.push(record(
+            1,
+            Some(1),
+            TaskState::Verifying,
+            TaskState::AwaitingReview,
+            E::DeterministicChecksPassed,
+        ));
+        assert!(matches!(
+            replay_tasks(&records),
+            Err(StoreError::Corrupt(_))
+        ));
+        // A chain that skips a state is not the driver's view either.
+        let mut records = cancelled_then_stale_driver_rows()[..4].to_vec();
+        records.push(record(
+            1,
+            Some(1),
+            TaskState::Failed,
+            TaskState::Ready,
+            E::RetryAuthorized,
+        ));
+        assert!(replay_tasks(&records).is_err());
+    }
+
+    #[test]
+    fn issue_167_chain_starts_from_the_ledger_state_not_a_stale_cancel_from() {
+        // `cancel` read Running; the driver recorded the exit before the Cancel landed.
+        // The pre-fix fold accepted that Cancel (it reads the ledger state, Verifying),
+        // and the driver went on from Verifying.
+        let records = vec![
+            record(
+                1,
+                Some(1),
+                TaskState::Ready,
+                TaskState::Running,
+                E::AttemptStarted,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Verifying,
+                E::HarnessExited,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Running,
+                TaskState::Cancelled,
+                E::Cancel,
+            ),
+            record(
+                1,
+                Some(1),
+                TaskState::Verifying,
+                TaskState::Failed,
+                E::DeterministicChecksFailed,
+            ),
+        ];
+        let tasks = replay_tasks(&records).expect("readable");
+        assert_eq!(tasks[&TaskId(1)], TaskState::Cancelled);
     }
 
     #[test]
