@@ -149,7 +149,7 @@ pub fn bench_learning(root: &Path, args: &[String]) -> ExitCode {
     };
     let lp = root.join("benches").join("learning-plane");
     if let Some(path) = &opts.aggregate {
-        return aggregate_file(path, opts.results.as_deref());
+        return aggregate_file(root, path, opts.results.as_deref());
     }
     let (set, tasks) = match load_tasks(&lp, opts.tasks.as_deref()) {
         Ok(v) => v,
@@ -280,6 +280,7 @@ struct TokenReport {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct AttemptRecord {
     index: usize,
     attempt_id: u64,
@@ -289,7 +290,14 @@ struct AttemptRecord {
     outcome: Option<String>,
     worker_exit: Option<i64>,
     diff_exit: Option<i64>,
+    /// Exit of the first verify run (the worker's own result, before any repair round).
     verify_exit: Option<i64>,
+    /// Exit of the last verify run recorded for the attempt (after repair rounds).
+    verify_exit_last: Option<i64>,
+    /// Rounds of Meshloop's in-attempt compiler/test repair loop, when it ran.
+    repair_rounds: Option<u64>,
+    /// Why the repair loop stopped, as Meshloop recorded it (for example `Oscillation`).
+    repair_stop: Option<String>,
     checks_passed: bool,
     tokens: TokenReport,
     quota_signal: bool,
@@ -305,6 +313,7 @@ struct FeedbackRow {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct RunRecord {
     task_id: String,
     language: String,
@@ -1093,7 +1102,18 @@ fn parse_attempts(inspect: &Value) -> Vec<AttemptRecord> {
                     Some("harness-output") => {
                         transcript = e["summary_redacted"].as_str().unwrap_or("").to_string();
                     }
-                    Some(_) => rec.verify_exit = exit,
+                    Some("repair-session") => {
+                        let text = e["summary_redacted"].as_str().unwrap_or("");
+                        let (rounds, stop) = parse_repair_session(text);
+                        rec.repair_rounds = rounds;
+                        rec.repair_stop = stop;
+                    }
+                    Some(_) => {
+                        if rec.verify_exit.is_none() {
+                            rec.verify_exit = exit;
+                        }
+                        rec.verify_exit_last = exit;
+                    }
                     None => {}
                 }
             }
@@ -1144,6 +1164,24 @@ fn parse_tokens(harness: &str, transcript: &str) -> TokenReport {
         },
         _ => not_reported("not reported"),
     }
+}
+
+/// `(rounds, stop reason)` from a `repair-session` evidence summary such as
+/// `stop=Stop:Oscillation { cycle_at: 0 } passed=false ...\nrepair-session rounds=2`.
+fn parse_repair_session(text: &str) -> (Option<u64>, Option<String>) {
+    let rounds = text.find("rounds=").and_then(|i| {
+        text[i + "rounds=".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+    });
+    let stop = text.strip_prefix("stop=").map(|rest| {
+        let end = rest.find(" passed=").unwrap_or(rest.len());
+        rest[..end].trim().to_string()
+    });
+    (rounds, stop)
 }
 
 /// The count after the last `tokens used` line, e.g. `tokens used\n11,278`.
@@ -1315,6 +1353,19 @@ fn summarize(runs: &[RunRecord]) -> Value {
     overall["decline_count"] = json!(runs.iter().map(|r| r.decline_count).sum::<u32>());
     overall["adjust_decline_note"] =
         json!("0 by protocol (fixed automated acceptance), not a human measurement");
+    let repaired: Vec<&AttemptRecord> = runs
+        .iter()
+        .flat_map(|r| &r.attempts)
+        .filter(|a| a.repair_rounds.is_some())
+        .collect();
+    overall["attempts_with_repair_loop"] = json!(repaired.len());
+    overall["repair_rounds_total"] =
+        json!(repaired.iter().filter_map(|a| a.repair_rounds).sum::<u64>());
+    overall["failed_runs_without_fallback"] = json!(
+        runs.iter()
+            .filter(|r| !r.success && r.attempts.len() == 1)
+            .count()
+    );
     overall["timed_out_runs"] = json!(runs.iter().filter(|r| r.run_timed_out).count());
     overall["quota_hits"] = json!(runs.iter().filter(|r| r.quota_hit.is_some()).count());
 
@@ -1421,7 +1472,7 @@ fn summarize(runs: &[RunRecord]) -> Value {
     })
 }
 
-fn aggregate_file(path: &Path, out: Option<&Path>) -> ExitCode {
+fn aggregate_file(root: &Path, path: &Path, out: Option<&Path>) -> ExitCode {
     let mut results: Results = match read_json(path) {
         Ok(r) => r,
         Err(e) => {
@@ -1429,9 +1480,31 @@ fn aggregate_file(path: &Path, out: Option<&Path>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Re-parse attempts from the evidence kept next to the results file, so parser fixes
+    // apply to an existing run without dispatching anything again.
+    let runs_dir = path.parent().map(|p| p.join("runs"));
+    let mut reparsed = 0;
+    for r in &mut results.runs {
+        let Some(dir) = &runs_dir else { break };
+        let file = dir
+            .join(format!("r{}-{}", r.rep, r.task_id))
+            .join("inspect.json");
+        if let Ok(text) = fs::read_to_string(&file)
+            && let Ok(v) = serde_json::from_str::<Value>(&text)
+        {
+            r.attempts = parse_attempts(&v);
+            r.first_attempt_success =
+                r.success && r.attempts.first().is_some_and(|a| a.checks_passed);
+            reparsed += 1;
+        }
+    }
+    if reparsed > 0 {
+        println!("bench-learning: re-parsed attempts of {reparsed} run(s) from kept inspect.json");
+    }
     results.summary = summarize(&results.runs);
     if let Some(out) = out {
-        write_results(out, &results, &[]);
+        let dir = absolute(path.parent().unwrap_or(Path::new(".")));
+        write_results(out, &results, &redactions(root, &dir));
     }
     print_summary(&results.summary);
     ExitCode::SUCCESS
@@ -1557,6 +1630,19 @@ mod tests {
     }
 
     #[test]
+    fn repair_session_parses() {
+        let t = "stop=Stop:Oscillation { cycle_at: 0 } passed=false elapsed_ms=10453.7\nrepair-session rounds=2\nround=0";
+        assert_eq!(
+            parse_repair_session(t),
+            (
+                Some(2),
+                Some("Stop:Oscillation { cycle_at: 0 }".to_string())
+            )
+        );
+        assert_eq!(parse_repair_session("other"), (None, None));
+    }
+
+    #[test]
     fn pi_tokens_not_reported() {
         assert_eq!(
             parse_tokens("pi", "exit=0\nstdout:\nDone\nstderr:\n").status,
@@ -1604,6 +1690,9 @@ mod tests {
              "evidence": [
                 {"kind": "deterministic", "tool": "git-diff", "exit_code": 0, "summary_redacted": "a"},
                 {"kind": "deterministic", "tool": "python3", "exit_code": 1, "summary_redacted": "b"},
+                {"kind": "deterministic", "tool": "python3", "exit_code": 0, "summary_redacted": "c"},
+                {"kind": "deterministic", "tool": "repair-session", "exit_code": 1,
+                 "summary_redacted": "stop=Stop:Converged passed=true\nrepair-session rounds=1"},
                 {"kind": "deterministic", "tool": "harness-output", "exit_code": 0,
                  "summary_redacted": "exit=1\nstdout:\n\nstderr:\nYou've hit your usage limit\n"}]},
             {"attempt_id": 2, "harness": "claude", "model_ref": "haiku", "duration_s": 5,
@@ -1612,6 +1701,9 @@ mod tests {
         let a = parse_attempts(&v);
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].verify_exit, Some(1));
+        assert_eq!(a[0].verify_exit_last, Some(0));
+        assert_eq!(a[0].repair_rounds, Some(1));
+        assert_eq!(a[0].repair_stop.as_deref(), Some("Stop:Converged"));
         assert_eq!(a[0].worker_exit, Some(1));
         assert!(a[0].quota_signal);
         assert!(!a[0].checks_passed);
