@@ -95,11 +95,14 @@ secret_files=(.netrc .git-credentials .npmrc .pypirc)
 # refuse_secret DIR LABEL: refuse a DIR that is, is inside, or contains a secret store
 # under an operator home.
 refuse_secret() {
-  local dir="$1" label="$2" h s
+  local dir="$1" label="$2" h s t
   for h in "${op_homes[@]}"; do
     for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
-      under "$h/$s" "$dir" && die "refusing a $label inside a secret store: $h/$s"
-      under "$dir" "$h/$s" && die "refusing a $label that contains a secret store: $h/$s"
+      # A store may itself be a symlink (~/.aws -> vault/aws): check where it leads too.
+      for t in "$h/$s" "$(realpath -m -- "$h/$s")"; do
+        under "$t" "$dir" && die "refusing a $label inside a secret store: $h/$s"
+        under "$dir" "$t" && die "refusing a $label that contains a secret store: $h/$s"
+      done
     done
   done
   return 0
@@ -208,12 +211,30 @@ if [[ "$git_metadata" == "ro" ]]; then
   done
   # Git config can hold credentials (an http.*.extraheader, user:token@ in a remote URL,
   # credentials persisted by a CI checkout). A check could copy them into the worktree.
+  # Files pulled in by include.path / includeIf.*.path are scanned too when they are
+  # inside the bound git dirs; a target elsewhere (~/..., another folder) is not mounted.
   if ((${#git_dirs[@]})); then
-    for f in "${git_dirs[1]}/config" "${git_dirs[0]}/config.worktree" "${git_dirs[1]}/config.worktree"; do
+    queue=("${git_dirs[1]}/config" "${git_dirs[0]}/config.worktree" "${git_dirs[1]}/config.worktree")
+    scanned=$'\n'
+    n=0
+    while ((${#queue[@]})) && ((n < 32)); do
+      f="${queue[0]}"
+      queue=("${queue[@]:1}")
       [[ -f "$f" ]] || continue
-      if grep -qiE 'extraheader|://[^/@[:space:]]+@' -- "$f"; then
-        die "git config $f holds credentials (extraheader or user@ in a URL); use --git-metadata none"
+      fr="$(realpath -e -- "$f" 2>/dev/null)" || continue
+      [[ "$scanned" != *$'\n'"$fr"$'\n'* ]] || continue
+      scanned+="$fr"$'\n'
+      n=$((n + 1))
+      if grep -qiE 'extraheader|(https?|ftp)://[^/@[:space:]]+@' -- "$fr"; then
+        die "git config $fr holds credentials (extraheader or user@ in an http(s)/ftp URL); use --git-metadata none"
       fi
+      while IFS= read -r inc; do
+        [[ -n "$inc" && "$inc" != "~"* ]] || continue
+        inc="$(resolve_from "$(dirname -- "$fr")" "$inc")"
+        for d in "${git_dirs[@]}"; do
+          if under "$d" "$inc"; then queue+=("$inc"); break; fi
+        done
+      done < <(sed -nE 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/Ip' -- "$fr")
     done
   fi
 fi
@@ -268,9 +289,14 @@ done
 # its target. A target outside every --ro-path is not mounted, so needs no mask.
 mask_binds=()
 keep_fds=" "
+masked=$'\n'
 for m in "${masks[@]}"; do
   [[ "$m" == /* ]] || die "--mask must be absolute: $m"
   mr="$(realpath -e -- "$m" 2>/dev/null)" || continue
+  # One mount per target: a file named by --ro-path, --env CARGO_HOME and --mask at
+  # once is masked once (bwrap cannot bind over its own data bind).
+  [[ "$masked" != *$'\n'"$mr"$'\n'* ]] || continue
+  masked+="$mr"$'\n'
   inside=0
   for r in "${ro_real[@]}"; do
     [[ "$mr" != "$r" ]] || die "--mask is a whole --ro-path; drop that --ro-path instead: $m"

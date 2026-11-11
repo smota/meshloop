@@ -88,11 +88,14 @@ secret_dirs=(.nodecode .ssh .gnupg .config .aws .azure .kube .docker .local/shar
   .password-store .claude .codex .gemini .grok .m2 .gradle .gem .terraform.d)
 secret_files=(.netrc .git-credentials .npmrc .pypirc)
 refuse_secret() {
-  local dir="$1" label="$2" h s
+  local dir="$1" label="$2" h s t
   for h in "${op_homes[@]}"; do
     for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
-      under "$h/$s" "$dir" && die "refusing a $label inside a secret store: $h/$s"
-      under "$dir" "$h/$s" && die "refusing a $label that contains a secret store: $h/$s"
+      # A store may itself be a symlink (~/.aws -> vault/aws): check where it leads too.
+      for t in "$h/$s" "$(realpath -m -- "$h/$s")"; do
+        under "$t" "$dir" && die "refusing a $label inside a secret store: $h/$s"
+        under "$dir" "$t" && die "refusing a $label that contains a secret store: $h/$s"
+      done
     done
   done
   return 0

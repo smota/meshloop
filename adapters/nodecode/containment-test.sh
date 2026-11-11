@@ -176,8 +176,22 @@ if ((rc == 125)) && grep -qF "secret store" <<<"$msg"; then
 else
   fail "git dirs inside a secret store not refused ($rc): $msg"
 fi
+# A secret store that is a symlink (~/.aws -> vault/aws): a git layout whose common dir
+# contains its target is refused too.
+mkdir -p "$fake_home/vault/aws" "$fake_home/vault/worktrees/w1"
+ln -s vault/aws "$fake_home/.aws"
+printf '%s\n' "$wt/.git" >"$fake_home/vault/worktrees/w1/gitdir"
+printf '../..\n' >"$fake_home/vault/worktrees/w1/commondir"
+printf 'gitdir: %s\n' "$fake_home/vault/worktrees/w1" >"$wt/.git"
+rc=0
+msg="$(cd "$wt" && HOME="$fake_home" "$wrapper" --run-command -- true 2>&1)" || rc=$?
+if ((rc == 125)) && grep -qF "contains a secret store" <<<"$msg"; then
+  pass "refused: a git dir containing the target of a symlinked ~/.aws"
+else
+  fail "a git dir containing a symlinked store's target not refused ($rc): $msg"
+fi
 printf '%s\n' "$before_git" >"$wt/.git"
-rm -rf -- "$fake_home/.ssh/worktrees" "$forged"
+rm -rf -- "$fake_home/.ssh/worktrees" "$forged" "$fake_home/vault" "$fake_home/.aws"
 
 # --- 2. visibility: the operator's homes and secrets are not mounted -----------------
 # Each path must exist on the host, or the check would prove nothing. The fake home's

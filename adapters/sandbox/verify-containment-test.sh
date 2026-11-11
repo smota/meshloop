@@ -341,6 +341,30 @@ else
 fi
 rm -f -- "$worker_script"
 
+# The documented shape: --ro-path ~/.cargo plus --env CARGO_HOME=~/.cargo with a
+# credentials.toml present (masked once, not twice), and an explicit duplicate --mask.
+printf 'cat "$CARGO_HOME/credentials.toml" 2>&1; echo "[end]"\n' >"$worker_script"
+out="$(verify_step --env "CARGO_HOME=$tool_home" -- )"
+if grep -qF "$secret_value" <<<"$out"; then
+  fail "credentials.toml readable in the documented CARGO_HOME shape: $out"
+else
+  check_line "[end]" "documented shape (--ro-path + --env CARGO_HOME, credentials.toml present) runs, file empty"
+  check_line "rc=0" "documented shape exits 0"
+fi
+out="$(verify_step --env "CARGO_HOME=$tool_home" --mask "$tool_home/credentials.toml" --mask "$tool_home/credentials.toml" --)"
+check_line "rc=0" "an explicit duplicate --mask of the same file still runs"
+grep -qF "$secret_value" <<<"$out" && fail "credentials.toml readable with duplicate masks: $out" \
+  || pass "credentials.toml stays empty with duplicate masks"
+rm -f -- "$worker_script"
+
+# A secret store that is itself a symlink (~/.aws -> vault/aws): a --ro-path containing
+# its target is refused.
+mkdir -p "$fake_home/vault/aws"
+printf '%s\n' "$secret_value" >"$fake_home/vault/aws/credentials"
+ln -s vault/aws "$fake_home/.aws"
+refused "--ro-path containing the target of a symlinked ~/.aws" "contains a secret store" "$wt" --worktree "$wt" --ro-path "$fake_home/vault" -- true
+refused "--ro-path at the target of a symlinked ~/.aws" "secret store" "$wt" --worktree "$wt" --ro-path "$fake_home/vault/aws" -- true
+
 # --- 6b. git metadata: credentials in git config, forged `.git` files ----------------
 # Credentials in the repository's git config refuse --git-metadata ro.
 git_q -C "$repo" config http.https://example.invalid/.extraheader "AUTHORIZATION: basic eHg6eXk="
@@ -352,6 +376,18 @@ git_q -C "$repo" config --unset-all http.https://example.invalid/.extraheader
 git_q -C "$repo" remote add origin "https://user:tok@example.invalid/r.git"
 refused "user:token@ in a remote URL" "--git-metadata none" "$wt" --worktree "$wt" -- true
 git_q -C "$repo" remote remove origin
+# An ssh://git@host remote carries a user name, not a credential: not refused.
+git_q -C "$repo" remote add origin "ssh://git@example.invalid/r.git"
+rc=0
+(cd "$wt" && HOME="$fake_home" "$wrapper" --worktree "$wt" -- true) || rc=$?
+((rc == 0)) && pass "an ssh://git@host remote is not refused" || fail "an ssh://git@ remote was refused ($rc)"
+git_q -C "$repo" remote remove origin
+# A credential in a file included (relative include.path) from the git config.
+printf '[http "https://example.invalid/"]\n\textraheader = AUTHORIZATION: basic eHg6eXk=\n' >"$repo/.git/creds.inc"
+git_q -C "$repo" config include.path creds.inc
+refused "an extraheader in a relative include.path file" "--git-metadata none" "$wt" --worktree "$wt" -- true
+git_q -C "$repo" config --unset include.path
+rm -f -- "$repo/.git/creds.inc"
 
 # A forged `.git` whose admin dir is not <common>/worktrees/<name> binds no git dir:
 # its commondir pointing at a fake ~/.ssh exposes nothing.
