@@ -10,6 +10,8 @@
   by architect decision (follow-up #182)
 - Built and measured: 2026-11-11, nodecode `0.1.14+cef1be5a3`, bubblewrap 0.11.1,
   Ubuntu (glibc 2.43) on WSL2, kernel 6.18, ext4
+- [Contained verification](#contained-verification) (#181), at the end of this page,
+  covers `verify_command` for every harness, not only nodecode
 
 This page stands alone for review. It says what the recipe contains, what it does not,
 how an operator sets it up, and what was run to show it.
@@ -47,7 +49,7 @@ operator's files and credentials, the operator's own nodecode organism and its h
 | Property | Mechanism | Shown by |
 |---|---|---|
 | Writes land only in the attempt worktree | The worktree is the only host path bound read-write. The sandbox root is a tmpfs remounted read-only after setup. `/usr`, a short `/etc` list, the nodecode release folder and the worktree's git metadata are bound read-only. | `containment-test.sh` §1: writes to the repository root above the worktree, the git common dir, the operator's home, `~/.nodecode`, `/usr`, `/etc` and `/` fail and nothing appears on the host |
-| The worker cannot redirect meshloop's host-side git | The worktree's `.git` file is bound read-only over the worktree, so the worker cannot point it at a gitdir whose config would run commands when meshloop runs `git diff` on the host after the attempt. The wrapper never runs git on the worktree: it parses `.git` itself and binds the admin and common dirs only when the admin dir's `gitdir` file points back at this worktree | §1: rewriting, removing or moving `.git` fails; `git rev-parse` still works inside |
+| The worker cannot redirect meshloop's host-side git | The worktree's `.git` file is bound read-only over the worktree, so the worker cannot point it at a gitdir whose config would run commands when meshloop runs `git diff` on the host after the attempt. The wrapper never runs git on the worktree: it parses `.git` itself and binds the admin and common dirs only when the admin dir's `gitdir` file points back at this worktree, the admin dir is outside the worktree and is exactly `<common>/worktrees/<name>` (a forged `.git` binds none), and neither dir is, is inside or contains a well-known secret store (#181 review) | §1: rewriting, removing or moving `.git` fails; `git rev-parse` still works inside; a forged `.git` with commondir at a fake `~/.ssh` binds nothing, and a git layout inside it is refused |
 | The operator's home, `~/.nodecode`, `~/.ssh`, `~/.config` and other repositories are not even readable | Not mounted. The sandbox `HOME` is `/home/worker`, a fresh tmpfs. Every folder the wrapper binds (worktree, release folder, git dirs) is refused when it is `/`, an operator home, a folder containing one, or inside a `~/.nodecode`; the release folder is also refused inside or around the worktree | §2 (each hidden path is checked to exist on the host first) and §6 (`/proc/self/mountinfo` names no operator home); §3c release-folder refusals |
 | The worker runs on a nodecode home of its own | `NODECODE_HOME=/home/worker/.nodecode` on that tmpfs, plus `rpc --ephemeral`. The home and store vanish with the sandbox; a cancelled or killed attempt leaves no temp home behind | live run; operator home manifest unchanged (test e below) |
 | Never attaches to the operator's organism | A client finds a gateway through the store's sidecar in its home, which the worker cannot see. `NODECODE_GATEWAY_PORT` is cleared, so the worker binds its own ephemeral port | source `gateway/gateway.lisp` (`open-gateway-listener`); environment check §3 |
@@ -64,16 +66,14 @@ operator's files and credentials, the operator's own nodecode organism and its h
 
 ### Not contained
 
-- **`verify_command` runs worker-written code on the host** ([#181](https://github.com/smota/meshloop/issues/181)).
-  meshloop runs `verify_command` in the attempt worktree, outside the sandbox, with the
-  operator's full authority and environment. A check that executes repository code
-  (`cargo test`, `npm test`, `make`, a build script) runs whatever the worker wrote. For
-  nodecode tasks, use checks that do not execute repository code (`grep`, `git diff
-  --check`, a linter that only parses), or run the check inside the sandbox by putting
-  the wrapper in front of it without a credential:
-  `verify_command = ["/path/to/meshloop-nodecode-sandbox", "--run-command", "--", "make", "check"]`.
-  The sandbox has only `/usr` tools on its `PATH` (no `~/.cargo`, no mise shims) and no
-  credential unless one is passed.
+- **`verify_command` runs worker-written code on the host, unless contained**
+  ([#181](https://github.com/smota/meshloop/issues/181)). By default meshloop runs
+  `verify_command` in the attempt worktree, outside any sandbox, with the operator's full
+  authority and environment, so a check that executes repository code (`cargo test`,
+  `npm test`, `make`, a build script) runs whatever the worker wrote. This applies to
+  every harness. Set `[verify] runner` to run every check under the verification sandbox
+  instead; see [Contained verification](#contained-verification) at the end of this page. `meshloop doctor`
+  warns when a harness runs under containment and verification does not.
 - **Network: not contained** (architect decision for #138; follow-up
   [#182](https://github.com/smota/meshloop/issues/182)). This departs from issue #138's
   "the network it needs" (accepted by the coordinator under delegated owner authority): the worker shares the host network namespace, because the
@@ -203,3 +203,113 @@ measured but is of the same order.
   sandbox is the same except that nodecode mode adds the read-only release folder and
   the driver file.
 - No test tried a deliberate kernel or network escape; see "Not contained".
+
+## Contained verification
+
+Issue [#181](https://github.com/smota/meshloop/issues/181). The worker sandbox ends when
+the attempt ends; `verify_command` runs afterwards, in the same worktree, and by default
+on the host. A verify step that runs repository code therefore runs the worker's code
+with the operator's authority, whatever harness wrote it. Contained verification is an
+operator opt-in (ADR 0003): with no `runner`, meshloop behaves exactly as before.
+
+### How to enable it
+
+`[verify] runner` is an argv prefix that meshloop puts in front of every
+`verify_command`, for the first check and for every repair round's re-check alike (all
+checks go through one runner). It is structured argv, never a shell line. An argument
+that is exactly `{worktree}` becomes the attempt worktree's path as one argument; the
+placeholder is not substituted inside a longer argument, and the verify command itself
+is never substituted. `meshloop` refuses at load a prefix whose executable is not an
+absolute path, an empty argument, `{worktree}` inside a longer argument, any other
+`{...}` placeholder, `--print-bwrap` (the wrapper's dry run, which exits 2), or more
+than 64 arguments.
+
+The shipped runner is `adapters/sandbox/meshloop-verify-sandbox`, a bubblewrap wrapper
+with the hardening of the nodecode wrapper above:
+
+```toml
+[verify]
+verify_command = ["cargo", "test", "--offline", "--locked"]
+runner = [
+  "/path/to/meshloop/adapters/sandbox/meshloop-verify-sandbox",
+  "--worktree", "{worktree}",
+  # Toolchains outside /usr, read-only (Cargo's credentials.toml inside is masked).
+  "--ro-path", "/home/me/.cargo", "--ro-path", "/home/me/.rustup",
+  "--path", "/home/me/.cargo/bin",
+  "--env", "CARGO_HOME=/home/me/.cargo", "--env", "RUSTUP_HOME=/home/me/.rustup",
+  "--",
+]
+```
+
+Then run `adapters/sandbox/verify-containment-test.sh` and `meshloop doctor --json`:
+`data.verify.contained` is `true` and `data.verify.runner` echoes the prefix. A runner
+whose executable is missing is a doctor warning; every check would fail (exit 1, fail
+closed).
+
+Toolchain notes, measured on this host (cargo 1.98.0, rustup, Ubuntu on WSL2):
+
+- `cargo test --offline` of a crate runs with `~/.cargo` and `~/.rustup` read-only and
+  network off; `target/` is written in the worktree. Fetch dependencies on the host
+  first (`cargo fetch`); a check cannot download or extract crates, and rustup cannot
+  install a toolchain a `rust-toolchain.toml` asks for.
+- `/etc/alternatives` is bound read-only, because Debian's `cc` (the Rust linker) is a
+  link through it.
+- Every other toolchain (mise, node, python virtualenvs) needs its folder as a
+  `--ro-path` and its `bin` as `--path`, and must not write outside the worktree, `/tmp`
+  or the sandbox home.
+
+Checks that need the network (a registry, a test against a live service) take
+`--allow-network`, which shares the host's network namespace with the same consequences
+as the worker's network listed under [Not contained](#not-contained). Prefer fetching on the host.
+
+### What is contained
+
+The wrapper's checks are `adapters/sandbox/verify-containment-test.sh`, run in CI by
+`cargo test -p meshloop-cli --test verify_containment` (required where bwrap works,
+`MESHLOOP_REQUIRE_CONTAINMENT=1`). Each probe is a script written into the worktree and
+run as the verify step through the wrapper.
+
+| Property | Mechanism |
+|---|---|
+| Writes land only in the worktree | The worktree is the only read-write host path; the sandbox root is a read-only tmpfs; `/tmp`, `/dev/shm` and the sandbox home (`/home/verifier`) are private, size-capped tmpfs mounts. Writes to the repository root above the worktree, its `.git`, the operator's home, a `--ro-path`, `/usr`, `/etc` and `/` fail; a write to `/tmp` never reaches the host |
+| meshloop's host-side git cannot be redirected | The worktree's `.git` file and its admin and common git dirs are bound read-only (`--git-metadata none` hides them). Git dirs are bound only in git's own layout (admin dir outside the worktree and exactly `<common>/worktrees/<name>`); a forged `.git` binds none. A git dir that is, is inside or contains a secret store is refused |
+| Well-known secret stores are not readable | The operator's home, `~/.ssh`, `~/.config` and `~/.nodecode` are not mounted. `--ro-path` refuses `/`, a home or a folder containing one, and a path that is, is inside or contains one of `~/.nodecode`, `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.local/share/keyrings`, `~/.password-store`, `~/.claude`, `~/.codex`, `~/.gemini`, `~/.grok`, `~/.m2`, `~/.gradle`, `~/.gem`, `~/.terraform.d`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`. This is a denylist of well-known stores, not a guarantee: a secret elsewhere in a bound path is readable. `--ro-path` also refuses any path in or around the worktree or git directory. `credentials.toml` and `credentials` directly inside a bound folder or inside `--env CARGO_HOME` read as empty (each target is masked once, however many options name it); `--mask` hides more. A store that is itself a symlink is checked at its target too. `--git-metadata ro` is refused when the repository's git config, a `config.worktree`, or a file they include (`include.path`/`includeIf.*.path`) inside the git dirs holds an `extraheader` or `user@` in an `http(s)`/`ftp` URL (an `ssh://git@host` remote is not a credential); use `--git-metadata none` there |
+| No credential in the environment | `--clearenv`, then `HOME`, `PATH`, `TERM`, `NO_COLOR`, `LANG`, `TMPDIR`, `USER` and the operator's `--env` pairs; `--env` refuses `HOME`, `PATH`, `TMPDIR`, `USER`, `PWD` and names containing TOKEN, SECRET, PASSWORD, PASSWD, KEY, CREDENTIAL, AUTH, COOKIE or SESSION |
+| No network by default | `--unshare-net`: a network namespace with only its own loopback, so neither the host's TCP loopback nor its abstract Unix sockets are reachable. A connection to a listener on the host's 127.0.0.1 fails; the same probe with `--allow-network` succeeds (control). Filesystem Unix sockets are reachable through any bound path that holds one, so `--ro-path` refuses a path at, under or around `/tmp`, `/run`, `/var/run`, `/dev`, `/proc`, `/sys`, `/mnt/wsl*` and `$XDG_RUNTIME_DIR`; a socket in another operator-listed path is still reachable |
+| Nothing inherited but stdio | Descriptors above 2 that survive exec are closed before bwrap starts; core dumps are off |
+| No privileges, namespaces or terminal | `--unshare-user --disable-userns`, `--cap-drop ALL`, `no_new_privs`, `--new-session`, new PID, IPC, UTS and cgroup namespaces |
+| Verification semantics unchanged | The wrapper `exec`s bwrap, whose exit code is the check's: 0 passes, non-zero fails. 125 is a wrapper refusal (no bwrap, no user namespaces, not Linux, a worktree that is not a linked git worktree on ext4/xfs/btrfs, a refused option) and fails the check |
+| Process-tree ownership (ADRs 0025, 0035) | The runner is spawned through meshloop's owned-process path, so its PID and group are bwrap's. On timeout or cancel meshloop kills the group; `--die-with-parent` and the PID namespace take every sandboxed process with it, including one that called `setsid` |
+
+End to end, `tests/verify_containment.rs` runs `meshloop run` with a bash "worker" that
+writes `worker-test.sh` and `verify_command = ["sh", "worker-test.sh"]`: with the runner
+set, the passing node ends `AwaitingReview` and the failing node `Failed`, both checks
+recorded refusals, and no marker appears in the repository root, the fake home or the
+host's `/tmp`. The control run without `runner` writes both markers, which is the
+default, uncontained behaviour. A contained check that times out leaves no process.
+
+### What is not contained
+
+- **The worktree itself.** The check can change any file in the worktree after the
+  worker finished. meshloop collects the diff before it runs checks; anything the check
+  writes is not reviewed as part of that diff.
+- **Reads of `/usr`, the bound `/etc` entries, every `--ro-path` and the repository's
+  git history** (with `--git-metadata ro`). Put nothing secret in a `--ro-path` beyond
+  what is masked; the secret-store list is a denylist.
+- **Git config contents** (with `--git-metadata ro`). The check reads the repository's
+  `.git/config`, hooks and every branch. The wrapper refuses only the credential shapes
+  it recognises (an `extraheader`, `user@` in an `http(s)`/`ftp` URL, in the config and
+  in included files inside the git dirs; include targets elsewhere are not mounted and not
+  scanned); a token in another key or a credential helper's own config is readable and can be copied into
+  the worktree, where it would be committed. Use `--git-metadata none` when the
+  repository's git config holds anything secret.
+- **`--env` values.** They sit in meshloop's config and the process list; the name
+  filter is a guard, not a guarantee.
+- **With `--allow-network`**, everything listed for the worker's network above.
+- **CPU, memory, processes, the kernel.** As for the worker sandbox: tmpfs caps only, no
+  seccomp; `task_timeout_seconds` bounds wall time.
+- **Platforms.** Linux and WSL2 on a native filesystem only. Elsewhere the wrapper
+  refuses (125) and every contained check fails; there is no contained mode on macOS or
+  native Windows.
+- **Not the default.** A harness under containment does not switch verification to
+  contained mode by itself; `doctor` warns instead (no existing config changes meaning).

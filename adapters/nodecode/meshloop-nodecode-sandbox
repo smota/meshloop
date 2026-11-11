@@ -82,6 +82,25 @@ refuse_bind() {
 # under DIR PATH: whether PATH is DIR or inside it.
 under() { [[ "$2" == "$1" || "$2" == "$1"/* ]]; }
 
+# Secret stores under a home that a git directory bound here may never be, be inside,
+# or contain (#181 review). A denylist of well-known stores, not a guarantee.
+secret_dirs=(.nodecode .ssh .gnupg .config .aws .azure .kube .docker .local/share/keyrings
+  .password-store .claude .codex .gemini .grok .m2 .gradle .gem .terraform.d)
+secret_files=(.netrc .git-credentials .npmrc .pypirc)
+refuse_secret() {
+  local dir="$1" label="$2" h s t
+  for h in "${op_homes[@]}"; do
+    for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
+      # A store may itself be a symlink (~/.aws -> vault/aws): check where it leads too.
+      for t in "$h/$s" "$(realpath -m -- "$h/$s")"; do
+        under "$t" "$dir" && die "refusing a $label inside a secret store: $h/$s"
+        under "$dir" "$t" && die "refusing a $label that contains a secret store: $h/$s"
+      done
+    done
+  done
+  return 0
+}
+
 nodecode=""
 cred_provider=""
 cred_file=""
@@ -216,7 +235,11 @@ if [[ -n "$worktree" && -f "$worktree/.git" ]]; then
       if [[ "$(basename -- "$common")" == ".git" ]]; then
         repo_root="$(dirname -- "$common")"
       fi
-      git_dirs=("$admin" "$common")
+      # Only git's own layout: the admin dir outside the worktree and exactly
+      # <common>/worktrees/<name>. Anything else (a forged `.git`) binds nothing.
+      if ! under "$worktree" "$admin" && [[ "$(dirname -- "$admin")" == "$common/worktrees" ]]; then
+        git_dirs=("$admin" "$common")
+      fi
     fi
   fi
 fi
@@ -225,6 +248,7 @@ if [[ "$git_metadata" == "ro" ]]; then
     [[ -d "$d" ]] || continue
     under "$worktree" "$d" && continue
     refuse_bind "$d" "git directory"
+    refuse_secret "$d" "git directory"
     git_binds+=(--ro-bind "$d" "$d")
   done
 fi
