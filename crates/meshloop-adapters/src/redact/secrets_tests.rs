@@ -391,7 +391,8 @@ fn redaction_is_idempotent_on_generated_inputs() {
 
 #[test]
 fn scrubbing_is_linear_on_adversarial_input() {
-    // Shapes that would make a backtracking or rescanning matcher quadratic.
+    // Shapes that would make a backtracking or rescanning matcher quadratic. The
+    // key-named runs (`token=$…`) once re-read the value run at every key word.
     let inputs = [
         "sk-".repeat(200_000),
         "a-".repeat(300_000),
@@ -399,16 +400,273 @@ fn scrubbing_is_linear_on_adversarial_input() {
         "Bearer ".repeat(100_000),
         "-----BEGIN ".repeat(60_000),
         "api_key=\"".repeat(60_000),
+        "api_key=\"$".repeat(200_000),
+        "token=$".repeat(200_000),
+        "KEY=%".repeat(200_000),
+        "token:$".repeat(200_000),
+        "--token -".repeat(200_000),
+        "Authorization:".repeat(200_000),
+        "eyJa.".repeat(200_000),
+        "://a:b".repeat(200_000),
+        "aB3+".repeat(300_000),
+        "\u{1b}[".repeat(300_000),
         format!("Authorization:{}", " ".repeat(600_000)),
     ];
-    let start = std::time::Instant::now();
     for input in &inputs {
+        let start = std::time::Instant::now();
         let _ = redact(input);
+        // Linear work over ~2 MB is milliseconds even unoptimised; the quadratic
+        // `token=$` case took 47 s at 1.1 MB.
+        let took = start.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "{took:?} for {:?}…",
+            &input[..20]
+        );
     }
-    // Generous bound: linear work over ~4 MB is milliseconds; quadratic is hours.
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(20),
-        "{:?}",
-        start.elapsed()
+}
+
+#[test]
+fn redacts_pem_blocks_inside_key_named_values() {
+    let body = || {
+        (0..3)
+            .map(|n| {
+                fake(
+                    100 + n,
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                    64,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let lines = body();
+    let ssh = format!(
+        "SSH_PRIVATE_KEY=\"-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\"",
+        lines.join("\n")
     );
+    assert_eq!(redact(&ssh), "SSH_PRIVATE_KEY=\"[REDACTED]\"");
+    let yaml = format!(
+        "tls_key: -----BEGIN EC PRIVATE KEY-----\n{}\n-----END EC PRIVATE KEY-----\nnext: 1",
+        lines.join("\n")
+    );
+    assert_eq!(redact(&yaml), "tls_key: [REDACTED]\nnext: 1");
+    // GCP service-account JSON: the newlines are the two characters `\n`.
+    let gcp = format!(
+        "{{\"type\": \"service_account\", \"private_key\": \"-----BEGIN PRIVATE KEY-----\\n{}\\n-----END PRIVATE KEY-----\\n\", \"client_email\": \"x@y.test\"}}",
+        lines.join("\\n")
+    );
+    let out = redact(&gcp);
+    assert_eq!(
+        out,
+        "{\"type\": \"service_account\", \"private_key\": \"[REDACTED]\\n\", \"client_email\": \"x@y.test\"}"
+    );
+    for line in &lines {
+        for piece in line.split(['+', '/']) {
+            if piece.len() >= 8 {
+                assert!(!out.contains(piece), "{piece} in {out}");
+            }
+        }
+    }
+}
+
+#[test]
+fn redacts_body_lines_of_an_unterminated_pem_block() {
+    let lines: Vec<String> = (0..3)
+        .map(|n| {
+            fake(
+                110 + n,
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                64,
+            )
+        })
+        .collect();
+    let input = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\nerror: output cut here",
+        lines.join("\n")
+    );
+    assert_eq!(redact(&input), "[REDACTED]\nerror: output cut here");
+    let crlf = format!(
+        "-----BEGIN RSA PRIVATE KEY-----\r\n{}\r\nok: done",
+        lines.join("\r\n")
+    );
+    assert_eq!(redact(&crlf), "[REDACTED]\r\nok: done");
+}
+
+#[test]
+fn redacts_standard_base64_runs_with_plus_and_slash() {
+    let std_b64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // AWS secret access key shape: 40 standard-base64 characters, bare.
+    let mut aws = fake(120, std_b64, 40);
+    aws.replace_range(13..14, "/");
+    aws.replace_range(27..28, "+");
+    assert_eq!(redact(&format!("  {aws}  ")), "  [REDACTED]  ");
+    assert_eq!(
+        redact(&format!("aws_secret_access_key = {aws}")),
+        "aws_secret_access_key = [REDACTED]"
+    );
+    // Subresource-integrity hash (sha384): no piece reaches the 32-char word rule,
+    // so the whole run is judged once and replaced.
+    let mut sri_body = fake(121, std_b64, 64);
+    sri_body.replace_range(25..26, "/");
+    sri_body.replace_range(50..51, "+");
+    let sri = format!("integrity sha384-{sri_body}");
+    assert_eq!(redact(&sri), "integrity [REDACTED]");
+    // A piece that alone passes the word rule is replaced in the first pass; the
+    // run is then judged without it, so short fragments around it can remain.
+    let long_piece = fake(122, ALNUM, 36);
+    let out = redact(&format!("{long_piece}/Ab+9"));
+    assert_eq!(out, "[REDACTED]/Ab+9");
+    // Paths and URLs are not base64 secrets.
+    for keep in [
+        "crates/meshloop-adapters/src/redact/secrets_tests.rs",
+        "https://github.com/smota/meshloop/pull/185/files",
+        "a+b/c+d/e+f",
+    ] {
+        assert_eq!(redact(keep), keep);
+    }
+}
+
+#[test]
+fn redacts_flag_values_after_one_blank() {
+    let value = fake(130, ALNUM, 24);
+    for flag in [
+        "--api-key",
+        "--token",
+        "--password",
+        "-api-key",
+        "--client-secret",
+    ] {
+        assert_eq!(
+            redact(&format!("cmd {flag} {value} --verbose")),
+            format!("cmd {flag} [REDACTED] --verbose")
+        );
+    }
+    assert_eq!(redact("cmd --token --verbose"), "cmd --token --verbose");
+    assert_eq!(redact("cmd --token short"), "cmd --token short");
+}
+
+#[test]
+fn redacts_url_userinfo_passwords_and_keeps_host_and_path() {
+    let ghs = format!("ghs_{}", fake(140, ALNUM, 36));
+    let cases = [
+        (
+            "https://user:sMehGAkWvj7F@github.test/x.git",
+            "https://user:[REDACTED]@github.test/x.git".to_string(),
+        ),
+        (
+            "postgres://admin:hunter2pass@db:5432/x",
+            "postgres://admin:[REDACTED]@db:5432/x".to_string(),
+        ),
+        (
+            "redis://:p4ssw0rdLongEnough@h:6379",
+            "redis://:[REDACTED]@h:6379".to_string(),
+        ),
+    ];
+    for (input, want) in cases {
+        assert_eq!(redact(input), want);
+    }
+    assert_eq!(
+        redact(&format!("https://x-access-token:{ghs}@github.com/o/r.git")),
+        "https://x-access-token:[REDACTED]@github.com/o/r.git"
+    );
+    for keep in [
+        "https://github.com/o/r.git",
+        "https://host:8080/path@v1",
+        "ssh://git@github.com/o/r.git",
+        "mailto:someone@example.test",
+    ] {
+        assert_eq!(redact(keep), keep);
+    }
+}
+
+#[test]
+fn redacts_keys_inside_ansi_colour_codes() {
+    let akia = format!("AKIA{}", fake(150, UPPER_DIGIT, 16));
+    let bearer = fake(151, ALNUM, 30);
+    let proj = format!("sk-proj-{}", fake(152, B64URL, 60));
+    assert_eq!(
+        redact(&format!("\u{1b}[32m{akia}\u{1b}[0m")),
+        "\u{1b}[32m[REDACTED]\u{1b}[0m"
+    );
+    assert_eq!(
+        redact(&format!("\u{1b}[31mBearer {bearer}\u{1b}[0m")),
+        "\u{1b}[31mBearer [REDACTED]\u{1b}[0m"
+    );
+    assert_eq!(
+        redact(&format!("\u{1b}[1;31m{proj}\u{1b}[0m")),
+        "\u{1b}[1;31m[REDACTED]\u{1b}[0m"
+    );
+    let plain = "\u{1b}[1m\u{1b}[31merror\u{1b}[0m: mismatched types";
+    assert_eq!(redact(plain), plain);
+}
+
+#[test]
+fn redacts_new_key_names_and_keyed_values_of_any_class() {
+    for input in [
+        "DB_PASS=pnnhcc826ZWOf0WOOsEg",
+        "DB_PWD=pnnhcc826ZWOf0WOOsEg",
+        "GOOGLE_CREDENTIALS=pnnhcc826ZWOf0WOOsEg",
+        "x-auth: pnnhcc826ZWOf0WOOsEg",
+        "CLIENT_SECRET: knialijbwylkytqpjtxaznan",
+        "api_key: qydlpwbrsgwcsjfnaqgjyyba",
+        "user_credential: \"correct horse battery staple\"",
+    ] {
+        let out = redact(input);
+        assert!(
+            out.ends_with("[REDACTED]") || out.ends_with("[REDACTED]\""),
+            "{input:?} -> {out:?}"
+        );
+    }
+    // Shell working-directory variables are paths.
+    assert_eq!(redact("PWD=/home/user/code"), "PWD=/home/user/code");
+    assert_eq!(redact("OLDPWD=/home/user"), "OLDPWD=/home/user");
+}
+
+#[test]
+fn redacts_whole_jwts_and_more_prefixed_tokens() {
+    let jwt = format!(
+        "eyJhbGciOiJIUzI1NiJ9.eyJ{}.{}",
+        fake(160, B64URL, 30),
+        fake(161, B64URL, 43)
+    );
+    assert_eq!(redact(&format!("jwt {jwt} end")), "jwt [REDACTED] end");
+    let unsigned = format!("eyJhbGciOiJub25lIn0.eyJ{}", fake(162, B64URL, 20));
+    assert_eq!(redact(&unsigned), "[REDACTED]");
+    for token in [
+        format!("glpat-{}", fake(163, B64URL, 20)),
+        format!("glpat-{}-{}", fake(168, ALNUM, 17), fake(169, ALNUM, 2)),
+        format!("xapp-1-A0123-0123-{}", fake(164, HEX, 64)),
+    ] {
+        assert_eq!(redact(&token), "[REDACTED]", "{token}");
+    }
+    let hook = format!(
+        "https://hooks.slack.com/services/T{}/B{}/{}",
+        fake(165, UPPER_DIGIT, 8),
+        fake(166, UPPER_DIGIT, 8),
+        fake(167, ALNUM, 24)
+    );
+    assert_eq!(redact(&hook), "https://hooks.slack.com/services/[REDACTED]");
+}
+
+#[test]
+fn key_name_suffix_needs_a_name_boundary() {
+    for keep in [
+        "monkey=bananaBread12",
+        "hotkey=Ctrl+Shift+K",
+        "turkey: 1234567890abcdefABCD",
+        "jsonkey=\"abcdefgh\"",
+        "bypass=abcdefghijkl",
+        "max_tokens=4096",
+        "tokens=12345678",
+    ] {
+        assert_eq!(redact(keep), keep);
+    }
+    for hit in [
+        "api_key=abcdefgh",
+        "KEY=abcdefgh",
+        "apiKey=abcdefgh",
+        "x-api-key=abcdefgh",
+    ] {
+        assert!(redact(hit).ends_with("=[REDACTED]"), "{hit}");
+    }
 }

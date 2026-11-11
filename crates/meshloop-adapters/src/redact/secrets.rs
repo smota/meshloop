@@ -1,20 +1,34 @@
 //! Secret-shape scrubbing for evidence text (#183).
 //!
 //! The input is read once, left to right, as *words* (maximal runs of ASCII
-//! `[A-Za-z0-9_-]`) and the bytes between them. A word is replaced by
-//! [`MARK`] when it has a documented provider key shape or passes the generic
-//! high-entropy rule. A few words open a *context*: `Bearer`, `Authorization:`,
-//! `-----BEGIN`, and secret-named keys such as `API_KEY=` / `"token":`; then the
-//! value after them is replaced and the key text is kept.
+//! `[A-Za-z0-9_-]`) and the bytes between them. ANSI CSI sequences
+//! (`ESC [ params final`) are copied whole as separators, so colour codes neither
+//! hide a key nor get split. A word is replaced by [`MARK`] when it has a
+//! documented provider key shape or passes the generic high-entropy rule. Some
+//! words open a *context*: `Bearer`, `Authorization:`, `-----BEGIN`, JWTs, Slack
+//! webhook URLs, and secret-named keys such as `API_KEY=`, `"token":` or
+//! `--password VALUE`; then the value after them is replaced and the key text is
+//! kept. `scheme://user:password@host` loses only the password.
 //!
-//! Runtime is linear in the input. The cursor only moves forward. At a word, a
-//! rule reads the word, then at most one blank run, one separator, and one value
-//! (a run of value bytes, a quoted string up to its closing quote or newline, or
-//! the rest of the line). On a match the cursor jumps past everything read. On a
-//! miss it moves to the end of the word, so the bytes read after it are read again
-//! as later words, at most once more each. The PEM search for `-----END` runs at
-//! most once without a match and is then skipped for the rest of the input. No
-//! rule retries from inside a word, so there is no backtracking.
+//! # Linear runtime
+//!
+//! The cursor `i` only moves forward, and every rule reads forward from it:
+//!
+//! - A *hit* replaces what the rule read and moves `i` past it, so those bytes are
+//!   never read again.
+//! - A *context miss* (a secret-named key, `Bearer` or `Authorization` whose value
+//!   does not qualify) records how far it read in `no_context_until`. Words that
+//!   start before that offset skip the context rules, so a value run such as
+//!   `token=$token=$token=$…` is read by one context rule, not by one per key word
+//!   inside it. The remaining rules on those words read only the word itself.
+//! - The PEM search for `-----END` runs at most once without a match and is then
+//!   skipped; a match is a hit. The `scheme://userinfo@` scan stops at the next `/`,
+//!   so consecutive scans read disjoint bytes, and it is capped in length.
+//! - Rules that peek at the next word (JWT segments) read at most one extra word.
+//!
+//! A second pass over the output reads each maximal base64 run once (see
+//! [`scrub_b64_runs`]). Each byte is therefore read a constant number of times. There is no
+//! backtracking and no retry from inside a word.
 
 /// Replacement text. Its brackets are not word bytes, so a second pass sees the
 /// bare word `REDACTED`, which matches no rule (idempotency).
@@ -25,15 +39,33 @@ pub(super) const MARK: &str = "[REDACTED]";
 pub(crate) const SK_MIN_KEY_CHARS: usize = 40;
 const SK_MIN_KEY_CHARS_WITH_DIGIT: usize = 20;
 
-/// GitHub token prefixes (classic, OAuth, user-to-server, server-to-server, refresh).
-const GITHUB_PREFIXES: &[&str] = &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
-const GITHUB_MIN_BODY: usize = 16;
-const GITHUB_PAT_PREFIX: &str = "github_pat_";
-const GITHUB_PAT_MIN_BODY: usize = 22;
+/// `(prefix, minimum body length, body needs a digit)` for prefixed tokens:
+/// GitHub (classic, OAuth, user-to-server, server-to-server, refresh,
+/// fine-grained), GitLab PAT, Slack app-level, npm, Hugging Face, Stripe live keys.
+const PREFIXED_TOKENS: &[(&str, usize, bool)] = &[
+    ("ghp_", 16, false),
+    ("gho_", 16, false),
+    ("ghu_", 16, false),
+    ("ghs_", 16, false),
+    ("ghr_", 16, false),
+    ("github_pat_", 22, false),
+    ("glpat-", 20, false),
+    ("xapp-", 20, true),
+    ("npm_", 30, false),
+    ("hf_", 30, true),
+    ("sk_live_", 20, false),
+    ("rk_live_", 20, false),
+];
 
 /// Slack token prefixes: `xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-`, `xoxr-`.
 const SLACK_KINDS: &[u8] = b"abposr";
 const SLACK_MIN_BODY: usize = 10;
+/// Slack incoming-webhook and workflow URLs: the path after these is the secret.
+const SLACK_HOOK_PREFIXES: &[&str] = &[
+    "hooks.slack.com/services/",
+    "hooks.slack.com/workflows/",
+    "hooks.slack.com/triggers/",
+];
 
 /// Google API keys are `AIza` plus 35 base64url characters.
 const GOOGLE_PREFIX: &str = "AIza";
@@ -43,11 +75,31 @@ const GOOGLE_MIN_BODY: usize = 30;
 const AWS_PREFIXES: &[&str] = &["AKIA", "ASIA"];
 const AWS_KEY_LEN: usize = 20;
 
-/// Upper-cased key-name suffixes whose assigned value is a secret.
-const SECRET_KEY_SUFFIXES: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD"];
-/// An unquoted `NAME=value` with no blanks around `=` is redacted from this length.
+/// Upper-cased key-name suffixes whose assigned value is a secret. The suffix must
+/// start the word, follow `_` or `-`, or start a `camelCase` hump, so `api_key`,
+/// `apiKey` and `KEY` match and `monkey`, `hotkey` and `turkey` do not.
+const SECRET_KEY_SUFFIXES: &[&str] = &[
+    "KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PASS",
+    "PWD",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "AUTH",
+];
+/// Shell working-directory variables hold paths, not passwords.
+const NOT_SECRET_KEY_NAMES: &[&str] = &["PWD", "OLDPWD"];
+/// An unquoted `NAME=value` with no blanks around `=`, a quoted value, and a
+/// `--flag VALUE` are redacted from this length.
 const ASSIGNED_MIN_LEN: usize = 8;
-/// Any other value (after `:` or a spaced `=`) must look like a credential.
+/// Any other unquoted value (after `:` or a spaced `=`) from this length, unless
+/// it reads as code (a call, a path or a type name).
+const KEYED_MIN_LEN: usize = 12;
+/// A value that is a credential without help from the key name.
 const STRONG_MIN_LEN: usize = 16;
 
 /// `Authorization` scheme words that mark the rest of the header as a credential.
@@ -64,8 +116,16 @@ const AUTH_SCHEMES: &[&str] = &[
 ];
 const BEARER_MIN_LEN: usize = 8;
 
+const PEM_BEGIN: &str = "-----BEGIN";
+/// PEM body lines are 64 (OpenSSH: 70) characters; shorter is the last line.
+const PEM_FULL_LINE: usize = 40;
+/// Longest `user:password` part scanned after `://`.
+const URL_USERINFO_MAX: usize = 512;
+
 /// Generic rule: a word this long or longer can be a high-entropy secret.
 const GENERIC_MIN_LEN: usize = 32;
+/// A `[A-Za-z0-9+/_-]` run (standard base64) is tested whole from this length.
+const B64_RUN_MIN_LEN: usize = 40;
 /// Mixed-case + digit words need this much Shannon entropy (bits per char).
 /// Random base64url of 32 chars averages about 4.6; English identifiers sit near 4.
 const GENERIC_MIN_BITS: f64 = 4.3;
@@ -82,15 +142,37 @@ const HEX_MIN_BITS: f64 = 3.0;
 /// `commit_sha` and `priors_sha256` evidence fields.
 const HEX_DIGEST_LENS: &[usize] = &[32, 40, 56, 64, 96, 128];
 
+/// Result of a context rule at one word.
+enum Context {
+    /// The word opens no context.
+    None,
+    /// Replace `start..end`.
+    Hit(usize, usize),
+    /// The value did not qualify; the rule read up to this offset.
+    Miss(usize),
+}
+
 pub(super) fn scrub(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut no_pem_end = false;
+    let mut no_context_until = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         if !is_word_byte(bytes[i]) {
-            // `i` is always on a char boundary: words are ASCII and other text is
-            // copied a whole char at a time.
+            if let Some(stop) = ansi_csi_end(bytes, i) {
+                out.push_str(&input[i..stop]);
+                i = stop;
+                continue;
+            }
+            if let Some((pw_start, pw_end)) = url_password(input, i) {
+                out.push_str(&input[i..pw_start]);
+                out.push_str(MARK);
+                i = pw_end;
+                continue;
+            }
+            // `i` is always on a char boundary: words, CSI sequences and URL
+            // userinfo are ASCII and other text is copied a whole char at a time.
             let Some(ch) = input[i..].chars().next() else {
                 break;
             };
@@ -105,23 +187,74 @@ pub(super) fn scrub(input: &str) -> String {
             i = stop;
             continue;
         }
+        if let Some(stop) = jwt_end(bytes, i, end) {
+            out.push_str(MARK);
+            i = stop;
+            continue;
+        }
+        if let Some((secret_start, stop)) = slack_hook(input, i) {
+            out.push_str(&input[i..secret_start]);
+            out.push_str(MARK);
+            i = stop;
+            continue;
+        }
         // A key shape wins over a context: `sk-…KEY=` is a key, not a key name.
         if is_secret_word(word) {
             out.push_str(MARK);
             i = end;
             continue;
         }
-        let opener = i.checked_sub(1).map(|p| bytes[p]).filter(|b| is_quote(*b));
-        if let Some((value_start, value_end)) = context_value(input, end, word, opener) {
-            out.push_str(&input[i..value_start]);
-            out.push_str(MARK);
-            i = value_end;
-            continue;
+        if i >= no_context_until {
+            let opener = i.checked_sub(1).map(|p| bytes[p]).filter(|b| is_quote(*b));
+            match context_value(input, end, word, opener) {
+                Context::Hit(value_start, value_end) => {
+                    out.push_str(&input[i..value_start]);
+                    out.push_str(MARK);
+                    i = value_end;
+                    continue;
+                }
+                Context::Miss(read_to) => no_context_until = read_to,
+                Context::None => {}
+            }
         }
         out.push_str(word);
         i = end;
     }
+    scrub_b64_runs(&out)
+}
+
+/// Second pass: maximal `[A-Za-z0-9+/_-]` runs (plus `=` padding) that join words
+/// with `+` or `/` and are high-entropy as a whole, such as a bare AWS secret
+/// access key. It runs on the first pass's output so that a run is judged
+/// without the parts already replaced; deciding it on the input made the result
+/// depend on whether a key inside the run had been redacted, and a second
+/// `redact` could then change it. Runs are maximal on both sides, so replacing
+/// one does not change its neighbours and the pass is idempotent.
+fn scrub_b64_runs(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !is_b64_body_byte(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let body = run_end(bytes, i, is_b64_body_byte);
+        let run = run_end(bytes, body, |b| b == b'=');
+        if is_secret_b64_run(&text[i..run]) {
+            out.push_str(&text[copied..i]);
+            out.push_str(MARK);
+            copied = run;
+        }
+        i = run;
+    }
+    out.push_str(&text[copied..]);
     out
+}
+
+fn is_b64_body_byte(b: u8) -> bool {
+    is_word_byte(b) || b == b'+' || b == b'/'
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -163,8 +296,46 @@ fn line_end(bytes: &[u8], from: usize) -> usize {
     run_end(bytes, from, |b| b != b'\n' && b != b'\r')
 }
 
-/// `-----BEGIN …` through the matching `-----END …-----`, or to the end of the
-/// line when no END follows. `no_end` records a failed search so it runs once.
+/// End of an ANSI CSI sequence `ESC [ params(0x30-0x3F)* intermediates(0x20-0x2F)*
+/// final(0x40-0x7E)` starting at `i`.
+fn ansi_csi_end(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes[i] != 0x1b || bytes.get(i + 1) != Some(&b'[') {
+        return None;
+    }
+    let params = run_end(bytes, i + 2, |b| (0x30..=0x3f).contains(&b));
+    let inter = run_end(bytes, params, |b| (0x20..=0x2f).contains(&b));
+    bytes
+        .get(inter)
+        .filter(|b| (0x40..=0x7e).contains(*b))
+        .map(|_| inter + 1)
+}
+
+/// `scheme://user:password@host`: the password range, when `i` is at `://`.
+fn url_password(input: &str, i: usize) -> Option<(usize, usize)> {
+    if !input[i..].starts_with("://") {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    let from = i + 3;
+    let limit = (from + URL_USERINFO_MAX).min(bytes.len());
+    let stop = run_end(&bytes[..limit], from, |b| {
+        b.is_ascii_graphic()
+            && !matches!(
+                b,
+                b'/' | b'@' | b'?' | b'#' | b'"' | b'\'' | b'<' | b'>' | b'`'
+            )
+    });
+    if stop >= limit || bytes[stop] != b'@' {
+        return None;
+    }
+    let colon = bytes[from..stop].iter().position(|b| *b == b':')?;
+    let start = from + colon + 1;
+    (start < stop && !input[start..].starts_with(MARK)).then_some((start, stop))
+}
+
+/// `-----BEGIN …` through the matching `-----END …-----`. With no END after it,
+/// the BEGIN line and the base64 body lines that follow (`[A-Za-z0-9+/=]`, with
+/// literal `\n` allowed). `no_end` records a failed search so it runs once.
 fn pem_block_end(input: &str, start: usize, word_end: usize, no_end: &mut bool) -> Option<usize> {
     let word = &input[start..word_end];
     let label = word.trim_start_matches('-');
@@ -183,43 +354,109 @@ fn pem_block_end(input: &str, start: usize, word_end: usize, no_end: &mut bool) 
         }
         *no_end = true;
     }
-    Some(line_end(bytes, word_end))
+    let mut stop = line_end(bytes, word_end);
+    // Body lines are full width except the last; a short line ends the block.
+    let mut prev_full = true;
+    while prev_full {
+        let mut next = stop;
+        if bytes.get(next) == Some(&b'\r') {
+            next += 1;
+        }
+        if bytes.get(next) != Some(&b'\n') {
+            break;
+        }
+        next += 1;
+        let body = run_end(bytes, next, is_pem_body_byte);
+        if body == next || body != line_end(bytes, next) {
+            break;
+        }
+        prev_full = body - next >= PEM_FULL_LINE;
+        stop = body;
+    }
+    Some(stop)
 }
 
-/// A secret value that follows `word`: `(value_start, value_end)`.
-fn context_value(
-    input: &str,
-    word_end: usize,
-    word: &str,
-    opener: Option<u8>,
-) -> Option<(usize, usize)> {
-    let bytes = input.as_bytes();
-    if word.eq_ignore_ascii_case("bearer") {
-        return bearer_token(input, word_end);
-    }
-    if ends_with_ignore_case(word, "authorization") {
-        return authorization_value(input, word_end, opener);
-    }
-    if is_secret_key_name(word) {
-        return assigned_value(input, bytes, word_end);
-    }
-    None
+fn is_pem_body_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\\')
 }
 
-fn bearer_token(input: &str, word_end: usize) -> Option<(usize, usize)> {
+/// `eyJ….eyJ…[.…]`: a JWT's header, payload and signature as one secret.
+fn jwt_end(bytes: &[u8], start: usize, word_end: usize) -> Option<usize> {
+    const MIN_SEGMENT: usize = 4;
+    if word_end - start < MIN_SEGMENT
+        || !bytes[start..].starts_with(b"eyJ")
+        || bytes.get(word_end) != Some(&b'.')
+    {
+        return None;
+    }
+    let payload = word_end + 1;
+    if !bytes[payload..].starts_with(b"eyJ") {
+        return None;
+    }
+    let payload_end = run_end(bytes, payload, is_word_byte);
+    if payload_end - payload < MIN_SEGMENT {
+        return None;
+    }
+    if bytes.get(payload_end) == Some(&b'.') {
+        return Some(run_end(bytes, payload_end + 1, is_word_byte));
+    }
+    Some(payload_end)
+}
+
+/// `hooks.slack.com/services/T…/B…/…`: keeps the host and replaces the path.
+fn slack_hook(input: &str, start: usize) -> Option<(usize, usize)> {
+    let rest = &input[start..];
+    let prefix = SLACK_HOOK_PREFIXES.iter().find(|p| rest.starts_with(**p))?;
+    let secret = start + prefix.len();
+    let end = run_end(input.as_bytes(), secret, |b| is_word_byte(b) || b == b'/');
+    (end > secret).then_some((secret, end))
+}
+
+/// A base64 run that joins words with `+` or `/` and is high-entropy as a whole.
+fn is_secret_b64_run(run: &str) -> bool {
+    run.len() >= B64_RUN_MIN_LEN
+        && run.bytes().any(|b| b == b'+' || b == b'/')
+        && !run.contains("//")
+        && is_high_entropy(run.trim_end_matches('='))
+}
+
+fn context_value(input: &str, word_end: usize, word: &str, opener: Option<u8>) -> Context {
+    let result = if word.eq_ignore_ascii_case("bearer") {
+        bearer_token(input, word_end)
+    } else if ends_with_ignore_case(word, "authorization") {
+        authorization_value(input, word_end, opener)
+    } else if is_secret_key_name(word) {
+        assigned_value(input, word, word_end)
+    } else {
+        return Context::None;
+    };
+    match result {
+        Ok((start, end)) => Context::Hit(start, end),
+        Err(read_to) => Context::Miss(read_to),
+    }
+}
+
+/// `Err` carries how far the rule read.
+type Value = Result<(usize, usize), usize>;
+
+fn bearer_token(input: &str, word_end: usize) -> Value {
     let bytes = input.as_bytes();
     let start = run_end(bytes, word_end, is_blank);
     if start == word_end {
-        return None;
+        return Err(start);
     }
     let end = run_end(bytes, start, is_token_byte);
-    is_credential_like(&input[start..end]).then_some((start, end))
+    if is_credential_like(&input[start..end]) {
+        Ok((start, end))
+    } else {
+        Err(end)
+    }
 }
 
 /// `Authorization: <scheme> <credentials>` (also `Proxy-Authorization`, JSON keys).
 /// Redacts to the closing quote or the end of the line, when the value starts
 /// with a scheme word or a credential.
-fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Option<(usize, usize)> {
+fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Value {
     let bytes = input.as_bytes();
     let mut j = word_end;
     if let Some(q) = opener
@@ -229,7 +466,7 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Opti
     }
     j = run_end(bytes, j, is_blank);
     if bytes.get(j) != Some(&b':') {
-        return None;
+        return Err(j);
     }
     let mut start = run_end(bytes, j + 1, is_blank);
     let mut close = opener;
@@ -239,14 +476,14 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Opti
         start += 1;
         close = Some(q);
     }
-    if input[start..].starts_with(MARK) {
-        return None;
+    if input[start..].starts_with(MARK) || input[start..].starts_with(PEM_BEGIN) {
+        return Err(start);
     }
     let first_end = run_end(bytes, start, is_token_byte);
     let first = &input[start..first_end];
     let is_scheme = AUTH_SCHEMES.iter().any(|s| first.eq_ignore_ascii_case(s));
     if !is_scheme && !is_strong_value(first) {
-        return None;
+        return Err(first_end);
     }
     let mut end = run_end(bytes, start, |b| {
         b != b'\n' && b != b'\r' && Some(b) != close
@@ -254,47 +491,67 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Opti
     while end > start && is_blank(bytes[end - 1]) {
         end -= 1;
     }
-    Some((start, end))
+    Ok((start, end))
 }
 
-/// The value after a secret-named key: `KEY=v`, `"key": "v"`, `key: v`, `key = 'v'`.
-fn assigned_value(input: &str, bytes: &[u8], word_end: usize) -> Option<(usize, usize)> {
+/// The value after a secret-named key: `KEY=v`, `"key": "v"`, `key: v`,
+/// `key = 'v'`, `--api-key v`.
+fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
+    let bytes = input.as_bytes();
+    // `--api-key VALUE`: a flag takes its value after one blank.
+    if word.starts_with('-')
+        && bytes.get(word_end).copied().is_some_and(is_blank)
+        && let Some(&first) = bytes.get(word_end + 1)
+        && first != b'-'
+        && is_value_byte(first)
+    {
+        let v = word_end + 1;
+        let end = run_end(bytes, v, is_value_byte);
+        let value = &input[v..end];
+        let ok = value.len() >= ASSIGNED_MIN_LEN
+            && is_literal_value(value)
+            && !input[v..].starts_with(MARK);
+        return if ok { Ok((v, end)) } else { Err(end) };
+    }
     let mut j = word_end;
     // Closing quote of a JSON or YAML key, possibly escaped (`\"key\":`).
     let key_quoted = skip_quote(bytes, &mut j).is_some();
     let tight = !key_quoted && bytes.get(j) == Some(&b'=');
     j = run_end(bytes, j, is_blank);
-    let sep = *bytes.get(j)?;
+    let Some(&sep) = bytes.get(j) else {
+        return Err(j);
+    };
     if sep != b'=' && sep != b':' {
-        return None;
+        return Err(j);
     }
     j += 1;
     // `==` is a comparison and `::` a path, not an assignment.
     if bytes.get(j) == Some(&sep) {
-        return None;
+        return Err(j);
     }
     let start = run_end(bytes, j, is_blank);
     let tight = tight && start == j;
     let mut v = start;
-    if skip_quote(bytes, &mut v).is_some() {
+    let quoted = skip_quote(bytes, &mut v).is_some();
+    // Already redacted, or a PEM block that the PEM rule replaces whole.
+    if input[v..].starts_with(MARK) || input[v..].starts_with(PEM_BEGIN) {
+        return Err(v);
+    }
+    if quoted {
         let end = run_end(bytes, v, |b| !is_quote(b) && b != b'\\' && b != b'\n');
         let value = &input[v..end];
-        return (value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value)).then_some((v, end));
-    }
-    if input[v..].starts_with(MARK) {
-        return None;
+        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
+        return if ok { Ok((v, end)) } else { Err(end) };
     }
     let end = run_end(bytes, v, is_value_byte);
     let value = &input[v..end];
-    if !is_literal_value(value) {
-        return None;
-    }
-    let hit = if tight && sep == b'=' {
-        value.len() >= ASSIGNED_MIN_LEN
-    } else {
-        is_strong_value(value)
-    };
-    hit.then_some((v, end))
+    let ok = is_literal_value(value)
+        && if tight && sep == b'=' {
+            value.len() >= ASSIGNED_MIN_LEN
+        } else {
+            value.len() >= KEYED_MIN_LEN && !looks_like_code(value)
+        };
+    if ok { Ok((v, end)) } else { Err(end) }
 }
 
 /// Advances past `"`, `'`, `\"` or `\'`, returning the quote.
@@ -308,18 +565,42 @@ fn skip_quote(bytes: &[u8], j: &mut usize) -> Option<u8> {
     Some(q)
 }
 
-/// Not empty, not already redacted, not a shell or template reference.
+/// Not empty, not a shell or template reference.
 fn is_literal_value(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with(MARK)
-        && !value.starts_with('$')
-        && !value.starts_with('%')
+    !value.is_empty() && !value.starts_with('$') && !value.starts_with('%')
+}
+
+/// A call, a `path::item`, a dotted field path, or a `TypeName`: code that names
+/// a secret, not the secret.
+fn looks_like_code(value: &str) -> bool {
+    let b = value.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    value.contains('(')
+        || value.contains("::")
+        || (value.contains('.')
+            && !b[0].is_ascii_digit()
+            && b.iter().all(|c| ident(*c) || *c == b'.'))
+        || (b[0].is_ascii_uppercase() && b.iter().all(u8::is_ascii_alphabetic))
 }
 
 fn is_secret_key_name(word: &str) -> bool {
-    SECRET_KEY_SUFFIXES
+    if NOT_SECRET_KEY_NAMES
         .iter()
-        .any(|suffix| ends_with_ignore_case(word, suffix))
+        .any(|n| word.eq_ignore_ascii_case(n))
+    {
+        return false;
+    }
+    SECRET_KEY_SUFFIXES.iter().any(|suffix| {
+        ends_with_ignore_case(word, suffix) && starts_a_name_part(word, word.len() - suffix.len())
+    })
+}
+
+/// `at` starts the word, follows `_`/`-`, or starts a `camelCase` hump.
+fn starts_a_name_part(word: &str, at: usize) -> bool {
+    let b = word.as_bytes();
+    at == 0
+        || matches!(b[at - 1], b'_' | b'-')
+        || (b[at - 1].is_ascii_lowercase() && b[at].is_ascii_uppercase())
 }
 
 fn ends_with_ignore_case(word: &str, suffix: &str) -> bool {
@@ -346,7 +627,7 @@ fn is_strong_value(value: &str) -> bool {
 /// Provider key shapes, then the generic high-entropy rule.
 fn is_secret_word(word: &str) -> bool {
     is_sk_key(word)
-        || is_github_token(word)
+        || is_prefixed_token(word)
         || is_slack_token(word)
         || is_google_key(word)
         || is_aws_key_id(word)
@@ -365,15 +646,15 @@ fn is_sk_key(word: &str) -> bool {
     alnum >= SK_MIN_KEY_CHARS || (digit && alnum >= SK_MIN_KEY_CHARS_WITH_DIGIT)
 }
 
-fn is_github_token(word: &str) -> bool {
-    let body_len = |prefix: &str| {
-        word.strip_prefix(prefix)
-            .map(|b| b.bytes().filter(u8::is_ascii_alphanumeric).count())
-    };
-    GITHUB_PREFIXES
+fn is_prefixed_token(word: &str) -> bool {
+    PREFIXED_TOKENS
         .iter()
-        .any(|p| body_len(p).is_some_and(|n| n >= GITHUB_MIN_BODY))
-        || body_len(GITHUB_PAT_PREFIX).is_some_and(|n| n >= GITHUB_PAT_MIN_BODY)
+        .any(|(prefix, min_body, needs_digit)| {
+            word.strip_prefix(prefix).is_some_and(|body| {
+                body.len() >= *min_body
+                    && (!needs_digit || body.bytes().any(|b| b.is_ascii_digit()))
+            })
+        })
 }
 
 fn is_slack_token(word: &str) -> bool {
