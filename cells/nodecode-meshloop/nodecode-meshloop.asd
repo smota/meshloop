@@ -12,14 +12,15 @@
 ;;;; peer found at run time, not a dependency. See README.md.
 
 (defsystem "nodecode-meshloop"
-  :description "meshloop doctor, status, inspect and report, the operator's plan, review-plan, run, resume, cancel, accept and integrate, and an optional one-way Board projection, through the meshloop CLI's --json output"
+  :description "meshloop doctor, status, inspect and report, the operator's plan, review-plan, run, resume, cancel, accept and integrate, an optional one-way Board projection, and a routing-prior proposal it never promotes, through the meshloop CLI's --json output"
   :license "Apache-2.0"
-  :version "0.3.0"
+  :version "0.4.0"
   :depends-on ("nodecode")
   :serial t
   :components ((:file "package")
                (:file "cell")
                (:file "gates")
                (:file "board")
+               (:file "learn")
                (:file "drive")
                (:static-file "contract.json")))

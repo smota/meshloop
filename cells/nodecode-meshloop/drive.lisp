@@ -486,13 +486,14 @@ one is a refusal asking which; none falls back to the newest run."
    :rows (list (nle:run-row "Doctor" "/meshloop doctor" :detail "config and harness readiness")
                (nle:run-row "Status" "/meshloop status" :detail "the newest run and its nodes")
                (nle:run-row "Report" "/meshloop report" :detail "harnesses and model_refs dispatched")
+               (nle:run-row "Priors" "/meshloop priors show" :detail "the routing priors in effect, if any")
                (nle:ask-row "Inspect a run" "Graph" "/meshloop inspect"
                             :placeholder "a graph id, or nothing for the newest" :verb "inspect")
                (nle:ask-row "Read a plan" "Plan" "/meshloop review-plan --plan"
                             :placeholder "meshloop-plan.json" :verb "read"))))
 
 (defparameter +usage+
-  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as <your-name>, run, resume, cancel, accept --task N --as <your-name>, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto; board-sync [GRAPH] projects runs onto the repository's nodecode board, when meshloop.board is on (off by default)")
+  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as <your-name>, run, resume, cancel, accept --task N --as <your-name>, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto; learn [--graph G ...] [--out FILE] writes a routing-prior proposal from finished attempts and promotes nothing; priors show | priors check FILE read meshloop's priors; board-sync [GRAPH] projects runs onto the repository's nodecode board, when meshloop.board is on (off by default)")
 
 (defun after-first-word (text)
   "TEXT past its first word and the blanks after it, as typed."
@@ -518,6 +519,9 @@ resume, accept, cancel and status then project onto the repository's board
                ((string= verb "report") (report-of session-id rest))
                ((string= verb "hook-check") (hook-check-of (after-first-word args)))
                ((string= verb "board-sync") (board-sync-of session-id rest))
+               ((string= verb "learn") (learn-of session-id rest))
+               ((string= verb "priors") (priors-of session-id rest))
+               ((string= verb "priors-check") (priors-of session-id (format nil "check ~a" rest)))
                ((string= verb "plan") (plan-of session-id rest))
                ((string= verb "review-plan") (review-plan-of session-id rest))
                ((string= verb "run") (run-plan-of session-id rest))

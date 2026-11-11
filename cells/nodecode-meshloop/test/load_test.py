@@ -20,6 +20,16 @@ call, since a real tool call needs a model turn); a fixture graph goes plan,
 review-plan, run (detached), accept, resume, integrate; and cancel leaves no
 process and no worktree meshloop does not own.
 
+Routing priors (#139): /meshloop learn, priors show and priors check only
+read meshloop; learn refuses a --out outside the repository's .agent-runs/
+before it reads anything; /meshloop priors accept and revoke refuse and run
+nothing; the :tool veto refuses priors accept and revoke and lets show and check
+through. Against a binary without the #139 attempt fields learn fails closed in
+one line and writes no proposal. With a binary that has `meshloop priors', a
+fixture run whose template passes {model_ref} is folded into a proposal
+checked here against the v1 rules, then read back by priors check; without
+one those checks are skipped with a note.
+
 Board (#137): with meshloop.board off nothing is posted; on, exactly one pointer
 post per event of a fixture run and none again after a second sync, a lost
 cursor write, an interrupted run and resume, or a cell restart; posts saying
@@ -282,6 +292,150 @@ def prepare_work(path):
     work.mkdir(parents=True)
     (work / MARKER).write_text("made by cells/nodecode-meshloop/test/load_test.py\n")
     return work
+
+
+def has_priors(meshloop, repo):
+    """Whether MESHLOOP has the #139 kernel side: `priors show --json` answers
+    an envelope that is ok."""
+    out = run([str(meshloop), "priors", "show", "--json"], repo)
+    try:
+        return json.loads(out.stdout).get("ok") is True
+    except ValueError:
+        return False
+
+
+def proposal_holds_v1_rules(path):
+    """The v1 file rules a schema validator would check and the loader's own:
+    (ok, why). Python -I has no jsonschema here; the pure test's sample is
+    validated against the schema separately."""
+    doc = json.loads(Path(path).read_text())
+    if doc.get("schema") != "meshloop/advisory-priors" or doc.get("version") != 1:
+        return False, "schema or version"
+    if set(doc) - {"schema", "version", "generated_at", "generator", "source", "priors"}:
+        return False, f"top-level fields {sorted(doc)}"
+    keys = set()
+    for entry in doc["priors"]:
+        if set(entry) != {"harness", "model_ref", "tier", "dispatch_mode", "attempts", "successes", "provenance"}:
+            return False, f"entry fields {sorted(entry)}"
+        key = (entry["harness"], entry["model_ref"], entry["tier"], entry["dispatch_mode"])
+        refs = [(r["graph_id"], r["task_id"], r["attempt_id"]) for r in entry["provenance"]]
+        if key in keys or entry["dispatch_mode"] != "subprocess" or entry["model_ref"] == "unverified":
+            return False, f"key {key}"
+        keys.add(key)
+        if len(refs) != len(set(refs)) or len(refs) != entry["attempts"]:
+            return False, f"provenance of {key}"
+        if entry["successes"] != sum(1 for r in entry["provenance"] if r["passed"] is True):
+            return False, f"successes of {key}"
+    return True, ""
+
+
+def priors_section(answer, home, repo, meshloop):
+    """#139 on the read-only fixture: learn, priors show|check, the refusals and the veto."""
+    proposals = home / ".nodecode" / "meshloop" / "priors"
+    kernel = has_priors(meshloop, repo)
+    note(f"[note] meshloop priors {'present' if kernel else 'absent'} in {meshloop}")
+
+    text = answer("/meshloop learn --graph g135 --out ../escape.json")
+    check(
+        "learn refuses a --out with a .. step before reading meshloop",
+        text.startswith("meshloop learn: ") and "has a .. step" in text and "\n" not in text,
+        text,
+    )
+    text = answer("/meshloop learn --graph g135 --out /tmp/escape.json")
+    check("learn refuses a --out outside .agent-runs/", text.startswith("meshloop learn: ") and "is outside" in text, text)
+    text = answer("/meshloop learn --force")
+    check("learn refuses an unknown flag", text.startswith("meshloop learn: takes no --force"), text)
+    for verb, line in (("accept", "/meshloop priors accept --file .agent-runs/p.json --as person-one"),
+                       ("revoke", "/meshloop priors revoke --as person-one")):
+        text = answer(line)
+        check(
+            f"/meshloop priors {verb} refuses and runs nothing",
+            text.startswith("meshloop priors: refused: this cell never") and f"meshloop priors {verb}" in text
+            and "\n" not in text,
+            text,
+        )
+    for name, form in {
+        "priors accept": '(sh "meshloop priors accept --file .agent-runs/p.json --as me")',
+        "priors revoke": '(uiop:run-program \'("meshloop" "priors" "revoke" "--as" "me"))',
+        "priors revoke, slash line": '(post "/api/gateway/slash" "{\\"line\\":\\"/meshloop priors revoke --as me\\"}")',
+    }.items():
+        text = answer(f"/meshloop hook-check {form}")
+        check(
+            f"tool veto refuses: {name}",
+            text.startswith("meshloop hook-check: refused: ERROR: refused by nodecode-meshloop")
+            and "hook on this organism's :tool chain" in text,
+            text,
+        )
+    for name, form in {
+        "priors show": '(sh "meshloop priors show --json")',
+        "priors check": '(sh "meshloop priors check --file .agent-runs/p.json --json")',
+    }.items():
+        text = answer(f"/meshloop hook-check {form}")
+        check(f"tool veto lets through: {name}", text.startswith("meshloop hook-check: passes"), text)
+
+    text = answer("/meshloop learn --graph g135")
+    if not kernel:
+        check(
+            "learn fails closed on a binary without the #139 attempt fields, in one line, writing nothing",
+            text.startswith("meshloop learn: the answer lacks data.nodes[]") and "may be older than this cell" in text
+            and "\n" not in text and not proposals.exists(),
+            text,
+        )
+        text = answer("/meshloop priors show")
+        check("priors show says unknown on a binary without priors", text.startswith("meshloop priors: promoted priors in effect: unknown"), text)
+        note("[skip] learn's proposal, priors show and priors check against #139 fields: this meshloop has no `priors' verb")
+        return
+    # The main fixture's template passes no {model_ref}: model_passed is false, so
+    # nothing counts and nothing is written.
+    check(
+        "learn: an attempt without {model_ref} is no evidence; no proposal",
+        text.startswith("meshloop learn: no attempt counts as evidence") and "model_not_passed 1" in text
+        and not proposals.exists(),
+        text,
+    )
+    text = answer("/meshloop priors show")
+    check("priors show: nothing promoted", text == "meshloop priors: promoted priors in effect: none", text)
+
+
+def priors_proposal_section(answer, organism, work, meshloop, fixture_harness):
+    """#139 with a binary that has `meshloop priors': a fixture run whose
+    template passes {model_ref}, folded into a proposal under .agent-runs/."""
+    repo = work / "priors"
+    make_fixture(repo, fixture_harness, invoke=["--model", "{model_ref}", "--prompt-file", "{prompt_file}"], graph="g139")
+    created = organism.call("POST", "/api/gateway/sessions", {"session_id": "s-PRIORS", "cwd": str(repo)})
+    check("priors session opened", "http_error" not in created, json.dumps(created))
+    if not has_priors(meshloop, repo):
+        note("[skip] the proposal end to end: this meshloop has no `priors' verb (the #139 kernel side)")
+        return
+    out = run([str(meshloop), "run", "--plan", "plan.json", "--accept-plan", "--worktree-base", "worktrees"], repo)
+    check("priors fixture run by the meshloop CLI", out.returncode == 0, out.stderr[-400:])
+    store_before = snapshot(repo)["store"]
+    text = answer("/meshloop learn --graph g139 --out .agent-runs/priors/p.json", "s-PRIORS")
+    path = repo / ".agent-runs" / "priors" / "p.json"
+    check(
+        "learn writes the proposal and lists each prior key with its counts",
+        text.startswith("meshloop learn: wrote a routing-prior proposal to ") and path.is_file()
+        and "prior fixture / fixture-model / Tier2: 1 attempt, 1 passed, 0 failed; below the kernel's floor" in text
+        and "excluded by reason: not_subprocess 0" in text
+        and f"meshloop priors accept --file {path} --as <your-name>" in text,
+        text,
+    )
+    if path.is_file():
+        ok, why = proposal_holds_v1_rules(path)
+        check("the proposal holds the v1 rules", ok, why)
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        check("the digest names the file's SHA-256", digest in text, digest)
+    check("learn wrote nothing to the meshloop store", snapshot(repo)["store"] == store_before)
+    text = answer("/meshloop learn --graph g139 --out .agent-runs/priors/p.json", "s-PRIORS")
+    check("learn refuses to overwrite a proposal", "exists; name a new file" in text, text)
+    text = answer("/meshloop priors check .agent-runs/priors/p.json", "s-PRIORS")
+    check(
+        "priors check reads the proposal and promotes nothing",
+        text.startswith("meshloop priors check: .agent-runs/priors/p.json: ") and "nothing promoted" in text,
+        text,
+    )
+    text = answer("/meshloop priors show", "s-PRIORS")
+    check("still nothing promoted after learn and check", text == "meshloop priors: promoted priors in effect: none", text)
 
 
 def drive_section(answer, organism, home, work, meshloop, fixture_harness):
@@ -867,10 +1021,14 @@ def main():
                 text.startswith("meshloop hook-check: passes") and "hook on this organism's :tool chain" in text,
                 text,
             )
+        priors_section(answer, home, repo, meshloop)
         check("no write to the repository or meshloop state", snapshot(repo) == before)
 
         drive_section(answer, organism, home, work, meshloop, Path(args.fixture_harness).resolve())
         board_section(answer, organism, home, work, meshloop, Path(args.fixture_harness).resolve())
+        write_config(home, {"binary": str(meshloop), "timeout_seconds": 30})
+        organism.restart_cell()
+        priors_proposal_section(answer, organism, work, meshloop, Path(args.fixture_harness).resolve())
 
         # Failure lines: each is one line naming the verb, never a condition.
         failures = {
