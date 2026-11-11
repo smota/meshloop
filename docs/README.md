@@ -113,6 +113,7 @@ All operations are universally accessible via terminal slash commands, stdio Mod
 - **[Architectural Rounds & Peer Sparring](engineering/architectural-rounds-and-decisions.md)** — In-depth analysis of peer sparring between Agy, Grok, and Claude, technical rejections, and test cycles.
 - **[Benchmark Specification (`SPEC-ML-BENCH-001`)](architecture/measurement-and-benchmark-spec.md)** — 28 active metrics, statistical definitions, and verification methodology.
 - **[Testing Strategy](engineering/testing.md)** — Test tiers, fault injection, and running `xtask check` and `xtask bench`.
+- **[Nodecode worker containment](engineering/nodecode-containment.md)** — The bubblewrap recipe that runs a nodecode worker confined to its worktree (#138): threat model, operator steps, evidence.
 - **[Product Strategy Brief](product/brief.md)** — Target scenarios, problem statement, and stack positioning.
 - **[Functional Requirements](product/requirements.md)** — Explicit functional requirements and non-functional constraints.
 - **[Canonical Harness Governance (`AGENTS.md`)](../AGENTS.md)** — Canonical authority and execution rules for all AI harnesses.

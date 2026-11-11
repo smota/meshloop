@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# meshloop-nodecode-sandbox: run one nodecode worker under bubblewrap (issue #138).
+#
+# Operator configuration, not a shipped default (ADR 0003). Point a
+# `[harnesses.nodecode]` entry's `executable` at this file. Design, threat model and
+# limits: docs/engineering/nodecode-containment.md.
+#
+#   meshloop-nodecode-sandbox [OPTIONS] --model MODEL_REF --prompt-file FILE
+#   meshloop-nodecode-sandbox [OPTIONS] --version
+#   meshloop-nodecode-sandbox [OPTIONS] -- NODECODE-ARGS...
+#   meshloop-nodecode-sandbox [OPTIONS] --run-command -- PROGRAM ARGS...
+#
+# The working directory is the attempt worktree (meshloop sets it). It is the only
+# host path the sandbox can write. The worker runs on a fresh nodecode home on a
+# tmpfs that disappears with the sandbox, never on the operator's ~/.nodecode.
+#
+# With --model and --prompt-file the sandbox runs one turn through `nodecode rpc` with
+# nodecode-rpc-turn.py (beside this file) and exits when the turn ends: 0 completed,
+# 1 failed, 3 rejected (unknown model, refused effort), 4 rpc broke, 5 cancelled,
+# 125 a wrapper refusal. The nodecode shell is not used: it refuses to start without a
+# terminal. `-- NODECODE-ARGS` runs nodecode itself with those arguments, for spikes.
+#
+# Options:
+#   --model MODEL_REF           PROVIDER/MODEL[:EFFORT], meshloop's {model_ref}. The
+#                               provider is required (see nodecode-rpc-turn.py).
+#   --prompt-file FILE          meshloop's {prompt_file}, inside the worktree.
+#   --raw-log FILE              with --model: append every rpc frame to FILE (inside
+#                               the worktree), for debugging. Frames hold tool output.
+#   --nodecode PATH             nodecode executable (default: `nodecode` on PATH).
+#                               Prefer a private read-only copy of a release folder
+#                               (the binary and its src/ together), not the operator's
+#                               installed `current` release.
+#   --credential-provider ID    provider id whose key the worker gets, e.g. openrouter.
+#   --credential-file PATH      file holding that one key (first line). It is bound
+#                               read-only at <home>/secrets/providers.<ID>.api_key,
+#                               nodecode's secret-file tier. Never read by this script.
+#   --models-catalog FILE       a models.dev api.json to seed the sandbox's catalog
+#                               cache with (copied in; nodecode may refresh it there).
+#                               Without it a fresh home fetches the catalog first and
+#                               the driver waits up to 60 s for it.
+#   --tmpfs-size BYTES          size cap of the sandbox home and /tmp (default 1 GiB).
+#   --git-metadata ro|none      bind the worktree's git admin and common dirs
+#                               read-only (default ro), or not at all.
+#   --version                   print nodecode's version from inside the sandbox.
+#   --run-command               run PROGRAM instead of nodecode, under the same
+#                               sandbox. For containment tests; never use it in an
+#                               invoke_args_template.
+#   --print-bwrap               print the bwrap argv (no secret is in it) and exit.
+#
+# Arguments are passed to bwrap and nodecode as an argv array: nothing here is
+# evaluated by a shell, and task text never reaches this script (meshloop passes the
+# prompt as a file path inside the worktree).
+set -euo pipefail
+
+die() {
+  printf 'meshloop-nodecode-sandbox: %s\n' "$*" >&2
+  exit 125
+}
+
+nodecode=""
+cred_provider=""
+cred_file=""
+tmpfs_size=$((1024 * 1024 * 1024))
+git_metadata="ro"
+mode="nodecode"
+model_ref=""
+prompt_file=""
+raw_log=""
+models_catalog=""
+print_only=0
+
+while (($#)); do
+  case "$1" in
+    --nodecode) (($# >= 2)) || die "--nodecode needs a path"; nodecode="$2"; shift 2 ;;
+    --credential-provider) (($# >= 2)) || die "--credential-provider needs an id"; cred_provider="$2"; shift 2 ;;
+    --credential-file) (($# >= 2)) || die "--credential-file needs a path"; cred_file="$2"; shift 2 ;;
+    --models-catalog) (($# >= 2)) || die "--models-catalog needs a path"; models_catalog="$2"; shift 2 ;;
+    --tmpfs-size) (($# >= 2)) || die "--tmpfs-size needs bytes"; tmpfs_size="$2"; shift 2 ;;
+    --git-metadata) (($# >= 2)) || die "--git-metadata needs ro or none"; git_metadata="$2"; shift 2 ;;
+    --model) (($# >= 2)) || die "--model needs a model ref"; model_ref="$2"; shift 2 ;;
+    --prompt-file) (($# >= 2)) || die "--prompt-file needs a path"; prompt_file="$2"; shift 2 ;;
+    --raw-log) (($# >= 2)) || die "--raw-log needs a path"; raw_log="$2"; shift 2 ;;
+    --version) mode="version"; shift ;;
+    --run-command) mode="command"; shift ;;
+    --print-bwrap) print_only=1; shift ;;
+    --) shift; break ;;
+    *) die "unknown option '$1' (wrapper options come before --)" ;;
+  esac
+done
+
+if [[ -n "$model_ref" || -n "$prompt_file" ]]; then
+  [[ "$mode" == "nodecode" && $# -eq 0 ]] || die "--model/--prompt-file run one turn; they take no -- arguments"
+  [[ -n "$model_ref" && -n "$prompt_file" ]] || die "--model and --prompt-file go together"
+  [[ "$model_ref" != -* ]] || die "--model must not start with '-'"
+  mode="turn"
+fi
+
+# --- platform and tools --------------------------------------------------------
+[[ "$(uname -s)" == "Linux" ]] || die "Linux (or WSL2) only"
+command -v bwrap >/dev/null 2>&1 || die "bwrap (bubblewrap) is not installed"
+[[ "$tmpfs_size" =~ ^[1-9][0-9]{0,15}$ ]] || die "--tmpfs-size must be a positive byte count"
+[[ "$git_metadata" == "ro" || "$git_metadata" == "none" ]] || die "--git-metadata must be ro or none"
+
+# --- the worktree: the one writable host path ----------------------------------
+# The version probe runs in / with no worktree. Every other mode binds the working
+# directory, which meshloop sets to the attempt worktree.
+worktree=""
+if [[ "$mode" != "version" ]]; then
+  worktree="$(pwd -P)"
+  [[ -d "$worktree" && "$worktree" == /* ]] || die "working directory is not an absolute directory"
+  [[ "$worktree" != "/" ]] || die "refusing / as the worktree"
+  op_home="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
+  for h in "${HOME:-}" "$op_home"; do
+    [[ -n "$h" ]] || continue
+    h="$(realpath -m -- "$h")"
+    [[ "$worktree" != "$h" ]] || die "refusing the operator's home as the worktree"
+    case "$h/" in "$worktree"/*) die "refusing a worktree that contains the operator's home" ;; esac
+    case "$worktree/" in "$h/.nodecode/"*) die "refusing a worktree inside the operator's nodecode home" ;; esac
+  done
+  # A turn runs only in a linked git worktree, which is what meshloop creates.
+  if [[ "$mode" == "turn" ]]; then
+    [[ -f "$worktree/.git" ]] || die "refusing a working directory that is not a linked git worktree"
+  fi
+  # ADR 0038 invariant 12: Linux or WSL on a native Linux filesystem, never /mnt/<drive>.
+  fstype="$(stat -f -c %T -- "$worktree")"
+  case "$fstype" in
+    ext2/ext3 | xfs | btrfs) ;;
+    *) die "worktree filesystem '$fstype' is not supported (ext4, xfs or btrfs; never a Windows drive)" ;;
+  esac
+fi
+
+# --- nodecode install (read-only) ----------------------------------------------
+if [[ "$mode" != "command" ]]; then
+  if [[ -z "$nodecode" ]]; then
+    nodecode="$(command -v nodecode || true)"
+    [[ -n "$nodecode" ]] || die "nodecode is not on PATH; pass --nodecode PATH"
+  fi
+  nodecode="$(realpath -e -- "$nodecode")" || die "nodecode executable not found"
+  [[ -f "$nodecode" && -x "$nodecode" ]] || die "nodecode is not an executable file"
+  release_dir="$(dirname -- "$nodecode")"
+  [[ -d "$release_dir/src" ]] || die "nodecode release has no src/ beside the binary: $release_dir"
+fi
+driver_in="/opt/meshloop/nodecode-rpc-turn.py"
+if [[ "$mode" == "turn" ]]; then
+  driver="$(dirname -- "$(realpath -e -- "${BASH_SOURCE[0]}")")/nodecode-rpc-turn.py"
+  [[ -f "$driver" ]] || die "nodecode-rpc-turn.py is missing beside this script"
+  [[ -x /usr/bin/python3 ]] || die "/usr/bin/python3 is required for the rpc turn driver"
+fi
+
+# --- credential: one provider, one file, bound read-only -------------------------
+sandbox_home="/home/worker"
+nodecode_home="$sandbox_home/.nodecode"
+cred_binds=()
+if [[ -n "$cred_provider" || -n "$cred_file" ]]; then
+  [[ -n "$cred_provider" && -n "$cred_file" ]] || die "--credential-provider and --credential-file go together"
+  [[ "$cred_provider" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "--credential-provider must be a provider id like openrouter"
+  cred_file="$(realpath -e -- "$cred_file")" || die "credential file not found"
+  [[ -f "$cred_file" && -r "$cred_file" ]] || die "credential file is not a readable regular file"
+  cred_binds=(--ro-bind "$cred_file" "$nodecode_home/secrets/providers.$cred_provider.api_key")
+fi
+
+# --- the worker home's config: self-update off ------------------------------------
+# nodecode's `update.mode` defaults to auto on an installed build (a `current` link
+# beside the release folder) and can move that link. The sandbox already hides the
+# parent folder and binds the release read-only; the worker's config also says off.
+exec {config_fd}< <(printf '%s\n' '{ "update": { "mode": "off" } }')
+config_args=(--perms 0600 --file "$config_fd" "$nodecode_home/config.jsonc")
+
+# --- models.dev catalog seed (public data, copied into the tmpfs) -----------------
+catalog_args=()
+if [[ -n "$models_catalog" ]]; then
+  [[ -f "$models_catalog" && -r "$models_catalog" ]] || die "--models-catalog is not a readable file"
+  exec {catalog_fd}<"$models_catalog"
+  catalog_args=(--file "$catalog_fd" "$sandbox_home/.cache/nodecode/models.dev/api.json")
+fi
+
+# --- git metadata of a linked worktree (read-only) -------------------------------
+# The worker can write the worktree, so its `.git` file is never handed to a git
+# process here (a redirected gitdir could carry hostile config). It is parsed by hand
+# and accepted only when the admin dir's own `gitdir` file points back at this
+# worktree. The `.git` file itself is bound read-only below, so the worker cannot
+# redirect the git commands meshloop later runs on the host in this worktree.
+resolve_from() { # $1 base dir, $2 path (absolute or relative to $1)
+  if [[ "$2" == /* ]]; then realpath -m -- "$2"; else realpath -m -- "$1/$2"; fi
+}
+git_binds=()
+if [[ -n "$worktree" && -f "$worktree/.git" ]]; then
+  git_binds=(--ro-bind "$worktree/.git" "$worktree/.git")
+fi
+if [[ -n "$worktree" && "$git_metadata" == "ro" && -f "$worktree/.git" ]]; then
+  IFS= read -r line <"$worktree/.git" || true
+  if [[ "$line" == "gitdir: "* ]]; then
+    admin="$(resolve_from "$worktree" "${line#gitdir: }")"
+    back=""
+    [[ -f "$admin/gitdir" ]] && IFS= read -r back <"$admin/gitdir" || true
+    if [[ -n "$back" && "$(resolve_from "$admin" "$back")" == "$worktree/.git" ]]; then
+      common="$admin"
+      if [[ -f "$admin/commondir" ]]; then
+        IFS= read -r rel <"$admin/commondir" || true
+        common="$(resolve_from "$admin" "$rel")"
+      fi
+      for d in "$admin" "$common"; do
+        [[ -d "$d" ]] || continue
+        case "$d/" in "$worktree"/*) continue ;; esac
+        git_binds+=(--ro-bind "$d" "$d")
+      done
+    fi
+  fi
+fi
+
+# --- the sandbox -----------------------------------------------------------------
+args=(
+  --die-with-parent
+  --new-session
+  --unshare-user --disable-userns
+  --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+  --hostname meshloop-worker
+  --cap-drop ALL
+  --clearenv
+  --setenv HOME "$sandbox_home"
+  --setenv NODECODE_HOME "$nodecode_home"
+  --setenv PATH /usr/local/bin:/usr/bin:/bin
+  --setenv TERM dumb
+  --setenv NO_COLOR 1
+  --setenv LANG C.UTF-8
+  --setenv TMPDIR /tmp
+  --setenv USER worker
+  # System files, read-only. Merged-/usr layout; /etc only what TLS, DNS and git need.
+  --ro-bind /usr /usr
+  --symlink usr/bin /bin
+  --symlink usr/sbin /sbin
+  --symlink usr/lib /lib
+  --symlink usr/lib64 /lib64
+  --ro-bind-try /etc/ssl /etc/ssl
+  --ro-bind-try /etc/ca-certificates /etc/ca-certificates
+  --ro-bind-try /etc/resolv.conf /etc/resolv.conf
+  --ro-bind-try /etc/hosts /etc/hosts
+  --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+  --ro-bind-try /etc/gai.conf /etc/gai.conf
+  --ro-bind-try /etc/host.conf /etc/host.conf
+  --ro-bind-try /etc/localtime /etc/localtime
+  --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
+  --ro-bind-try /etc/passwd /etc/passwd
+  --ro-bind-try /etc/group /etc/group
+  --proc /proc
+  --dev /dev
+  --size "$tmpfs_size" --tmpfs /tmp
+  --size "$tmpfs_size" --tmpfs "$sandbox_home"
+  --dir "$nodecode_home"
+)
+if [[ "$mode" != "command" ]]; then
+  args+=(--ro-bind "$release_dir" "$release_dir")
+fi
+if [[ "$mode" == "turn" ]]; then
+  args+=(--ro-bind "$driver" "$driver_in")
+fi
+args+=("${config_args[@]}" "${cred_binds[@]}" "${catalog_args[@]}")
+if [[ -n "$worktree" ]]; then
+  # Mount order matters: the read-only git binds go over the read-write worktree.
+  args+=(--bind "$worktree" "$worktree" "${git_binds[@]}" --chdir "$worktree")
+else
+  args+=(--chdir /)
+fi
+# Everything not mounted above is the sandbox's own root, now read-only.
+args+=(--remount-ro /)
+
+case "$mode" in
+  version)
+    if ((print_only)); then
+      cmd=("$nodecode" --version)
+    else
+      # One line for `meshloop doctor`: nodecode's version, then the containment.
+      version="$(bwrap "${args[@]}" -- "$nodecode" --version)" || die "nodecode --version failed inside the sandbox"
+      bwrap_version="$(bwrap --version 2>/dev/null || echo bubblewrap)"
+      printf '%s (contained: meshloop-nodecode-sandbox, %s)\n' "${version%%$'\n'*}" "$bwrap_version"
+      exit 0
+    fi ;;
+  turn) cmd=(/usr/bin/python3 -I "$driver_in" --nodecode "$nodecode" --model "$model_ref" --prompt-file "$prompt_file")
+    [[ -z "$raw_log" ]] || cmd+=(--raw-log "$raw_log") ;;
+  nodecode) (($#)) || die "no nodecode arguments after --"; cmd=("$nodecode" "$@") ;;
+  command) (($#)) || die "no program after --run-command --"; cmd=("$@") ;;
+esac
+
+if ((print_only)); then
+  printf '%q ' bwrap "${args[@]}" -- "${cmd[@]}"
+  printf '\n'
+  exit 0
+fi
+
+# exec keeps this process's PID, so the PID and process group meshloop owns are
+# bwrap's. bwrap with --die-with-parent and --unshare-pid takes every process in the
+# sandbox with it when it is killed (ADR 0025).
+exec bwrap "${args[@]}" -- "${cmd[@]}"

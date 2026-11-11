@@ -127,3 +127,49 @@ request with new live evidence from #152. Nodecode also needs an ADR 0038 amendm
 | Kind | Observed version range | Live evidence (#152) | Date |
 |---|---|---|---|
 | (none proven yet) | — | — | — |
+
+## Nodecode worker (#138)
+
+Nodecode is a worker harness through operator configuration only, and only under the
+containment in [nodecode-containment.md](nodecode-containment.md) (ADR 0038). That page
+holds the threat model, the operator steps and the test evidence; the example entry is
+also commented in `config/meshloop.example.toml`.
+
+### Invocation findings
+
+Spiked on 2026-11-11 against `nodecode 0.1.14+cef1be5a3`, always inside the sandbox, on
+a fresh nodecode home, with stdin not a terminal (as meshloop runs a worker).
+
+| Finding | Observed or inferred |
+|---|---|
+| `nodecode --model M --prompt-file F`, `--model M -- PROMPT`, `--model M @FILE` and a prompt piped on stdin all exit at once with code 2 and `nodecode needs a terminal (no controlling tty); run it in one.` The owner's first choice (the shell) is therefore unusable for a worker | observed |
+| `nodecode rpc --ephemeral` with one `start_turn` line on stdin and stdin then closed exits 0 after the replay and organism frames, without running a turn | observed |
+| Keeping stdin open until the turn ends works: frames arrive as JSON lines; the turn ends with a `session_stream_event` whose event is `turn.completed`, `turn.failed` or `turn.cancelled`; assistant text is in `turn.assistant_message_completed`, spend in `turn.usage`. A refused `start_turn` answers with `gateway_turn_command_result` status `rejected` and a code | observed |
+| `start_turn`'s `model` takes the same `[PROVIDER/]MODEL[:EFFORT]` spec as `--model`, but nodecode splits off the `PROVIDER/` prefix only for a provider whose key comes from config, auth.json, OAuth or the environment (`ridden-provider-p`), not from a secret file. Unsplit, a spec goes whole to the default lane, OpenCode Zen, as a model id: `openai-completions/deepseek-v4-flash-free` with no key did, and failed with HTTP 400. So the driver names the provider separately and `model_ref` must carry one | 400 observed; the secret-file exclusion is from source (`gateway/gateway.lisp`, `target-from-spec`, `ridden-provider-p`) |
+| A fresh home refuses a catalog provider with `unknown_provider ... the models.dev list that could name it has not loaded yet` until its first catalog fetch lands (about 1 s here). The driver retries for up to 60 s; `--models-catalog` seeds the cache | observed |
+| `nodecode rpc` starts its organism as `setsid -w nodecode serve --store /tmp/nodecode-ephemeral-...`, and the shell tool runs commands under `setsid -w bash -c`. Both leave meshloop's process group, which is why the sandbox's PID namespace, not the group kill alone, is what ends them | observed (process list during the cancel test) |
+| The keyless default (OpenCode Zen free tier) answered HTTP 429 "Free usage limit reached" to nodecode; nodecode retries a 429 with 60 s delays, so such a turn runs until meshloop's timeout | observed |
+| `update.mode` defaults to `auto` on an installed build (a `current` link beside the release folder) and can move that link | source (`organism/update.lisp`); not triggered here |
+
+### Exit codes of the worker (wrapper and driver)
+
+| Code | Meaning |
+|---|---|
+| 0 | `turn.completed` |
+| 1 | `turn.failed` (for example a provider error after nodecode's own retries) |
+| 2 | driver usage error: `model_ref` without a provider, unreadable or empty prompt file |
+| 3 | `start_turn` rejected (unknown provider or model, refused effort) |
+| 4 | `nodecode rpc` ended or broke before the turn ended |
+| 5 | `turn.cancelled` |
+| 125 | wrapper refusal (no bwrap, unsupported filesystem, operator home as worktree, not a linked worktree, bad option) |
+
+Meshloop treats any non-zero exit as a failed attempt. The attempt's stdout evidence holds
+the assistant's messages, one `nodecode-turn: usage PROVIDER/MODEL input N output N
+cost_usd X` line per model call, and a final `nodecode-turn: <outcome>` line.
+
+The probe goes through the wrapper (`version_args = ["--version"]`, plus `--nodecode`
+when the operator names a private copy). It runs `nodecode --version` inside the sandbox
+and reports one line that also names the containment, so `meshloop doctor --json` shows,
+for example, `nodecode 0.1.14+cef1be5a3 (contained: meshloop-nodecode-sandbox,
+bubblewrap 0.11.1)`. A probe without bwrap or user namespaces fails, and the harness is
+reported unsupported.
