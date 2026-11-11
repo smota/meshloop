@@ -238,22 +238,26 @@ fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
 /// On Windows, executes `taskkill /F /T /PID <pid>` to terminate child compilers,
 /// interpreters, and test runners that would otherwise become orphaned processes.
 /// On Unix, sends SIGKILL to the process group.
-/// Whether any process is left in process group `pgid` (`kill -s 0 -- -pgid`).
-/// `None` when that cannot be determined.
+/// Whether any process is left in process group `pgid`: `kill(-pgid, 0)`. Only
+/// `ESRCH` means empty; `EPERM` means a member exists; anything else is `None`
+/// (undetermined), which callers treat as not proven empty.
+/// Unsafe accepted by the ADR 0025 amendment of 2026-11-11 (#180).
 #[cfg(not(windows))]
+#[allow(unsafe_code)]
 pub fn process_group_alive(pgid: u32) -> Option<bool> {
-    use std::process::Stdio;
-    if pgid == 0 {
-        return None;
+    let group = i32::try_from(pgid).ok().filter(|group| *group > 1)?;
+    // SAFETY: kill(2) with signal 0 sends nothing; it only checks that some process in
+    // group `group` exists and may be signalled. A negative pid names a process group.
+    // No memory is shared with the callee.
+    let result = unsafe { libc::kill(-group, 0) };
+    if result == 0 {
+        return Some(true);
     }
-    Command::new("kill")
-        .args(["-s", "0", "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .map(|status| status.success())
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Some(false),
+        Some(libc::EPERM) => Some(true),
+        _ => None,
+    }
 }
 
 pub fn kill_process_tree(pid: u32) {

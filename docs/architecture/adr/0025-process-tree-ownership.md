@@ -95,3 +95,17 @@ Constraints:
 **Decision.** Stdin stays null. Stdout and stderr are a log file this function opens (`.meshloop/runs/<graph_id>/driver.log`). Those handles are not the caller's pipes. On Windows, `spawn_detached` still clears `HANDLE_FLAG_INHERIT` on the caller's three standard handles for the duration of the spawn. That unsafe block is unchanged.
 
 **Verification.** `detached_spawn_does_not_hold_the_callers_output_pipe` still returns while a detached sleeper is alive. `detached_spawn_writes_stdout_and_stderr_to_the_log_file` checks both streams land in the log and not in the caller's captured output.
+
+## Amendment 2026-11-11: descendants are ended after a normal exit
+
+- Status: Accepted
+- Approval evidence: decided by the coordinator under delegated repository-owner authority on 2026-11-11, in the security review of issue [#180](https://github.com/smota/meshloop/issues/180) (round 3).
+- Executor: Claude Code (Opus 5.5)
+
+**Context.** Process trees were ended only on timeout, cancellation or a capture fault. After a normal exit, a POSIX worker's background processes kept running in its process group, and could change the worktree while Meshloop ran git there with the operator's authority (#180: a nested repository planted after the checks).
+
+**Decision.** When a worker's direct child exits normally, `CliHarness` ends its whole tree before it collects the outcome, so before any host-side git runs in the worktree. On Windows the job object is terminated and observed empty. On POSIX the process group is killed and polled with `kill(-pgid, 0)` until it returns `ESRCH`; only `ESRCH` counts as empty. This adds one `unsafe` call (`libc::kill` with signal 0) to `meshloop-adapters::process::process_group_alive`, with a `SAFETY` comment. If the tree is not observed empty within 5 s, the attempt fails with the new reason `worker-process-tree-survived` and no host-side git runs in its worktree. Nothing new is written to the ledger.
+
+**Consequences and limits.** On POSIX a process that left the group (`setsid`, daemonising) is not seen and is not ended; Meshloop's index checks before and after staging, staging that excludes gitlinks, and status/diff with `--ignore-submodules=all` remain the guard against it (see `docs/engineering/harnesses.md#host-side-git`). In a container whose PID 1 does not reap orphans, zombies keep the group non-empty and attempts fail with `worker-process-tree-survived`. Native dispatch ([ADR 0039](0039-native-sub-agent-dispatch.md)) has no process tree Meshloop owns, so for native workers those index and staging checks are the only guard.
+
+**Verification.** `crates/meshloop-cli/tests/host_git_hardening.rs::background_process_left_by_the_worker_is_ended_before_verification`: a worker leaves a process in its group writing a marker every 100 ms; without this change markers keep appearing after `run` returns, with it none do.

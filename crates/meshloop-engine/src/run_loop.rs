@@ -2820,12 +2820,20 @@ impl<'a> RunLoop<'a> {
         else {
             return self.fail_orphaned_verification(graph_id, node.id, Some(attempt.attempt_id));
         };
-        let base = attempt
+        // The attempt's recorded base, else the run's base revision: gitlinks are
+        // never integrated (the `gitlinks` check), so the run base has the same ones.
+        let base = match attempt
             .outcome
             .as_deref()
             .and_then(|outcome| outcome.strip_prefix("base:"))
-            .unwrap_or("")
-            .to_string();
+        {
+            Some(base) => base.to_string(),
+            None => self
+                .store
+                .load_run(graph_id)?
+                .map(|run| run.run_base)
+                .unwrap_or_default(),
+        };
         let commit = self.workspace.commit_all(
             &worktree,
             &base,

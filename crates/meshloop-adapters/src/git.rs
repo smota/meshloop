@@ -135,6 +135,20 @@ impl GitWorktreeAdapter {
         Ok(())
     }
 
+    /// `add -A` of the worktree's content, excluding every gitlink in the index.
+    /// Gitlinks carry no content, and `add` would otherwise inspect a populated one
+    /// by running git inside it, under that repository's config (#180).
+    fn stage_all(&self, worktree: &Path) -> Result<(), GitError> {
+        let index = self.run_in(worktree, &["ls-files", "--stage", "-z"])?;
+        let excludes: Vec<String> = index_gitlinks(&index)
+            .into_iter()
+            .map(|(path, _)| format!(":(exclude,top,literal){path}"))
+            .collect();
+        let mut args = vec!["add", "-A", "--", "."];
+        args.extend(excludes.iter().map(String::as_str));
+        self.run_in(worktree, &args).map(|_| ())
+    }
+
     fn verified_admin(&self, worktree: &Path) -> Result<PathBuf, GitError> {
         let common = self.common_dir()?.to_path_buf();
         crate::host_git::verify_worktree_link(worktree, &common).map_err(GitError::LinkModified)
@@ -433,6 +447,18 @@ fn nested_git_entry(worktree: &Path) -> Option<(PathBuf, &'static str)> {
     None
 }
 
+/// A git failure while reading or staging the index (for example `unable to stat`
+/// when the worktree changes underneath) refuses the attempt; it never fails the run.
+fn refuse_index_fault(error: GitError) -> GitError {
+    match error {
+        GitError::CommandFailed { .. } => GitError::NestedGit {
+            path: PathBuf::from("."),
+            reason: "staging failed while the worktree changed",
+        },
+        other => other,
+    }
+}
+
 /// Gitlink (mode 160000) entries of `ls-files --stage -z` output, as `(path, object)`.
 fn index_gitlinks(listing: &str) -> Vec<(String, String)> {
     listing
@@ -607,12 +633,13 @@ impl WorkspacePort for GitWorktreeAdapter {
             return Err(GitError::NestedGit { path, reason }.into());
         }
         let allowed = self.base_gitlinks(worktree, base);
-        self.check_index_gitlinks(worktree, &allowed)?;
-        self.run_in(worktree, &["add", "-A"])
-            .map_err(WorkspaceError::from)?;
+        self.check_index_gitlinks(worktree, &allowed)
+            .map_err(refuse_index_fault)?;
+        self.stage_all(worktree).map_err(refuse_index_fault)?;
         // Anything that appeared between the walk and `add -A` (a process outside the
         // worker's tree) and was staged as a gitlink is refused, terminally.
-        self.check_index_gitlinks(worktree, &allowed)?;
+        self.check_index_gitlinks(worktree, &allowed)
+            .map_err(refuse_index_fault)?;
         let porcelain = self.status_porcelain(worktree)?;
         if porcelain.trim().is_empty() {
             return self.head(worktree);
@@ -1039,6 +1066,91 @@ mod tests {
         fs::rename(wt.join(".GIT"), wt.join(".git")).unwrap();
         WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
         fs::remove_dir_all(&repo).ok();
+    }
+
+    /// #180 round 4: the base has a submodule gitlink and its directory holds a
+    /// populated repository at the recorded commit (as a process outside the worker's
+    /// tree could arrange after the checks). Staging must not look inside it, so the
+    /// nested repository's own filter never runs.
+    #[cfg(unix)]
+    #[test]
+    fn staging_never_looks_inside_a_base_gitlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = disposable_repo();
+        let parent = repo.parent().unwrap().to_path_buf();
+        let tag = uuid_ish();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = StdCommand::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .guarded_output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let inner = parent.join(format!("inner-{tag}"));
+        fs::create_dir_all(&inner).unwrap();
+        git(&inner, &["init", "-q"]);
+        fs::write(inner.join("f"), "one\n").unwrap();
+        git(&inner, &["add", "f"]);
+        git(&inner, &["commit", "-q", "-m", "inner"]);
+        let inner_head = git(&inner, &["rev-parse", "HEAD"]);
+        git(
+            &repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{inner_head},sub"),
+            ],
+        );
+        git(&repo, &["commit", "-q", "-m", "gitlink"]);
+        let adapter = GitWorktreeAdapter::new(repo.clone());
+        let base = adapter.current_head().unwrap();
+        let wt = parent.join(format!("wt-sub-{tag}"));
+        adapter
+            .add_worktree_from(&wt, "meshloop/sub", &base)
+            .unwrap();
+        // Populated at the recorded commit, with a filter its own config defines.
+        fs::remove_dir_all(wt.join("sub")).ok();
+        git(&wt, &["clone", "-q", inner.to_str().unwrap(), "sub"]);
+        let marker = parent.join(format!("marker-{tag}"));
+        let trigger = parent.join(format!("trigger-{tag}.sh"));
+        fs::write(
+            &trigger,
+            format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&trigger, fs::Permissions::from_mode(0o755)).unwrap();
+        let sub = wt.join("sub");
+        git(
+            &sub,
+            &["config", "filter.marker.clean", trigger.to_str().unwrap()],
+        );
+        fs::write(sub.join(".gitattributes"), "* filter=marker\n").unwrap();
+        fs::write(sub.join("f"), "two\n").unwrap();
+        fs::write(wt.join("work.txt"), "work\n").unwrap();
+
+        adapter.stage_all(&wt).unwrap();
+        assert!(
+            !marker.exists(),
+            "staging ran the nested repository's filter"
+        );
+        let staged = adapter
+            .run_in(&wt, &["diff", "--cached", "--name-only"])
+            .unwrap();
+        assert!(staged.lines().any(|l| l == "work.txt"), "{staged}");
+
+        fs::remove_dir_all(&sub).unwrap();
+        WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
+        for path in [&inner, &repo] {
+            fs::remove_dir_all(path).ok();
+        }
+        fs::remove_file(&trigger).ok();
+        fs::remove_file(&marker).ok();
     }
 
     #[test]

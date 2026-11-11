@@ -170,8 +170,13 @@ Neutralised for every host-side git process:
   entry named `.git` in any case, or the NTFS short name `git~1`, below the top level
   refuses the attempt. It then reads the index (`ls-files --stage`, no helper process)
   and refuses any gitlink (mode 160000) that is not in the attempt base or whose
-  `<path>/.git` exists. After `add -A` it reads the index again and refuses a gitlink
-  staged in between. Every refusal is `WorkspaceError::NestedGit { path, reason }`, a
+  `<path>/.git` exists. Staging is `add -A -- . ':(exclude,top,literal)<gitlink>'`
+  with one exclude per gitlink in the index: gitlinks carry no content, and `add`
+  would otherwise run git inside a populated one under that repository's config.
+  After staging it reads the index again and refuses a gitlink staged in between. A
+  git failure while reading or staging the index (the worktree changing underneath)
+  also refuses the attempt, never the run. Resumed verification uses the attempt's
+  recorded base, else the run's base revision. Every refusal is `WorkspaceError::NestedGit { path, reason }`, a
   failing `nested-git` evidence row naming the worktree-relative path, and a failed
   attempt with no repair round. An entry that vanishes during the walk is skipped; any
   other walk error refuses the attempt rather than aborting the run. This includes a
@@ -181,7 +186,8 @@ Neutralised for every host-side git process:
   exits normally, Meshloop ends every process left in its tree before collecting the
   outcome, so nothing the worker started can race host-side git. On Windows it
   terminates the job object and observes it empty; on Unix it kills the process group
-  and polls (`kill -s 0`) until no member is left. If the tree is not observed empty
+  and polls `kill(-pgid, 0)` until it reports `ESRCH` (ADR 0025, amendment of
+  2026-11-11). If the tree is not observed empty
   within 5 s the attempt fails (`worker-process-tree-survived`) and no host-side git
   runs in its worktree.
 - **Inherited environment** that would redirect git or name a program is removed:
@@ -227,8 +233,10 @@ Not neutralised, by design or for now:
   is pinned to the checked admin dir. Processes in the worker's process group or job
   are ended before verification (above). A process that left the group on Unix
   (`setsid`, `daemon`) or was started outside the job is not seen and could still
-  change the worktree during that window; a gitlink it stages is refused by the
-  post-`add` index check, and status/diff never recurse into submodules. In a container
+  change the worktree during that window; staging excludes every gitlink, a gitlink
+  it stages is refused by the post-`add` index check, and status/diff never recurse
+  into submodules. Native dispatch (ADR 0039) has no process tree, so for native
+  workers these checks are the only guard. In a container
   whose PID 1 does not reap orphans, zombies keep the group "alive" and attempts fail
   with `worker-process-tree-survived`.
 - `xtask` and test helpers run plain git on fixture repositories and are not host-side
