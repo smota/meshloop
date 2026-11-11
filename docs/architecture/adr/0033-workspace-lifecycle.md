@@ -230,7 +230,9 @@ Windows evidence comes from the CI `windows-latest` job; it was not run locally.
 - Decision: the architect decision recorded in
   [#196](https://github.com/smota/meshloop/issues/196), found by the 0.3.0 release
   candidate dogfood run. Release-blocking for 0.3.0.
-- Builder: Claude Code (Claude Opus 5.5). No independent review is claimed here.
+- Builder: Claude Code (Claude Opus 5.5). A review requested changes (gitlink
+  content, links under ignored paths, attempt-only scope, walk bound, cache docs);
+  this text describes the revised implementation. No approval is claimed.
 
 Problem: a check reused the `target/` the worker had built on the host, and ignored
 files are not in the reviewed diff, so a worker could leave prebuilt output that makes
@@ -252,8 +254,11 @@ Decided:
    (`status-too-large`, `status-unreadable`), never `dirty-tracked`.
 
 Implementation (builder: Claude Code, Claude Opus 5.5): `WorkspacePort::clean_ignored`
-runs `git clean -f -d -X -q -- .` after the worktree link and nested-repository checks
-pass, and records counts and bytes only (`clean-ignored` evidence). A failed removal
+runs only in `<root>/<graph>/task-<n>-attempt-<m>`, after the worktree link and
+nested-repository checks pass; it removes every link among the ignored entries as a
+link, then runs `git clean -f -d -X -q -- .`, and records counts and bytes only
+(`clean-ignored` evidence). Content in an unpopulated gitlink directory, which git
+does not see, refuses the attempt before staging. A failed removal
 before a check fails that check closed. Cleanup parses `git status` as it streams, up
 to 256 MiB. Details and consequences:
 [Verification runs worker-written code](../../engineering/harnesses.md#verification-runs-worker-written-code-181).

@@ -139,6 +139,12 @@ impl GitWorktreeAdapter {
                     reason: "populated gitlink",
                 });
             }
+            if !unpopulated(&worktree.join(&path)) {
+                return Err(GitError::NestedGit {
+                    path: rel,
+                    reason: UNPOPULATED_CONTENT,
+                });
+            }
         }
         Ok(())
     }
@@ -455,6 +461,39 @@ fn nested_git_entry(worktree: &Path) -> Option<(PathBuf, &'static str)> {
     None
 }
 
+/// Reason of anything at an index gitlink's path other than an empty directory.
+const UNPOPULATED_CONTENT: &str = "content in an unpopulated gitlink";
+
+/// True when an index gitlink's path is absent or an empty real directory, as
+/// `worktree add` leaves an uninitialised submodule. Status, `add` and `clean` ignore
+/// what is inside a gitlink's directory, so content there (or a file or link in its
+/// place) would reach a check without being reviewed. Unreadable counts as content.
+fn unpopulated(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() && !reparse_point(&meta) => {
+            std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+        }
+        Ok(_) => false,
+    }
+}
+
+/// A Windows reparse point (junction, symlink, mount point or other); never on Unix,
+/// where `FileType::is_symlink` covers links.
+fn reparse_point(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 /// Reason of a `.git` entry found below the worktree's top level.
 const NESTED_ENTRY: &str = "nested .git entry";
 
@@ -469,9 +508,30 @@ const LIST_IGNORED: [&str; 6] = [
     "--directory",
 ];
 
-/// Bound of the walk that measures what a clean removes. Beyond it the byte count is a
-/// lower bound (`bytes_partial`); the removal itself is not bounded by it.
-const MEASURE_ENTRIES: usize = 1_000_000;
+/// Bound of the walk over a worktree's ignored entries before `git clean`. Past it the
+/// clean is refused (fail closed), never done on a tree that was not fully walked.
+const IGNORED_WALK_ENTRIES: usize = 5_000_000;
+
+/// True when `worktree` is `<attempt_root>/<graph>/task-<n>-attempt-<m>`, compared on
+/// canonical paths, the run loop's attempt layout (#142). Anything unresolvable is not.
+fn attempt_worktree(worktree: &Path, attempt_root: &Path) -> bool {
+    let (Ok(worktree), Ok(root)) = (
+        std::fs::canonicalize(worktree),
+        std::fs::canonicalize(attempt_root),
+    ) else {
+        return false;
+    };
+    let leaf = worktree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let numbered = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let attempt_leaf = leaf
+        .strip_prefix("task-")
+        .and_then(|rest| rest.split_once("-attempt-"))
+        .is_some_and(|(task, attempt)| numbered(task) && numbered(attempt));
+    attempt_leaf && worktree.parent().and_then(Path::parent) == Some(root.as_path())
+}
 
 /// Worktree-relative paths of `ls-files -z` output, trailing `/` dropped. `None` when
 /// any record is absolute or climbs out with `..`: git never lists such a path, so
@@ -496,30 +556,83 @@ fn ignored_entries(listing: &[u8]) -> Option<Vec<PathBuf>> {
     Some(entries)
 }
 
-/// Bytes in `entries` below `worktree`, without following links or junctions:
-/// a link counts as its own size. Entries that vanish are skipped.
-fn measure(worktree: &Path, entries: &[PathBuf]) -> (u64, bool) {
-    let mut bytes = 0u64;
-    let mut seen = 0usize;
-    let mut stack: Vec<PathBuf> = entries.iter().map(|entry| worktree.join(entry)).collect();
-    while let Some(path) = stack.pop() {
-        seen += 1;
-        if seen > MEASURE_ENTRIES {
-            return (bytes, true);
+/// State of [`unlink_and_measure`].
+struct IgnoredWalk {
+    bytes: u64,
+    seen: usize,
+    /// One open directory iterator per level: memory is bounded by depth, not by how
+    /// many entries a directory holds.
+    stack: Vec<std::fs::ReadDir>,
+}
+
+impl IgnoredWalk {
+    fn visit(&mut self, path: &Path) -> Result<(), &'static str> {
+        self.seen += 1;
+        if self.seen > IGNORED_WALK_ENTRIES {
+            return Err("too many ignored entries");
         }
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("ignored entry unreadable"),
         };
-        if !meta.is_dir() {
-            bytes = bytes.saturating_add(meta.len());
-            continue;
+        self.bytes = self.bytes.saturating_add(meta.len());
+        if meta.file_type().is_symlink() || reparse_point(&meta) {
+            return remove_link(path, &meta).map_err(|_| "ignored link not removed");
         }
-        let Ok(children) = std::fs::read_dir(&path) else {
-            continue;
-        };
-        stack.extend(children.flatten().map(|child| child.path()));
+        if meta.is_dir() {
+            let entries = std::fs::read_dir(path).map_err(|_| "ignored directory unreadable")?;
+            self.stack.push(entries);
+        }
+        Ok(())
     }
-    (bytes, false)
+}
+
+/// Walks the ignored `entries` below `worktree` without following links, sums their
+/// bytes (a link counts as itself), and removes every symlink, junction or other
+/// reparse point among them: the link itself, never what it points at. `git clean`
+/// then meets no link at all, so it cannot traverse one whatever its own rules are
+/// (#196). Any entry that cannot be read or removed, or a walk past
+/// [`IGNORED_WALK_ENTRIES`], refuses the clean. Entries that vanish are skipped.
+fn unlink_and_measure(worktree: &Path, entries: &[PathBuf]) -> Result<u64, &'static str> {
+    let mut walk = IgnoredWalk {
+        bytes: 0,
+        seen: 0,
+        stack: Vec::new(),
+    };
+    for entry in entries {
+        walk.visit(&worktree.join(entry))?;
+        loop {
+            let next = match walk.stack.last_mut() {
+                None => break,
+                Some(dir) => dir.next(),
+            };
+            match next {
+                None => {
+                    walk.stack.pop();
+                }
+                Some(Ok(child)) => walk.visit(&child.path())?,
+                Some(Err(_)) => return Err("ignored directory unreadable"),
+            }
+        }
+    }
+    Ok(walk.bytes)
+}
+
+/// Removes the link or reparse point at `path` itself. A Windows directory link or
+/// junction is removed with `remove_dir`, which does not touch its target.
+fn remove_link(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return std::fs::remove_dir(path);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = meta;
+    std::fs::remove_file(path)
 }
 
 /// A git failure while reading or staging the index (for example `unable to stat`
@@ -737,14 +850,19 @@ impl WorkspacePort for GitWorktreeAdapter {
         }
     }
 
-    fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError> {
-        // Only a linked worktree is cleaned: never the operator's checkout. The link is
-        // verified first (as for `commit_all`), then any nested `.git` below the top
-        // level refuses the clean before git runs, so `clean` never meets a nested
-        // repository or a populated gitlink (#180, #196).
-        if self.is_repo_root(worktree) {
+    fn clean_ignored(
+        &self,
+        worktree: &Path,
+        attempt_root: &Path,
+    ) -> Result<IgnoredClean, WorkspaceError> {
+        // Only a run-loop attempt worktree is cleaned: never the operator's checkout,
+        // an integrate or a deliverable worktree. The link is verified next (as for
+        // `commit_all`), then any nested `.git` below the top level refuses the clean
+        // before git runs, so `clean` never meets a nested repository or a populated
+        // gitlink (#180, #196).
+        if self.is_repo_root(worktree) || !attempt_worktree(worktree, attempt_root) {
             return Err(WorkspaceError::Io(
-                "refused: ignored files are never removed from the repository checkout".into(),
+                "refused: ignored files are removed only from an attempt worktree".into(),
             ));
         }
         self.verified_admin(worktree)?;
@@ -774,18 +892,18 @@ impl WorkspacePort for GitWorktreeAdapter {
         if entries.is_empty() {
             return Ok(IgnoredClean::default());
         }
-        let (bytes, bytes_partial) = measure(worktree, &entries);
+        let bytes = unlink_and_measure(worktree, &entries)
+            .map_err(|reason| WorkspaceError::Io(format!("refused: {reason}")))?;
         // `-X`: ignored entries only; `-d`: ignored directories too; a single `-f`,
         // so a nested repository would be skipped, never removed. No `-e`: under `-X`
-        // an extra pattern would widen what is removed. Links are removed, never
-        // followed. The pathspec keeps git at this worktree's top level.
+        // an extra pattern would widen what is removed. Every link among the ignored
+        // entries is already gone. The pathspec keeps git at this worktree's top level.
         self.run_in(worktree, &["clean", "-f", "-d", "-X", "-q", "--", "."])
             .map_err(WorkspaceError::from)?;
         let remaining = list(self)?.len() as u64;
         Ok(IgnoredClean {
             entries: (entries.len() as u64).saturating_sub(remaining),
             bytes,
-            bytes_partial,
             remaining,
         })
     }
@@ -1315,9 +1433,10 @@ mod tests {
         fs::remove_dir_all(&repo).ok();
     }
 
-    /// A worktree of a fresh repository whose `.gitignore` ignores `target/` and
-    /// `*.log`, committed on the base so the worktree has it.
-    fn ignoring_worktree(tag: &str) -> (PathBuf, PathBuf, GitWorktreeAdapter, String) {
+    /// An attempt worktree (`<root>/g/task-1-attempt-1`) of a fresh repository whose
+    /// `.gitignore` ignores `target/`, `*.log` and `link`, committed on the base.
+    /// Returns `(repo, worktree, adapter, base, attempt root)`.
+    fn ignoring_worktree(tag: &str) -> (PathBuf, PathBuf, GitWorktreeAdapter, String, PathBuf) {
         let repo = disposable_repo();
         fs::write(repo.join(".gitignore"), "target/\n*.log\nlink\n").unwrap();
         for args in [
@@ -1332,14 +1451,16 @@ mod tests {
         }
         let adapter = GitWorktreeAdapter::new(repo.clone());
         let head = adapter.current_head().unwrap();
-        let wt = repo
+        let root = repo
             .parent()
             .unwrap()
-            .join(format!("wt-clean-{tag}-{}", uuid_ish()));
+            .join(format!("root-clean-{tag}-{}", uuid_ish()));
+        fs::create_dir_all(root.join("g")).unwrap();
+        let wt = root.join("g").join("task-1-attempt-1");
         adapter
             .add_worktree_from(&wt, &format!("meshloop/clean-{tag}"), &head)
             .unwrap();
-        (repo, wt, adapter, head)
+        (repo, wt, adapter, head, root)
     }
 
     /// #196: only ignored entries go; tracked files (even ones an ignore rule matches),
@@ -1347,7 +1468,7 @@ mod tests {
     /// sizes are reported, and a second clean finds nothing.
     #[test]
     fn clean_ignored_removes_only_ignored_entries_and_never_follows_links() {
-        let (repo, wt, adapter, head) = ignoring_worktree("only");
+        let (repo, wt, adapter, head, root) = ignoring_worktree("only");
         // A tracked file an ignore rule matches (force-added): never removed.
         fs::write(wt.join("kept.log"), "tracked log").unwrap();
         StdCommand::new("git")
@@ -1372,12 +1493,26 @@ mod tests {
             std::os::unix::fs::symlink(&outside, wt.join("target/escape")).unwrap();
             std::os::unix::fs::symlink(&outside, wt.join("link")).unwrap();
         }
+        #[cfg(windows)]
+        {
+            // A junction is a directory reparse point: removed, never followed.
+            for junction in [wt.join("target/escape"), wt.join("link")] {
+                let made = StdCommand::new("cmd")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(&junction)
+                    .arg(&outside)
+                    .guarded_output()
+                    .unwrap();
+                assert!(made.status.success(), "{made:?}");
+            }
+        }
 
-        let report = adapter.clean_ignored(&wt).unwrap();
+        let report = adapter.clean_ignored(&wt, &root).unwrap();
         assert_eq!(report.remaining, 0, "{report:?}");
         assert!(report.entries >= 2, "{report:?}");
         assert!(report.bytes >= 1005, "{report:?}");
-        assert!(!report.bytes_partial);
         assert!(!wt.join("target").exists());
         assert!(!wt.join("build.log").exists());
         assert!(fs::symlink_metadata(wt.join("link")).is_err());
@@ -1394,10 +1529,14 @@ mod tests {
             fs::read_to_string(outside.join("precious.txt")).unwrap(),
             "operator bytes"
         );
-        assert_eq!(adapter.clean_ignored(&wt).unwrap(), IgnoredClean::default());
+        assert_eq!(
+            adapter.clean_ignored(&wt, &root).unwrap(),
+            IgnoredClean::default()
+        );
 
         WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
         fs::remove_dir_all(&outside).ok();
+        fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&repo).ok();
     }
 
@@ -1405,23 +1544,40 @@ mod tests {
     /// link was modified, nor one holding a nested repository: nothing is removed.
     #[test]
     fn clean_ignored_refuses_the_checkout_a_modified_link_and_a_nested_repository() {
-        let (repo, wt, adapter, _head) = ignoring_worktree("refuse");
+        let (repo, wt, adapter, head, root) = ignoring_worktree("refuse");
         fs::create_dir_all(repo.join("target")).unwrap();
         fs::write(repo.join("target/operator-cache"), "cache").unwrap();
-        assert!(adapter.clean_ignored(&repo).is_err());
+        assert!(adapter.clean_ignored(&repo, &root).is_err());
         assert!(repo.join("target/operator-cache").is_file());
+        // Integrate and deliverable worktrees of the same run, and an attempt worktree
+        // under another root, are not attempt worktrees of this root.
+        for (leaf, branch) in [
+            ("integrate", "meshloop/g/integrate"),
+            ("integrate-v1", "meshloop/g/deliver"),
+        ] {
+            let other = root.join("g").join(leaf);
+            adapter.add_worktree_from(&other, branch, &head).unwrap();
+            fs::create_dir_all(other.join("target")).unwrap();
+            fs::write(other.join("target/out.bin"), "built").unwrap();
+            assert!(adapter.clean_ignored(&other, &root).is_err(), "{leaf}");
+            assert!(other.join("target/out.bin").is_file(), "{leaf}");
+            WorkspacePort::remove_worktree(&adapter, &other).ok();
+            fs::remove_dir_all(&other).ok();
+        }
+        assert!(adapter.clean_ignored(&wt, &root.join("g")).is_err());
+        assert!(adapter.clean_ignored(&wt, &repo).is_err());
 
         fs::create_dir_all(wt.join("target/inner/.git")).unwrap();
         fs::write(wt.join("target/inner/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
         fs::write(wt.join("target/out.bin"), "built").unwrap();
-        let err = adapter.clean_ignored(&wt).unwrap_err();
+        let err = adapter.clean_ignored(&wt, &root).unwrap_err();
         assert!(matches!(err, WorkspaceError::NestedGit { .. }), "{err:?}");
         assert!(wt.join("target/out.bin").is_file());
         fs::remove_dir_all(wt.join("target/inner")).unwrap();
 
         let original = fs::read_to_string(wt.join(".git")).unwrap();
         fs::write(wt.join(".git"), "not a link\n").unwrap();
-        let err = adapter.clean_ignored(&wt).unwrap_err();
+        let err = adapter.clean_ignored(&wt, &root).unwrap_err();
         assert!(
             matches!(err, WorkspaceError::GitLinkModified { .. }),
             "{err:?}"
@@ -1429,10 +1585,96 @@ mod tests {
         assert!(wt.join("target/out.bin").is_file());
         fs::write(wt.join(".git"), original).unwrap();
 
-        assert_eq!(adapter.clean_ignored(&wt).unwrap().remaining, 0);
+        assert_eq!(adapter.clean_ignored(&wt, &root).unwrap().remaining, 0);
         assert!(!wt.join("target").exists());
         WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
+        fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Review of #196: a base gitlink's directory is empty after `worktree add`. Content
+    /// written there is invisible to status, `add` and `clean`, so it would reach the
+    /// check unreviewed; it refuses the attempt before staging, as does a file in its
+    /// place.
+    #[test]
+    fn content_in_an_unpopulated_gitlink_is_refused() {
+        let repo = disposable_repo();
+        let adapter = GitWorktreeAdapter::new(repo.clone());
+        let seed = adapter.current_head().unwrap();
+        for args in [
+            vec![
+                "update-index".to_string(),
+                "--add".into(),
+                "--cacheinfo".into(),
+                format!("160000,{seed},sub"),
+            ],
+            vec!["commit".into(), "-q".into(), "-m".into(), "gitlink".into()],
+        ] {
+            let out = StdCommand::new("git")
+                .current_dir(&repo)
+                .args(&args)
+                .guarded_output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        let base = adapter.current_head().unwrap();
+        let wt = repo
+            .parent()
+            .unwrap()
+            .join(format!("wt-unpopulated-{}", uuid_ish()));
+        adapter
+            .add_worktree_from(&wt, "meshloop/unpopulated", &base)
+            .unwrap();
+        assert!(wt.join("sub").is_dir());
+        fs::write(wt.join("work.txt"), "work\n").unwrap();
+        // An empty gitlink directory, as `worktree add` leaves it, is fine.
+        let first = adapter.commit_all(&wt, &base, "work").unwrap();
+        assert_ne!(first, base);
+
+        fs::write(wt.join("sub").join("payload.sh"), "exit 0\n").unwrap();
+        let refused = adapter.commit_all(&wt, &base, "payload");
+        assert!(
+            matches!(&refused, Err(WorkspaceError::NestedGit { path, reason })
+                if path == Path::new("sub") && reason == UNPOPULATED_CONTENT),
+            "{refused:?}"
+        );
+        fs::remove_dir_all(wt.join("sub")).unwrap();
+        fs::write(wt.join("sub"), "a file in its place\n").unwrap();
+        assert!(matches!(
+            adapter.commit_all(&wt, &base, "file"),
+            Err(WorkspaceError::NestedGit { .. })
+        ));
+        fs::remove_file(wt.join("sub")).unwrap();
+        assert!(adapter.commit_all(&wt, &base, "absent").is_ok());
+        WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Review of #196: every link among the ignored entries is removed as a link before
+    /// `git clean` runs, at any depth; the bytes count it as itself.
+    #[cfg(unix)]
+    #[test]
+    fn links_among_ignored_entries_are_removed_without_being_followed() {
+        let dir = std::env::temp_dir().join(format!("meshloop-unlink-{}", uuid_ish()));
+        let outside = std::env::temp_dir().join(format!("meshloop-unlink-out-{}", uuid_ish()));
+        fs::create_dir_all(dir.join("target/a/b")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious.txt"), "operator bytes").unwrap();
+        fs::write(dir.join("target/a/b/out.bin"), vec![0u8; 100]).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("target/a/b/deep")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("top")).unwrap();
+        let bytes =
+            unlink_and_measure(&dir, &[PathBuf::from("target"), PathBuf::from("top")]).unwrap();
+        assert!(bytes >= 100, "{bytes}");
+        assert!(fs::symlink_metadata(dir.join("target/a/b/deep")).is_err());
+        assert!(fs::symlink_metadata(dir.join("top")).is_err());
+        assert!(dir.join("target/a/b/out.bin").is_file());
+        assert_eq!(
+            fs::read_to_string(outside.join("precious.txt")).unwrap(),
+            "operator bytes"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

@@ -42,7 +42,8 @@ probe_timeout_seconds = 15
 # docs/engineering/nodecode-containment.md#contained-verification.
 # Before every check and after verification, Meshloop removes the attempt worktree's
 # ignored files (`git clean -d -X`), so a check rebuilds from a clean tree and never
-# reuses build output the worker left (#196). Keep caches outside the worktree.
+# reuses build output the worker left (#196). A cache outside the worktree (e.g.
+# CARGO_TARGET_DIR) must be writable only by trusted checks, never by the worker.
 verify_command = []
 # runner = [
 #   "/path/to/meshloop/adapters/sandbox/meshloop-verify-sandbox",

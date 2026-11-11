@@ -385,3 +385,41 @@ fn a_long_ignored_listing_is_not_reported_as_dirty_tracked() {
         assert!(!reasons.contains(&absent), "{absent}: {attempt}");
     }
 }
+
+/// Review of #196: the base has a submodule gitlink, so `worktree add` leaves its
+/// directory empty. Files the worker writes there are invisible to status, `add` and
+/// `clean`; the attempt is refused before staging and the check never runs.
+#[test]
+fn content_in_an_unpopulated_submodule_directory_is_refused_before_the_check() {
+    let fixture = Fixture::new(
+        "gitlink",
+        "echo 'exit 0' > sub/payload.sh",
+        "echo check-ran\n",
+    );
+    let out = bounded_output(
+        Command::new("git")
+            .current_dir(&fixture.repo)
+            .args(["rev-parse", "HEAD"]),
+    );
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    git(
+        &fixture.repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},sub"),
+        ],
+    );
+    git(&fixture.repo, &["commit", "--quiet", "-m", "gitlink"]);
+
+    let out = fixture.run();
+    assert_eq!(fixture.node_state(), "Failed", "{out}");
+    let evidence = fixture.evidence();
+    assert!(
+        evidence.contains("content in an unpopulated gitlink"),
+        "{evidence}"
+    );
+    assert!(!evidence.contains("check-ran"), "{evidence}");
+    assert!(!evidence.contains("clean-ignored"), "{evidence}");
+}

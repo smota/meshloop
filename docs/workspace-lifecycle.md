@@ -52,7 +52,9 @@ Failed, cancelled and interrupted runs are retained with `run-failed`, `run-canc
 Ignored files do not block reclamation of attempt worktrees: verification removes them
 before every check and again after it (#196,
 [details](engineering/harnesses.md#verification-runs-worker-written-code-181)), so the
-ignored output of Meshloop's own check (a `target/`) is gone by the time the run lands.
+ignored output of Meshloop's own check (a `target/`) is gone by the time the run lands. The
+removal also deletes ignored files an operator placed in an attempt worktree: resuming
+a run whose verification re-runs a check removes them.
 Ignored files written later, or into the integrate worktree, still block it as
 `unknown-ignored`; cleanup itself never deletes them. Cleanup reads each worktree's
 `git status --ignored --untracked-files=all` as it streams, up to 256 MiB. A larger

@@ -1920,7 +1920,7 @@ impl<'a> RunLoop<'a> {
         // left behind, and again after it, so the check's own output does not block
         // reclamation. A failed removal before the check fails closed: the check does
         // not run. With no check, the one removal is the after-verification one.
-        let before = self.workspace.clean_ignored(wt);
+        let before = self.workspace.clean_ignored(wt, &self.worktree_base);
         let before_ok = matches!(&before, Ok(clean) if clean.remaining == 0);
         let when = if self.verify_command.is_empty() {
             CleanPoint::AfterVerification
@@ -1934,7 +1934,7 @@ impl<'a> RunLoop<'a> {
             let result = self
                 .checks
                 .run(wt, &self.verify_command, self.limits.task_timeout);
-            let after = self.workspace.clean_ignored(wt);
+            let after = self.workspace.clean_ignored(wt, &self.worktree_base);
             rows.push(clean_ignored_evidence(
                 &candidate_ref,
                 CleanPoint::AfterCheck,
@@ -3771,10 +3771,8 @@ fn clean_ignored_evidence(
         Ok(clean) => (
             0,
             format!(
-                "{label}: removed {} ignored entries, {}{} bytes",
-                clean.entries,
-                if clean.bytes_partial { "at least " } else { "" },
-                clean.bytes
+                "{label}: removed {} ignored entries, {} bytes",
+                clean.entries, clean.bytes
             ),
         ),
         Err(reason) if when == CleanPoint::BeforeCheck => (
@@ -3989,7 +3987,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
-            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path, attempt_root: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
@@ -4850,7 +4848,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
-            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path, attempt_root: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5809,7 +5807,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
-            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path, attempt_root: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5914,7 +5912,11 @@ mod tests {
         fn head(&self, _worktree: &Path) -> Result<String, WorkspaceError> {
             Ok("rev".into())
         }
-        fn clean_ignored(&self, _worktree: &Path) -> Result<IgnoredClean, WorkspaceError> {
+        fn clean_ignored(
+            &self,
+            _worktree: &Path,
+            _attempt_root: &Path,
+        ) -> Result<IgnoredClean, WorkspaceError> {
             self.log.borrow_mut().push("clean");
             self.cleans
                 .borrow_mut()
@@ -6121,13 +6123,11 @@ mod tests {
             Ok(IgnoredClean {
                 entries: 2,
                 bytes: 300,
-                bytes_partial: false,
                 remaining: 0,
             }),
             Ok(IgnoredClean {
                 entries: 1,
                 bytes: 7,
-                bytes_partial: true,
                 remaining: 0,
             }),
         ]);
@@ -6142,7 +6142,7 @@ mod tests {
                 ),
                 (
                     0,
-                    "after check: removed 1 ignored entries, at least 7 bytes".to_string()
+                    "after check: removed 1 ignored entries, 7 bytes".to_string()
                 ),
             ]
         );
@@ -6164,7 +6164,6 @@ mod tests {
             Ok(IgnoredClean {
                 entries: 0,
                 bytes: 0,
-                bytes_partial: false,
                 remaining: 3,
             }),
         ];
