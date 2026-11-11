@@ -34,7 +34,7 @@ Inventory reports a new run's generation and worktrees as `ledger-owned` with li
 
 ### Reading attempt ids
 
-The `attempt-<n>` in a worker's layout path `meshloop/<graph>/task-<id>/attempt-<n>`, the `task-<n>-attempt-<m>` artifact record, and the `<id>` in its commit message `meshloop: attempt <id> for task <task_id>` are all the same **store-global** attempt id. Each id is allocated as `MAX(attempt_id) + 1` over every attempt row in `.meshloop/state.sqlite` — across all graphs, not just the run in front of you — and is never reused. It is **not** a per-task ordinal or retry count. A single-task graph that succeeds on its first and only attempt can therefore land in `meshloop/<graph>/task-<id>/attempt-3` with a `meshloop: attempt 3 for task <task_id>` commit, simply because attempt ids 1 and 2 were already consumed by earlier attempts elsewhere in the store. Do not read the number as "this task's third try."
+The `attempt-<n>` in a worker's branch `meshloop/<graph>/task-<id>/attempt-<n>`, the `task-<n>-attempt-<m>` artifact record, and the `<id>` in its commit message `meshloop: attempt <id> for task <task_id>` are all the same **store-global** attempt id. Each id is allocated as `MAX(attempt_id) + 1` over every attempt row in `.meshloop/state.sqlite` — across all graphs, not just the run in front of you — and is never reused. It is **not** a per-task ordinal or retry count. A single-task graph that succeeds on its first and only attempt can therefore land in `meshloop/<graph>/task-<id>/attempt-3` with a `meshloop: attempt 3 for task <task_id>` commit, simply because attempt ids 1 and 2 were already consumed by earlier attempts elsewhere in the store. Do not read the number as "this task's third try."
 
 ## Reclaiming a landed run
 

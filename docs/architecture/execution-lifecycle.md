@@ -58,7 +58,7 @@ Attempt ids are **store-global**, not per-task ordinals. Each new id is allocate
 `MAX(attempt_id) + 1` over every attempt row in `.meshloop/state.sqlite` — across all
 graphs and runs, not just the current one — and is never reused (restart moves an
 attempt's events into the generation they ran in rather than reissuing the id). Because
-the counter spans every graph, the `attempt-<n>` component of a worker's layout path
+the counter spans every graph, the `attempt-<n>` component of a worker's branch name
 `meshloop/<graph>/task-<id>/attempt-<n>` and the `<id>` in its commit message
 `meshloop: attempt <id> for task <task_id>` are both this store-global id, not a per-task
 retry count. A single-task graph that succeeds on its first and only attempt can therefore
