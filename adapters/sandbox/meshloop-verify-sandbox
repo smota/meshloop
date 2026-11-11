@@ -23,14 +23,19 @@
 #                         current working directory.
 #   --ro-path PATH        bind a host path read-only at the same path, for toolchains
 #                         outside /usr (for example ~/.cargo and ~/.rustup). Repeatable.
-#                         Refused: /, the operator's home or a folder containing it,
-#                         anything inside ~/.nodecode, ~/.ssh, ~/.gnupg, ~/.config,
-#                         ~/.aws, ~/.azure, ~/.kube, ~/.docker, ~/.local/share/keyrings
-#                         or ~/.password-store, the credential files ~/.netrc,
-#                         ~/.git-credentials, ~/.npmrc and ~/.pypirc, and a path inside
-#                         or around the worktree or the repository's git directory.
-#                         A `credentials.toml` or `credentials` file directly inside a
-#                         bound folder (Cargo's registry tokens) is masked by an empty file.
+#                         Refused: /, the operator's home or a folder containing it;
+#                         a path that is, is inside or contains a secret store under a
+#                         home (~/.nodecode, ~/.ssh, ~/.gnupg, ~/.config, ~/.aws,
+#                         ~/.azure, ~/.kube, ~/.docker, ~/.local/share/keyrings,
+#                         ~/.password-store, ~/.claude, ~/.codex, ~/.gemini, ~/.grok,
+#                         ~/.m2, ~/.gradle, ~/.gem, ~/.terraform.d, ~/.netrc,
+#                         ~/.git-credentials, ~/.npmrc, ~/.pypirc; a denylist, not a
+#                         guarantee); a path at, under or around /tmp, /run, /var/run,
+#                         /dev, /proc, /sys, /mnt/wsl* or $XDG_RUNTIME_DIR (host
+#                         sockets); and a path inside or around the worktree or the
+#                         repository's git directory. A `credentials.toml` or
+#                         `credentials` file directly inside a bound folder, or inside
+#                         --env CARGO_HOME, is masked by an empty file.
 #   --mask PATH           hide one more path inside a --ro-path: a file reads as empty, a
 #                         folder as an empty read-only folder. PATH is resolved first; one
 #                         outside every --ro-path is not mounted, so needs no mask.
@@ -48,8 +53,9 @@
 #                         loopback service and no abstract Unix socket of the host.
 #   --tmpfs-size BYTES    size cap of the sandbox home, /tmp and /dev/shm (default 1 GiB).
 #   --git-metadata ro|none  bind the worktree's git admin and common dirs read-only
-#                         (default ro), or not at all.
-#   --print-bwrap         print the bwrap argv and exit.
+#                         (default ro), or not at all. `ro` is refused when the git
+#                         config holds credentials (an extraheader, user@ in a URL).
+#   --print-bwrap         print the bwrap argv and exit 2 (never a passing check).
 #
 # Arguments are passed to bwrap as an argv array: nothing here is evaluated by a shell.
 set -euo pipefail
@@ -80,9 +86,40 @@ refuse_bind() {
   done
 }
 
-# Secret stores under a home that a --ro-path may never be, or be inside.
-secret_dirs=(.nodecode .ssh .gnupg .config .aws .azure .kube .docker .local/share/keyrings .password-store)
+# Secret stores under a home that a bound path may never be, be inside, or contain.
+# A denylist of well-known stores, not a guarantee: list toolchain folders narrowly.
+secret_dirs=(.nodecode .ssh .gnupg .config .aws .azure .kube .docker .local/share/keyrings
+  .password-store .claude .codex .gemini .grok .m2 .gradle .gem .terraform.d)
 secret_files=(.netrc .git-credentials .npmrc .pypirc)
+
+# refuse_secret DIR LABEL: refuse a DIR that is, is inside, or contains a secret store
+# under an operator home.
+refuse_secret() {
+  local dir="$1" label="$2" h s
+  for h in "${op_homes[@]}"; do
+    for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
+      under "$h/$s" "$dir" && die "refusing a $label inside a secret store: $h/$s"
+      under "$dir" "$h/$s" && die "refusing a $label that contains a secret store: $h/$s"
+    done
+  done
+  return 0
+}
+
+# Host folders that hold Unix sockets and other live host state; a bound path may not
+# be, be inside, or contain one of them.
+host_state=(/tmp /run /var/run /dev /proc /sys)
+[[ -n "${XDG_RUNTIME_DIR:-}" && "${XDG_RUNTIME_DIR}" == /* ]] && host_state+=("$(realpath -m -- "$XDG_RUNTIME_DIR")")
+refuse_host_state() {
+  local dir="$1" label="$2" x
+  for x in "${host_state[@]}"; do
+    under "$x" "$dir" && die "refusing a $label at or under $x (host sockets and state)"
+    under "$dir" "$x" && die "refusing a $label that contains $x (host sockets and state)"
+  done
+  case "$dir" in
+    /mnt | /mnt/wsl*) die "refusing a $label at or under /mnt/wsl (WSL host sockets)" ;;
+  esac
+  return 0
+}
 
 worktree_arg=""
 ro_paths=()
@@ -104,7 +141,7 @@ while (($#)); do
     --allow-network) allow_network=1; shift ;;
     --tmpfs-size) (($# >= 2)) || die "--tmpfs-size needs bytes"; tmpfs_size="$2"; shift 2 ;;
     --git-metadata) (($# >= 2)) || die "--git-metadata needs ro or none"; git_metadata="$2"; shift 2 ;;
-    --print-bwrap) print_only=1; shift ;;
+    --print-bwrap) print_only=1; shift ;; # prints, then exits 2: never a passing check
     --) shift; break ;;
     *) die "unknown option '$1' (wrapper options come before --)" ;;
   esac
@@ -153,7 +190,11 @@ if [[ "$line" == "gitdir: "* ]]; then
       IFS= read -r rel <"$admin/commondir" || true
       common="$(resolve_from "$admin" "$rel")"
     fi
-    git_dirs=("$admin" "$common")
+    # Only git's own layout: the admin dir outside the worktree and exactly
+    # <common>/worktrees/<name>. Anything else (a forged `.git`) binds nothing.
+    if ! under "$worktree" "$admin" && [[ "$(dirname -- "$admin")" == "$common/worktrees" ]]; then
+      git_dirs=("$admin" "$common")
+    fi
   fi
 fi
 if [[ "$git_metadata" == "ro" ]]; then
@@ -161,8 +202,20 @@ if [[ "$git_metadata" == "ro" ]]; then
     [[ -d "$d" ]] || continue
     under "$worktree" "$d" && continue
     refuse_bind "$d" "git directory"
+    refuse_secret "$d" "git directory"
+    refuse_host_state "$d" "git directory"
     git_binds+=(--ro-bind "$d" "$d")
   done
+  # Git config can hold credentials (an http.*.extraheader, user:token@ in a remote URL,
+  # credentials persisted by a CI checkout). A check could copy them into the worktree.
+  if ((${#git_dirs[@]})); then
+    for f in "${git_dirs[1]}/config" "${git_dirs[0]}/config.worktree" "${git_dirs[1]}/config.worktree"; do
+      [[ -f "$f" ]] || continue
+      if grep -qiE 'extraheader|://[^/@[:space:]]+@' -- "$f"; then
+        die "git config $f holds credentials (extraheader or user@ in a URL); use --git-metadata none"
+      fi
+    done
+  fi
 fi
 
 # --- operator-listed read-only paths (toolchains) ----------------------------------
@@ -172,11 +225,8 @@ for p in "${ro_paths[@]}"; do
   [[ "$p" == /* ]] || die "--ro-path must be absolute: $p"
   r="$(realpath -e -- "$p" 2>/dev/null)" || die "--ro-path does not exist: $p"
   refuse_bind "$r" "--ro-path"
-  for h in "${op_homes[@]}"; do
-    for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
-      under "$h/$s" "$r" && die "refusing a --ro-path inside a secret store: $h/$s"
-    done
-  done
+  refuse_secret "$r" "--ro-path"
+  refuse_host_state "$r" "--ro-path"
   under "$r" "$worktree" && die "refusing a --ro-path that contains the worktree: $r"
   under "$worktree" "$r" && die "refusing a --ro-path inside the worktree: $r"
   for d in "${git_dirs[@]}"; do
@@ -190,6 +240,27 @@ for p in "${ro_paths[@]}"; do
     for c in credentials.toml credentials; do
       [[ -e "$r/$c" || -L "$r/$c" ]] && masks+=("$r/$c")
     done
+  fi
+done
+
+# --- environment ---------------------------------------------------------------------
+env_args=()
+for pair in "${env_pairs[@]}"; do
+  [[ "$pair" == *=* ]] || die "--env needs NAME=VALUE: $pair"
+  name="${pair%%=*}"
+  value="${pair#*=}"
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || die "--env name is not a variable name: $name"
+  case "$name" in
+    HOME | PATH | TMPDIR | USER | PWD) die "--env must not set $name" ;;
+  esac
+  upper="${name^^}"
+  for w in TOKEN SECRET PASSWORD PASSWD KEY CREDENTIAL AUTH COOKIE SESSION; do
+    [[ "$upper" != *"$w"* ]] || die "--env refuses a name that looks like a credential: $name"
+  done
+  env_args+=(--setenv "$name" "$value")
+  # Cargo's registry tokens live in $CARGO_HOME, wherever it points.
+  if [[ "$name" == CARGO_HOME && "$value" == /* ]]; then
+    masks+=("$value/credentials.toml" "$value/credentials")
   fi
 done
 
@@ -216,7 +287,7 @@ for m in "${masks[@]}"; do
   fi
 done
 
-# --- PATH and environment --------------------------------------------------------
+# --- PATH ------------------------------------------------------------------------
 sandbox_path="/usr/local/bin:/usr/bin:/bin"
 for ((i = ${#path_dirs[@]} - 1; i >= 0; i--)); do
   d="${path_dirs[$i]}"
@@ -226,21 +297,6 @@ for ((i = ${#path_dirs[@]} - 1; i >= 0; i--)); do
   for r in "${ro_real[@]}"; do under "$r" "$(realpath -m -- "$d")" && ok=1; done
   ((ok)) || die "--path must be under /usr or a --ro-path: $d"
   sandbox_path="$d:$sandbox_path"
-done
-env_args=()
-for pair in "${env_pairs[@]}"; do
-  [[ "$pair" == *=* ]] || die "--env needs NAME=VALUE: $pair"
-  name="${pair%%=*}"
-  value="${pair#*=}"
-  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || die "--env name is not a variable name: $name"
-  case "$name" in
-    HOME | PATH | TMPDIR | USER | PWD) die "--env must not set $name" ;;
-  esac
-  upper="${name^^}"
-  for w in TOKEN SECRET PASSWORD PASSWD KEY CREDENTIAL AUTH COOKIE SESSION; do
-    [[ "$upper" != *"$w"* ]] || die "--env refuses a name that looks like a credential: $name"
-  done
-  env_args+=(--setenv "$name" "$value")
 done
 
 # --- the sandbox -----------------------------------------------------------------
@@ -299,7 +355,8 @@ args+=(--remount-ro /dev --remount-ro /)
 if ((print_only)); then
   printf '%q ' bwrap "${args[@]}" -- "$@"
   printf '\n'
-  exit 0
+  # Never 0: a runner prefix that kept --print-bwrap must not make every check pass.
+  exit 2
 fi
 
 # --- what the sandbox inherits ------------------------------------------------------

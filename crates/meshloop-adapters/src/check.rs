@@ -66,6 +66,13 @@ impl VerifyRunner {
             if arg.contains('\0') {
                 return Err(format!("runner[{i}] must not contain a NUL character"));
             }
+            // The sandbox wrapper's dry run prints its argv instead of running the
+            // check; in a prefix it would turn every check into a no-op.
+            if arg == "--print-bwrap" {
+                return Err(format!(
+                    "runner[{i}] '--print-bwrap' only prints the sandbox; remove it"
+                ));
+            }
             if arg != WORKTREE_PLACEHOLDER && arg.contains(WORKTREE_PLACEHOLDER) {
                 return Err(format!(
                     "runner[{i}] '{arg}': {WORKTREE_PLACEHOLDER} must be a whole argument"
@@ -351,6 +358,10 @@ mod tests {
             (
                 vec![abs_exe(), "{prompt_file}".into()],
                 "not a known placeholder",
+            ),
+            (
+                vec![abs_exe(), "--print-bwrap".into(), "--".into()],
+                "only prints the sandbox",
             ),
             (
                 std::iter::once(abs_exe())

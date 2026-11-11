@@ -150,6 +150,35 @@ fi
 grep -qx true <<<"$out" && pass "git works read-only inside the worktree" \
   || fail "git does not work inside the worktree: $out"
 
+# A forged `.git` (#181 review): an admin dir that is not <common>/worktrees/<name>
+# binds no git dir, so its commondir pointing at a fake ~/.ssh exposes nothing; an admin
+# dir that follows the layout inside a secret store is refused.
+forged="$work/forged-admin"
+mkdir -p "$forged"
+printf '%s\n' "$wt/.git" >"$forged/gitdir"
+printf '%s\n' "$fake_home/.ssh" >"$forged/commondir"
+printf 'gitdir: %s\n' "$forged" >"$wt/.git"
+out="$(in_sandbox sh -c 'for p in "$@"; do [ -e "$p" ] && echo "visible $p" || echo "absent $p"; done' sh \
+  "$fake_home/.ssh/id_test" "$forged")" || true
+if grep -qxF "absent $fake_home/.ssh/id_test" <<<"$out" && grep -qxF "absent $forged" <<<"$out"; then
+  pass "a forged .git with commondir at ~/.ssh binds no git dir"
+else
+  fail "a forged .git exposed a git dir: $out"
+fi
+mkdir -p "$fake_home/.ssh/worktrees/w1"
+printf '%s\n' "$wt/.git" >"$fake_home/.ssh/worktrees/w1/gitdir"
+printf '../..\n' >"$fake_home/.ssh/worktrees/w1/commondir"
+printf 'gitdir: %s\n' "$fake_home/.ssh/worktrees/w1" >"$wt/.git"
+rc=0
+msg="$(cd "$wt" && HOME="$fake_home" "$wrapper" --run-command -- true 2>&1)" || rc=$?
+if ((rc == 125)) && grep -qF "secret store" <<<"$msg"; then
+  pass "refused: git dirs inside a secret store"
+else
+  fail "git dirs inside a secret store not refused ($rc): $msg"
+fi
+printf '%s\n' "$before_git" >"$wt/.git"
+rm -rf -- "$fake_home/.ssh/worktrees" "$forged"
+
 # --- 2. visibility: the operator's homes and secrets are not mounted -----------------
 # Each path must exist on the host, or the check would prove nothing. The fake home's
 # paths always do; a real-home path that is absent on this host is reported, not passed.

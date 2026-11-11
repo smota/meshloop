@@ -310,6 +310,71 @@ refused "--env with a credential-like name" "looks like a credential" "$wt" --wo
 refused "--path outside /usr and every --ro-path" "under /usr or a --ro-path" "$wt" --worktree "$wt" --path /opt/bin -- true
 refused "no program" "no program" "$wt" --worktree "$wt" --
 
+# Secret stores are refused when a --ro-path is, is inside, or contains one.
+mkdir -p "$fake_home/.local/share/keyrings" "$fake_home/.claude" "$fake_home/.local/share/tool"
+printf '%s\n' "$secret_value" >"$fake_home/.local/share/keyrings/login.keyring"
+refused "--ro-path ~/.local (contains ~/.local/share/keyrings)" "contains a secret store" "$wt" --worktree "$wt" --ro-path "$fake_home/.local" -- true
+refused "--ro-path ~/.local/share (contains the keyrings)" "contains a secret store" "$wt" --worktree "$wt" --ro-path "$fake_home/.local/share" -- true
+refused "--ro-path ~/.claude" "inside a secret store" "$wt" --worktree "$wt" --ro-path "$fake_home/.claude" -- true
+# Host socket and state folders are refused.
+refused "--ro-path /tmp" "/tmp" "$wt" --worktree "$wt" --ro-path /tmp -- true
+refused "--ro-path /run" "/run" "$wt" --worktree "$wt" --ro-path /run -- true
+refused "--ro-path /proc/self" "/proc" "$wt" --worktree "$wt" --ro-path /proc/self -- true
+refused "--ro-path /var (contains /var/run)" "/var/run" "$wt" --worktree "$wt" --ro-path /var -- true
+
+# --print-bwrap prints and never exits 0, so a runner prefix that kept it cannot make
+# every check pass.
+rc=0
+(cd "$wt" && HOME="$fake_home" "$wrapper" --worktree "$wt" --print-bwrap -- true) >"$work/print.out" 2>&1 || rc=$?
+((rc == 2)) && grep -q '^bwrap ' "$work/print.out" && pass "--print-bwrap prints the argv and exits 2" \
+  || fail "--print-bwrap exited $rc: $(cat "$work/print.out")"
+
+# A credentials.toml under --env CARGO_HOME (a sub-folder of a --ro-path) reads as empty.
+mkdir -p "$fake_home/.local/share/tool/cargo"
+printf 'token = "%s"\n' "$secret_value" >"$fake_home/.local/share/tool/cargo/credentials.toml"
+printf 'cat "$CARGO_HOME/credentials.toml" 2>&1; echo "[end]"\n' >"$worker_script"
+out="$(verify_step --ro-path "$fake_home/.local/share/tool" --env "CARGO_HOME=$fake_home/.local/share/tool/cargo" --)"
+if grep -qF "$secret_value" <<<"$out"; then
+  fail "credentials.toml under CARGO_HOME was readable: $out"
+else
+  check_line "[end]" "a credentials.toml under --env CARGO_HOME reads as empty"
+fi
+rm -f -- "$worker_script"
+
+# --- 6b. git metadata: credentials in git config, forged `.git` files ----------------
+# Credentials in the repository's git config refuse --git-metadata ro.
+git_q -C "$repo" config http.https://example.invalid/.extraheader "AUTHORIZATION: basic eHg6eXk="
+refused "an http extraheader in git config" "--git-metadata none" "$wt" --worktree "$wt" -- true
+rc=0
+(cd "$wt" && HOME="$fake_home" "$wrapper" --worktree "$wt" --git-metadata none -- true) || rc=$?
+((rc == 0)) && pass "--git-metadata none runs despite credentials in git config" || fail "--git-metadata none exited $rc"
+git_q -C "$repo" config --unset-all http.https://example.invalid/.extraheader
+git_q -C "$repo" remote add origin "https://user:tok@example.invalid/r.git"
+refused "user:token@ in a remote URL" "--git-metadata none" "$wt" --worktree "$wt" -- true
+git_q -C "$repo" remote remove origin
+
+# A forged `.git` whose admin dir is not <common>/worktrees/<name> binds no git dir:
+# its commondir pointing at a fake ~/.ssh exposes nothing.
+gitfile_orig="$(cat "$wt/.git")"
+forged="$work/forged-admin"
+mkdir -p "$forged"
+printf '%s\n' "$wt/.git" >"$forged/gitdir"
+printf '%s\n' "$fake_home/.ssh" >"$forged/commondir"
+printf 'gitdir: %s\n' "$forged" >"$wt/.git"
+printf 'for p in "$@"; do [ -e "$p" ] && echo "visible $p" || echo "absent $p"; done\n' >"$worker_script"
+out="$(verify_step -- "$fake_home/.ssh" "$fake_home/.ssh/id_test" "$forged")"
+check_line "absent $fake_home/.ssh/id_test" "a forged .git with commondir at ~/.ssh binds nothing (key absent)"
+check_line "absent $forged" "a forged admin dir outside <common>/worktrees is not bound"
+check_line "rc=0" "the check still runs with no git dir bound (fail closed, not refused)"
+# An admin dir that does follow the layout, but inside a secret store, is refused.
+mkdir -p "$fake_home/.ssh/worktrees/w1"
+printf '%s\n' "$wt/.git" >"$fake_home/.ssh/worktrees/w1/gitdir"
+printf '../..\n' >"$fake_home/.ssh/worktrees/w1/commondir"
+printf 'gitdir: %s\n' "$fake_home/.ssh/worktrees/w1" >"$wt/.git"
+refused "git dirs inside a secret store" "secret store" "$wt" --worktree "$wt" -- true
+printf '%s\n' "$gitfile_orig" >"$wt/.git"
+rm -rf -- "$fake_home/.ssh/worktrees" "$forged" "$worker_script"
+
 # --- 7. process tree: killing the owned process group leaves nothing ---------------
 # meshloop spawns the runner as a process-group leader and, on timeout or cancel, kills
 # the group (ADR 0025). Start the same way, with a child that detaches into its own

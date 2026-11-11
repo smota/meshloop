@@ -935,6 +935,11 @@ probe_timeout_seconds = 0",
                 r#"["/x/sandbox", "{prompt_file}"]"#,
                 "not a known placeholder",
             ),
+            (
+                "runner-print",
+                r#"["/x/sandbox", "--print-bwrap", "--"]"#,
+                "only prints",
+            ),
             ("runner-type", r#""/x/sandbox --""#, "invalid type"),
         ] {
             #[cfg(windows)]

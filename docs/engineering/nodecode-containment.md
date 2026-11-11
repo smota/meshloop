@@ -49,7 +49,7 @@ operator's files and credentials, the operator's own nodecode organism and its h
 | Property | Mechanism | Shown by |
 |---|---|---|
 | Writes land only in the attempt worktree | The worktree is the only host path bound read-write. The sandbox root is a tmpfs remounted read-only after setup. `/usr`, a short `/etc` list, the nodecode release folder and the worktree's git metadata are bound read-only. | `containment-test.sh` §1: writes to the repository root above the worktree, the git common dir, the operator's home, `~/.nodecode`, `/usr`, `/etc` and `/` fail and nothing appears on the host |
-| The worker cannot redirect meshloop's host-side git | The worktree's `.git` file is bound read-only over the worktree, so the worker cannot point it at a gitdir whose config would run commands when meshloop runs `git diff` on the host after the attempt. The wrapper never runs git on the worktree: it parses `.git` itself and binds the admin and common dirs only when the admin dir's `gitdir` file points back at this worktree | §1: rewriting, removing or moving `.git` fails; `git rev-parse` still works inside |
+| The worker cannot redirect meshloop's host-side git | The worktree's `.git` file is bound read-only over the worktree, so the worker cannot point it at a gitdir whose config would run commands when meshloop runs `git diff` on the host after the attempt. The wrapper never runs git on the worktree: it parses `.git` itself and binds the admin and common dirs only when the admin dir's `gitdir` file points back at this worktree, the admin dir is outside the worktree and is exactly `<common>/worktrees/<name>` (a forged `.git` binds none), and neither dir is, is inside or contains a well-known secret store (#181 review) | §1: rewriting, removing or moving `.git` fails; `git rev-parse` still works inside; a forged `.git` with commondir at a fake `~/.ssh` binds nothing, and a git layout inside it is refused |
 | The operator's home, `~/.nodecode`, `~/.ssh`, `~/.config` and other repositories are not even readable | Not mounted. The sandbox `HOME` is `/home/worker`, a fresh tmpfs. Every folder the wrapper binds (worktree, release folder, git dirs) is refused when it is `/`, an operator home, a folder containing one, or inside a `~/.nodecode`; the release folder is also refused inside or around the worktree | §2 (each hidden path is checked to exist on the host first) and §6 (`/proc/self/mountinfo` names no operator home); §3c release-folder refusals |
 | The worker runs on a nodecode home of its own | `NODECODE_HOME=/home/worker/.nodecode` on that tmpfs, plus `rpc --ephemeral`. The home and store vanish with the sandbox; a cancelled or killed attempt leaves no temp home behind | live run; operator home manifest unchanged (test e below) |
 | Never attaches to the operator's organism | A client finds a gateway through the store's sidecar in its home, which the worker cannot see. `NODECODE_GATEWAY_PORT` is cleared, so the worker binds its own ephemeral port | source `gateway/gateway.lisp` (`open-gateway-listener`); environment check §3 |
@@ -221,7 +221,8 @@ that is exactly `{worktree}` becomes the attempt worktree's path as one argument
 placeholder is not substituted inside a longer argument, and the verify command itself
 is never substituted. `meshloop` refuses at load a prefix whose executable is not an
 absolute path, an empty argument, `{worktree}` inside a longer argument, any other
-`{...}` placeholder, or more than 64 arguments.
+`{...}` placeholder, `--print-bwrap` (the wrapper's dry run, which exits 2), or more
+than 64 arguments.
 
 The shipped runner is `adapters/sandbox/meshloop-verify-sandbox`, a bubblewrap wrapper
 with the hardening of the nodecode wrapper above:
@@ -271,10 +272,10 @@ run as the verify step through the wrapper.
 | Property | Mechanism |
 |---|---|
 | Writes land only in the worktree | The worktree is the only read-write host path; the sandbox root is a read-only tmpfs; `/tmp`, `/dev/shm` and the sandbox home (`/home/verifier`) are private, size-capped tmpfs mounts. Writes to the repository root above the worktree, its `.git`, the operator's home, a `--ro-path`, `/usr`, `/etc` and `/` fail; a write to `/tmp` never reaches the host |
-| meshloop's host-side git cannot be redirected | The worktree's `.git` file and its admin and common git dirs are bound read-only (`--git-metadata none` hides them) |
-| No operator secret is readable | The operator's home, `~/.ssh`, `~/.config` and `~/.nodecode` are not mounted. `--ro-path` refuses `/`, a home or a folder containing one, `~/.nodecode`, `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, keyrings, `~/.password-store`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, and any path in or around the worktree or git directory. `credentials.toml` and `credentials` directly inside a bound folder read as empty; `--mask` hides more |
+| meshloop's host-side git cannot be redirected | The worktree's `.git` file and its admin and common git dirs are bound read-only (`--git-metadata none` hides them). Git dirs are bound only in git's own layout (admin dir outside the worktree and exactly `<common>/worktrees/<name>`); a forged `.git` binds none. A git dir that is, is inside or contains a secret store is refused |
+| Well-known secret stores are not readable | The operator's home, `~/.ssh`, `~/.config` and `~/.nodecode` are not mounted. `--ro-path` refuses `/`, a home or a folder containing one, and a path that is, is inside or contains one of `~/.nodecode`, `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.local/share/keyrings`, `~/.password-store`, `~/.claude`, `~/.codex`, `~/.gemini`, `~/.grok`, `~/.m2`, `~/.gradle`, `~/.gem`, `~/.terraform.d`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`. This is a denylist of well-known stores, not a guarantee: a secret elsewhere in a bound path is readable. `--ro-path` also refuses any path in or around the worktree or git directory. `credentials.toml` and `credentials` directly inside a bound folder or inside `--env CARGO_HOME` read as empty; `--mask` hides more. `--git-metadata ro` is refused when the repository's git config (or a `config.worktree`) holds an `extraheader` or `user@` in a URL; use `--git-metadata none` there |
 | No credential in the environment | `--clearenv`, then `HOME`, `PATH`, `TERM`, `NO_COLOR`, `LANG`, `TMPDIR`, `USER` and the operator's `--env` pairs; `--env` refuses `HOME`, `PATH`, `TMPDIR`, `USER`, `PWD` and names containing TOKEN, SECRET, PASSWORD, PASSWD, KEY, CREDENTIAL, AUTH, COOKIE or SESSION |
-| No network by default | `--unshare-net`: a network namespace with only its own loopback. A connection to a listener on the host's 127.0.0.1 fails; the same probe with `--allow-network` succeeds (control) |
+| No network by default | `--unshare-net`: a network namespace with only its own loopback, so neither the host's TCP loopback nor its abstract Unix sockets are reachable. A connection to a listener on the host's 127.0.0.1 fails; the same probe with `--allow-network` succeeds (control). Filesystem Unix sockets are reachable through any bound path that holds one, so `--ro-path` refuses a path at, under or around `/tmp`, `/run`, `/var/run`, `/dev`, `/proc`, `/sys`, `/mnt/wsl*` and `$XDG_RUNTIME_DIR`; a socket in another operator-listed path is still reachable |
 | Nothing inherited but stdio | Descriptors above 2 that survive exec are closed before bwrap starts; core dumps are off |
 | No privileges, namespaces or terminal | `--unshare-user --disable-userns`, `--cap-drop ALL`, `no_new_privs`, `--new-session`, new PID, IPC, UTS and cgroup namespaces |
 | Verification semantics unchanged | The wrapper `exec`s bwrap, whose exit code is the check's: 0 passes, non-zero fails. 125 is a wrapper refusal (no bwrap, no user namespaces, not Linux, a worktree that is not a linked git worktree on ext4/xfs/btrfs, a refused option) and fails the check |
@@ -294,7 +295,13 @@ default, uncontained behaviour. A contained check that times out leaves no proce
   writes is not reviewed as part of that diff.
 - **Reads of `/usr`, the bound `/etc` entries, every `--ro-path` and the repository's
   git history** (with `--git-metadata ro`). Put nothing secret in a `--ro-path` beyond
-  what is masked.
+  what is masked; the secret-store list is a denylist.
+- **Git config contents** (with `--git-metadata ro`). The check reads the repository's
+  `.git/config`, hooks and every branch. The wrapper refuses only the credential shapes
+  it recognises (an `extraheader`, `user@` in a URL); a token in another key, an
+  include file or a credential helper's own config is readable and can be copied into
+  the worktree, where it would be committed. Use `--git-metadata none` when the
+  repository's git config holds anything secret.
 - **`--env` values.** They sit in meshloop's config and the process list; the name
   filter is a guard, not a guarantee.
 - **With `--allow-network`**, everything listed for the worker's network above.
