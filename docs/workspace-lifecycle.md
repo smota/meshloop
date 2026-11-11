@@ -5,8 +5,13 @@
 Command reference:
 
 ```text
-meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]
+meshloop workspace inventory [--config <path>] [--db <path>] [--worktree-base <path>] [--json]
+meshloop workspace preview [--cleanup] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]
+meshloop workspace apply --cleanup --digest <64 lowercase hex> [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]
+meshloop workspace adopt|maintain [--apply --digest <64 lowercase hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]
 ```
+
+`--cleanup` is valid only with `preview` or `apply`; `apply` requires `--cleanup` and a digest and never accepts `--apply`; `--apply` with a digest is valid only with `adopt` or `maintain`; `--graph` is valid only with `apply --cleanup`.
 
 `--graph` applies only to `apply --cleanup`. It limits removal to that graph's eligible entries; the digest still binds every current fact.
 
