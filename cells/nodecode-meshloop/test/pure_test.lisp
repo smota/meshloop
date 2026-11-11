@@ -5,13 +5,15 @@
 ;;;;   sbcl --script cells/nodecode-meshloop/test/pure_test.lisp
 ;;;;
 ;;;; No nodecode, no socket, no model. It reads every form of package.lisp,
-;;;; cell.lisp, gates.lisp and drive.lisp (a reader error, an unbalanced
+;;;; cell.lisp, gates.lisp, board.lisp and drive.lisp (a reader error, an unbalanced
 ;;;; parenthesis, fails here), compiles every DEFUN, DEFPARAMETER and DEFVAR
 ;;;; among them against stand-in NLK and NLE packages (a full compiler warning,
 ;;;; such as a call with the wrong number of arguments, fails here), and then
 ;;;; tests the functions that need nothing of nodecode: the :tool veto's
-;;;; reading of a call, and the argument checks of the commands that write
-;;;; (identity, task, graph, branch, plan path, flags). The load test
+;;;; reading of a call, the argument checks of the commands that write
+;;;; (identity, task, graph, branch, plan path, flags), and the Board
+;;;; projection's pure parts (board name, post template, mentions, cursor file)
+;;;; with a source check that it is one-way (#137). The load test
 ;;;; (load_test.py) is what runs the cell in nodecode. Optional: neither
 ;;;; `cargo test' nor `xtask check' runs this. Exit status 0 means every check held.
 
@@ -25,7 +27,7 @@
 
 (defparameter *cell* (merge-pathnames "../" (make-pathname :name nil :type nil
                                                            :defaults *load-truename*)))
-(defparameter *files* '("package" "cell" "gates" "drive"))
+(defparameter *files* '("package" "cell" "gates" "board" "drive"))
 (defparameter *failures* 0)
 (defparameter *checks* 0)
 
@@ -33,6 +35,11 @@
   (incf *checks*)
   (unless ok (incf *failures*))
   (format t "[~:[FAIL~;pass~]] ~a~@[: ~a~]~%" ok name (and (not ok) detail)))
+
+(defun file-text-at (path)
+  (with-open-file (in path :external-format :utf-8)
+    (let ((text (make-string (file-length in))))
+      (subseq text 0 (read-sequence text in)))))
 
 (defun file-text (name)
   (with-open-file (in (merge-pathnames (format nil "~a.lisp" name) *cell*) :external-format :utf-8)
@@ -70,6 +77,12 @@
 (defvar nlk::*scribe-session-id* nil)
 (defmacro nlk::when-let ((variable form) &body body)
   `(let ((,variable ,form)) (when ,variable ,@body)))
+(require :sb-md5)
+(defun nlk::sha256-text (text)
+  ;; A stand-in digest of the release's shape, sha256: and 64 hex digits: the
+  ;; tests check the board name's form and determinism, not SHA-256 itself.
+  (let ((hex (format nil "~(~{~2,'0x~}~)" (coerce (sb-md5:md5sum-string text :external-format :utf-8) 'list))))
+    (concatenate 'string "sha256:" hex hex)))
 (defun nlk::trimmed (text) (string-trim '(#\Space #\Tab #\Return #\Newline) text))
 (defun nlk::one-line (value &key cap (ellipsis "..."))
   (let ((text (substitute #\Space #\Newline (if (stringp value) value (princ-to-string (or value ""))))))
@@ -258,6 +271,171 @@ define-cell) are nodecode's and are only read.")
 (pure-test::check "plan path: the default is meshloop-plan.json"
                   (equal "meshloop-plan.json" (plan-path-of '())))
 (pure-test::check "plan path refused: a flag" (pure-test::refuses (plan-path-of '(("--plan" . "--x")))))
+
+;;; --- the Board projection (#137) -----------------------------------------------
+
+(let ((name (board-name-of "/home/op/code/repo")))
+  (pure-test::check "board name: meshloop- and 12 hex digits"
+                    (and (= (length name) 21) (string= "meshloop-" name :end2 9)
+                         (every (lambda (c) (digit-char-p c 16)) (subseq name 9))
+                         (every (lambda (c) (or (lower-case-p c) (digit-char-p c) (char= c #\-))) name))
+                    name)
+  (pure-test::check "board name: the same repository names the same board, with or without a trailing /"
+                    (and (equal name (board-name-of "/home/op/code/repo"))
+                         (equal name (board-name-of "/home/op/code/repo/"))))
+  (pure-test::check "board name: another repository names another board"
+                    (not (equal name (board-name-of "/home/op/code/other")))))
+
+(defparameter *evidence* "/r/.meshloop/worktrees/g137/task-1-attempt-2")
+
+(pure-test::check "event post: the fixed template, no mention"
+                  (equal (event-post "g137" 17 1 "AwaitingReview" "Verifying" "DeterministicChecksPassed"
+                                     ".meshloop/worktrees/g137/task-1-attempt-2" nil 1000)
+                         "meshloop g137 event 17: node #1 AwaitingReview (from Verifying, DeterministicChecksPassed); evidence .meshloop/worktrees/g137/task-1-attempt-2")
+                  (event-post "g137" 17 1 "AwaitingReview" "Verifying" "DeterministicChecksPassed"
+                              ".meshloop/worktrees/g137/task-1-attempt-2" nil 1000))
+(pure-test::check "event post: no evidence says none"
+                  (equal (event-post "g137" 1 1 "Ready" "Pending" "DependencySatisfied" nil nil 1000)
+                         "meshloop g137 event 1: node #1 Ready (from Pending, DependencySatisfied); evidence none"))
+(pure-test::check "event post: a mention is the last word, @ and the session id"
+                  (let ((text (event-post "g137" 17 1 "AwaitingReview" "Verifying" "DeterministicChecksPassed" nil "s-SUPER" 1000)))
+                    (and (suffix-p "; evidence none @s-SUPER" text) (= 1 (count #\@ text)))))
+(pure-test::check "event post: two events differ in their text, so the Board's same-words refusal never drops one"
+                  (not (equal (event-post "g" 3 1 "Running" "Ready" "AttemptStarted" nil nil 1000)
+                              (event-post "g" 9 1 "Running" "Ready" "AttemptStarted" nil nil 1000))))
+(pure-test::check "event post: no field carries a mention or free text"
+                  (let ((text (event-post "g" 2 1 "accept @s-X now" "/meshloop accept --as x" "Human Acceptance"
+                                          "/r/@s-X/wt" nil 1000)))
+                    (and (not (find #\@ text)) (not (search "accept" text))
+                         (search "node #1 ? (from ?, ?)" text) (search "/r/%40s-X/wt" text)))
+                  (event-post "g" 2 1 "accept @s-X now" "/meshloop accept --as x" "Human Acceptance" "/r/@s-X/wt" nil 1000))
+(dolist (limit '(1000 160 90 40))
+  (let ((text (event-post "graph-with-a-long-id" 123456 12 "AwaitingReview" "Verifying" "DeterministicChecksPassed"
+                          (format nil "~{~a~}" (loop repeat 300 collect "x/")) "s-SUPER" limit)))
+    (pure-test::check (format nil "event post fits post_chars ~d" limit) (<= (length text) limit) text)))
+(let ((text (event-post "g" 5 1 "Blocked" "Pending" "DependencyFailedOrScopeRevoked"
+                        (concatenate 'string "/very" (make-string 400 :initial-element #\a) "/task-1-attempt-1") "s-SUPER" 200)))
+  (pure-test::check "event post: a long evidence path is shortened from the left, the mention kept"
+                    (and (<= (length text) 200) (search "...a" text) (search "/task-1-attempt-1 @s-SUPER" text))
+                    text))
+(pure-test::check "plan post: the template"
+                  (equal (plan-post "g137" "AwaitingPlanReview" 2 nil 1000) "meshloop g137 plan 2: AwaitingPlanReview; evidence none"))
+(pure-test::check "evidence: a path under the repository root is relative to it"
+                  (and (equal ".meshloop/worktrees/g/t" (relative-to "/r/.meshloop/worktrees/g/t" "/r"))
+                       (equal ".meshloop/worktrees/g/t" (relative-to "/r/.meshloop/worktrees/g/t" "/r/"))
+                       (equal ".meshloop/worktrees/g/t" (relative-to "C:\\r\\.meshloop\\worktrees\\g\\t" "C:\\r"))))
+(pure-test::check "evidence: a path outside the repository shows its last two components only"
+                  (and (equal "outside-repo/wt/task-1" (relative-to "/home/op/elsewhere/wt/task-1" "/r"))
+                       (equal "outside-repo/wt/task-1" (relative-to "D:\\x\\wt\\task-1\\" "C:\\r"))
+                       (equal "outside-repo/t" (relative-to "/t" "/r"))))
+(dolist (limit '(60 45 30 12))
+  (let ((text (event-post "graph-with-a-long-id" 123456 12 "AwaitingReview" "Verifying" "DeterministicChecksPassed"
+                          "/x/y" "s-SUPER" limit)))
+    (pure-test::check (format nil "event post: the mention is never cut (post_chars ~d)" limit)
+                      (and (<= (length text) limit)
+                           (or (suffix-p " @s-SUPER" text) (not (find #\@ text))))
+                      text)))
+(pure-test::check "event post: with room, a clipped head keeps the whole mention"
+                  (suffix-p " @s-SUPER" (event-post "graph-with-a-long-id" 1 1 "Blocked" "Pending" "DependencyFailedOrScopeRevoked" nil "s-SUPER" 30)))
+
+(pure-test::check "mention: wake_on_gates off mentions nobody, on every gate"
+                  (every (lambda (state) (null (mention-of state t nil "s-SUPER"))) +gate-states+))
+(pure-test::check "mention: on, a current gate names the supervisor"
+                  (every (lambda (state) (equal "s-SUPER" (mention-of state t t "s-SUPER"))) +gate-states+))
+(pure-test::check "mention: on, a state that is no gate names nobody"
+                  (notany (lambda (state) (mention-of state t t "s-SUPER"))
+                          '("Pending" "Ready" "Running" "Verifying" "Accepted" "Integrated" "Cancelled" "PlanAccepted")))
+(pure-test::check "mention: on, a gate the node has left (history) names nobody"
+                  (null (mention-of "AwaitingReview" nil t "s-SUPER")))
+(pure-test::check "mention: on, an empty or malformed supervisor names nobody"
+                  (notany (lambda (who) (mention-of "Blocked" t t who)) '("" "s X" "@s-X" "s-X;rm" nil)))
+
+(let* ((entries '(("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil) ("g1" 7 nil 0 nil "e9")))
+       (text (cursor-text "meshloop-abc" "/r" entries '("s-OPS" "s-B"))))
+  (pure-test::check "cursor: written and read back, with the joined sessions"
+                    (multiple-value-bind (read sessions) (parse-cursor text)
+                      (and (equal (sort read #'string< :key #'first)
+                                  '(("g1" 7 nil 0 nil "e9") ("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil)))
+                           (equal (sort sessions #'string<) '("s-B" "s-OPS"))))
+                    text)
+  (pure-test::check "cursor: a graph with none starts at 0"
+                    (equal (cursor-entry (parse-cursor text) "g9") '("g9" 0 nil 0 nil nil)))
+  (pure-test::check "cursor: moving one graph keeps the others"
+                    (equal (sort (with-entry (parse-cursor text) (entry-with (cursor-entry (parse-cursor text) "g1") :seq 9 :pending nil))
+                                 #'string< :key #'first)
+                           '(("g1" 9 nil 0 nil nil) ("g2" 40 "PlanAccepted" 1 "0123456789abcdef" nil)))))
+(pure-test::check "cursor: a format-1 file reads, with no ledger, pending or session"
+                  (multiple-value-bind (read sessions)
+                      (parse-cursor (format nil "nodecode-meshloop board cursor 1~%board b~%repository /r~%graph g1 7 PlanAccepted 1~%"))
+                    (and (equal read '(("g1" 7 "PlanAccepted" 1 nil nil))) (null sessions))))
+(pure-test::check "cursor: a file this cell did not write is refused, not read as empty"
+                  (pure-test::refuses (parse-cursor "something else")))
+(pure-test::check "cursor: a plan post in flight names its plan state"
+                  (and (pending-word-p "p2:AwaitingPlanReview") (pending-word-p "e17")
+                       (not (pending-word-p "p2")) (not (pending-word-p "e1:x")) (not (pending-word-p "p2:a b"))
+                       (equal (parse-cursor (format nil "~a~%graph g1 3 PlanAccepted 1 - p2:AwaitingPlanReview~%" +board-cursor-header+))
+                              '(("g1" 3 "PlanAccepted" 1 nil "p2:AwaitingPlanReview")))))
+(dolist (line '("graph g1 x - 0 - -" "graph g1 1 - 0 ledger! -" "graph g1 1 - 0 - x9" "graph g1 1 - 0 - p2" "session @s-X" "graph --all 1 - 0 - -"))
+  (pure-test::check (format nil "cursor: a broken line is refused: ~a" line)
+                    (pure-test::refuses (parse-cursor (format nil "~a~%~a~%" +board-cursor-header+ line)))))
+(pure-test::check "cursor: kept on another ledger, or past its newest event, starts over"
+                  (and (stale-ledger-p '("g" 5 nil 0 "aaaa" nil) "bbbb" 100)
+                       (stale-ledger-p '("g" 500 nil 0 "aaaa" nil) "aaaa" 100)
+                       (stale-ledger-p '("g" 500 nil 0 nil nil) "aaaa" 100)
+                       (not (stale-ledger-p '("g" 5 nil 0 "aaaa" nil) "aaaa" 100))
+                       (not (stale-ledger-p '("g" 5 nil 0 nil nil) "aaaa" 100))))
+(let ((nodes (make-hash-table :test #'equal)) (latest (make-hash-table :test #'equal)))
+  (setf (gethash "1" nodes) "Cancelled" (gethash "1" latest) 7
+        (gethash "2" nodes) "AwaitingReview" (gethash "2" latest) 9)
+  (pure-test::check "current: the newest counted row reaching the folded state"
+                    (current-p 9 2 "AwaitingReview" nodes latest))
+  (pure-test::check "current: an older row is history"
+                    (not (current-p 8 2 "AwaitingReview" nodes latest)))
+  (pure-test::check "current: a row whose state the fold does not show is not current (pre-#167 stale row)"
+                    (not (current-p 10 1 "Failed" nodes latest))))
+
+(pure-test::check "typed graphs: --graph, and a status, resume or cancel positional"
+                  (and (equal '("g1") (typed-graphs "accept" '("--task" "1" "--as" "p" "--graph" "g1")))
+                       (equal '("g2") (typed-graphs "status" '("g2")))
+                       (equal '("g3") (typed-graphs "cancel" '("--task" "1" "g3")))
+                       (equal '() (typed-graphs "cancel" '("--task" "1")))
+                       (equal '() (typed-graphs "run" '("--plan" "plan.json")))))
+
+;;; One-way, read from the sources: the cell calls the Board's join and post
+;;; only, never a function that reads posts, holds no :round hook, and the
+;;; projection asks meshloop only for the read verbs events and status.
+(let* ((board (pure-test::file-text "board"))
+       (all (format nil "~{~a~}" (mapcar #'pure-test::file-text pure-test::*files*))))
+  (pure-test::check "one-way: no source names the Board's post facts, its delivery or its readers"
+                    (notany (lambda (word) (search word all :test #'char-equal))
+                            '("board.posted" ":round" "\"POSTS\"" "\"RECENT\"" "\"DELIVER\"" "\"CURSOR\"" "\"DUPLICATE-AT\""
+                              "nodecode-board::" "board::")))
+  (pure-test::check "one-way: the Board verbs called are JOIN and POST"
+                    (loop for start = (search "(board-call " board) then (search "(board-call " board :start2 (1+ start))
+                          while start
+                          always (let ((name (subseq board (+ start 11) (min (length board) (+ start 60)))))
+                                   (or (search "\"JOIN\"" name) (search "\"POST\"" name)
+                                       (search "name &rest" name)))))
+  (pure-test::check "one-way: the projection runs only meshloop's read verbs events and status"
+                    (and (not (search "(act " board))
+                         (loop for start = (search "(ask " board) then (search "(ask " board :start2 (1+ start))
+                               while start
+                               always (let ((verb (subseq board (+ start 5) (+ start 14))))
+                                        (or (search "\"events\"" verb) (search "\"status\"" verb)))))))
+
+;;; The pinned nodecode release's board cell defines what this cell calls by name
+;;; (JOIN, POST, MEMBER-BOARD of one session, SETTING). Read from its source when
+;;; that release is installed here; nothing is loaded or run.
+(let ((source (merge-pathnames ".local/share/nodecode/98dd6dc80/src/cells/board/cell.lisp"
+                                (user-homedir-pathname))))
+  (if (probe-file source)
+      (let ((text (pure-test::file-text-at source)))
+        (pure-test::check "pinned nodecode 98dd6dc80: the board cell defines member-board (session), join, post and setting"
+                          (and (search "(defun member-board (session)" text)
+                               (search "(define-verb join (name)" text)
+                               (search "(define-verb post (text)" text)
+                               (search "(\"post_chars\" :integer" text))))
+      (format t "[note] pinned nodecode 98dd6dc80 not installed here: the board cell's source was not checked~%")))
 
 (in-package #:pure-test)
 (format t "~d of ~d checks passed~%" (- *checks* *failures*) *checks*)

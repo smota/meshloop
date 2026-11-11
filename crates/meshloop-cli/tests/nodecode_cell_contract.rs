@@ -77,6 +77,9 @@ enum Harness {
     Planner,
     /// Work nodes that take four seconds, so a driver is seen alive.
     Slow,
+    /// A no-op worker whose verify command cancels the graph: `Cancel` lands while
+    /// the attempt is `Verifying`, as in the issue #167 race.
+    CancelInVerify,
 }
 
 struct Fixture {
@@ -113,7 +116,7 @@ max_concurrent_workers = 1
 max_retries = 2
 task_timeout_seconds = 30
 [verify]
-verify_command = []
+verify_command = {}
 [harnesses.fixture]
 executable = "{}"
 version_args = ["--version"]
@@ -121,6 +124,19 @@ invoke_args_template = {}
 model_ref = "fixture-model"
 model_tier = "top"
 "#,
+                match harness {
+                    Harness::CancelInVerify => {
+                        let path = |p: &Path| format!("{:?}", p.display().to_string());
+                        format!(
+                            "[{}, \"cancel\", \"--graph\", \"gcell\", \"--config\", {}, \"--db\", {}, \"--worktree-base\", {}]",
+                            path(Path::new(env!("CARGO_BIN_EXE_meshloop"))),
+                            path(&fixture.repo.join("meshloop.toml")),
+                            path(&fixture.repo.join(".meshloop").join("state.sqlite")),
+                            path(&fixture.repo.join(".meshloop").join("worktrees")),
+                        )
+                    }
+                    _ => "[]".to_string(),
+                },
                 fixture_harness()
                     .display()
                     .to_string()
@@ -129,6 +145,7 @@ model_tier = "top"
                     Harness::Worker => r#"["--prompt-file", "{prompt_file}"]"#,
                     Harness::Planner => r#"["--emit-graph"]"#,
                     Harness::Slow => r#"["--prompt-file", "{prompt_file}", "4000"]"#,
+                    Harness::CancelInVerify => r#"["--noop"]"#,
                 }
             ),
         )
@@ -337,6 +354,7 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
             "cancel",
             "doctor",
             "error",
+            "events",
             "inspect",
             "inspect_attempts",
             "integrate_preview",
@@ -420,6 +438,66 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
     // /meshloop resume: detached, as run.
     case("resume_detached");
     fixture.wait_for_node("gcell", 2, "AwaitingReview");
+
+    // The Board projection (#137): every transition of gcell, each with its stable id,
+    // read after a cursor. The last event per node is the state status reports.
+    let events = case("events");
+    let rows = events["data"]["events"].as_array().expect("events");
+    let seqs: Vec<i64> = rows
+        .iter()
+        .map(|e| e["seq"].as_i64().expect("seq"))
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+    assert_eq!(events["data"]["last_seq"], *seqs.last().expect("an event"));
+    let status = fixture.as_cell(&["status", "--graph", "gcell"].map(String::from));
+    for node in status["data"]["nodes"].as_array().expect("nodes") {
+        let last = rows.iter().rev().find(|e| e["task"] == node["id"]);
+        assert_eq!(last.map(|e| &e["to"]), Some(&node["state"]), "{events:#}");
+    }
+    let tail = fixture.as_cell(
+        &[
+            "events",
+            "--graph",
+            "gcell",
+            "--after",
+            &seqs[seqs.len() - 2].to_string(),
+        ]
+        .map(String::from),
+    );
+    assert_eq!(
+        tail["data"]["events"].as_array().map(Vec::len),
+        Some(1),
+        "{tail:#}"
+    );
+    let none = fixture.as_cell(
+        &[
+            "events",
+            "--graph",
+            "gcell",
+            "--after",
+            &seqs[seqs.len() - 1].to_string(),
+        ]
+        .map(String::from),
+    );
+    assert_eq!(none["data"]["events"], serde_json::json!([]), "{none:#}");
+    assert_eq!(none["data"]["last_seq"], *seqs.last().expect("an event"));
+    assert_eq!(none["data"]["more"], false, "{none:#}");
+    // --limit is applied in SQL; `more` says the rest wait past last_seq.
+    let first = fixture.as_cell(&["events", "--graph", "gcell", "--limit", "1"].map(String::from));
+    assert_eq!(
+        first["data"]["events"].as_array().map(Vec::len),
+        Some(1),
+        "{first:#}"
+    );
+    assert_eq!(
+        (&first["data"]["more"], &first["data"]["last_seq"]),
+        (&Value::from(true), &Value::from(seqs[0])),
+        "{first:#}"
+    );
+    assert!(
+        events["data"]["max_seq"].as_i64() >= seqs.last().copied(),
+        "{events:#}"
+    );
 
     // /meshloop cancel on a second run, and the worktrees meshloop keeps for it.
     for argv in [
@@ -507,6 +585,73 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
     )
     .expect("planned JSON");
     assert_fields(graph_fields, &written, "planned.json");
+}
+
+/// #137: a ledger written before #167 holds the cancelled attempt's stale check result
+/// after `Cancel`. Every reader's fold skips it, so `events` marks it superseded and
+/// its folded `nodes` agree with status: a projection never posts a state status does
+/// not show, nor wakes anyone for it.
+#[test]
+fn events_mark_a_pre_167_stale_row_superseded_and_fold_as_status_does() {
+    let contract = contract();
+    let fixture = Fixture::new(Harness::CancelInVerify);
+    // The run ends when its verify command cancels the graph; its exit is not the point.
+    let _ = fixture.meshloop(&["run", "--plan", "plan.json", "--accept-plan"]);
+    let argv: Vec<String> = ["events", "--graph", "gcell"].map(String::from).to_vec();
+    let before = fixture.as_cell(&argv);
+    let cancel = before["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|e| e["event"] == "Cancel" && e["task"] == 1)
+        .cloned()
+        .unwrap_or_else(|| panic!("a Cancel row for #1: {before:#}"));
+    assert_eq!(cancel["from"], "Verifying", "{before:#}");
+    // The exact row the pre-fix driver appended after the cancel (cancel_race.rs).
+    let conn = rusqlite::Connection::open(fixture.repo.join(".meshloop").join("state.sqlite"))
+        .expect("open ledger");
+    conn.execute(
+        "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, executor, occurred_at)
+         VALUES ('gcell', 1, ?1, 'Verifying', 'Failed', 'DeterministicChecksFailed', 'meshloop', '0')",
+        [cancel["attempt"].as_i64().expect("attempt")],
+    )
+    .expect("insert the stale row");
+    drop(conn);
+    let mut cell_argv = argv.clone();
+    cell_argv.extend(["--after", "0", "--limit", "200"].map(String::from));
+    let events = fixture.as_cell(&cell_argv);
+    assert_case(&contract, "events", &cell_argv, &events);
+    let rows = events["data"]["events"].as_array().expect("events");
+    let stale = rows.last().expect("the stale row");
+    assert_eq!(
+        (&stale["to"], &stale["superseded"]),
+        (&Value::from("Failed"), &Value::from(true)),
+        "{events:#}"
+    );
+    assert!(
+        rows[..rows.len() - 1]
+            .iter()
+            .all(|e| e["superseded"] == false),
+        "{events:#}"
+    );
+    assert_eq!(events["data"]["nodes"]["1"], "Cancelled", "{events:#}");
+    assert_eq!(
+        events["data"]["latest"]["1"], cancel["seq"],
+        "the newest row the fold counts for #1 is the Cancel"
+    );
+    let status = fixture.as_cell(&["status", "--graph", "gcell"].map(String::from));
+    let node = status["data"]["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|n| n["id"] == 1)
+        .cloned()
+        .expect("node 1");
+    assert_eq!(node["state"], events["data"]["nodes"]["1"], "{status:#}");
+    assert_eq!(
+        events["data"]["max_seq"], stale["seq"],
+        "the stale row is the ledger's newest"
+    );
 }
 
 #[test]

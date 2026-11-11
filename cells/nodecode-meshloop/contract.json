@@ -159,6 +159,28 @@
         { "path": "data.status", "type": "string" }
       ]
     },
+    "events": {
+      "argv": ["events", "--graph", "gcell", "--after", "0", "--limit", "200"],
+      "ok": true,
+      "fields": [
+        { "path": "data.graph_id", "type": "string" },
+        { "path": "data.plan_state", "type": "string" },
+        { "path": "data.ledger_id", "type": "string" },
+        { "path": "data.last_seq", "type": "integer" },
+        { "path": "data.max_seq", "type": "integer" },
+        { "path": "data.more", "type": "boolean" },
+        { "path": "data.nodes", "type": "object" },
+        { "path": "data.latest", "type": "object" },
+        { "path": "data.events", "type": "array" },
+        { "path": "data.events[].seq", "type": "integer" },
+        { "path": "data.events[].task", "type": "integer" },
+        { "path": "data.events[].from", "type": "string" },
+        { "path": "data.events[].to", "type": "string" },
+        { "path": "data.events[].event", "type": "string" },
+        { "path": "data.events[].superseded", "type": "boolean" },
+        { "path": "data.events[].evidence_path", "type": "string?" }
+      ]
+    },
     "workspace_inventory": {
       "argv": ["workspace", "inventory"],
       "command": "meshloop:workspace-inventory",
