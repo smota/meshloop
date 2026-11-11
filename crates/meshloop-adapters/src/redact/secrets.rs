@@ -343,6 +343,9 @@ fn url_password(input: &str, i: usize) -> Option<(usize, usize)> {
     if stop >= limit || bytes[stop] != b'@' {
         return None;
     }
+    // A userinfo holding an earlier replacement is left alone (idempotency).
+    // This miss is bounded: the scan stopped at the next `/`, and the next
+    // `://` scan starts after that `/`, so these reads never overlap.
     if has_mark(&input[from..stop]) {
         return None;
     }
@@ -464,6 +467,15 @@ fn has_mark(range: &str) -> bool {
     range.contains("[REDACTED")
 }
 
+/// `end`, or the start of the first earlier replacement inside `start..end`.
+/// A value is cut there and judged on what comes before, so the rule still
+/// moves the cursor past what it read (no re-reads) and stays idempotent.
+fn before_mark(input: &str, start: usize, end: usize) -> usize {
+    input[start..end]
+        .find("[REDACTED")
+        .map_or(end, |at| start + at)
+}
+
 /// `Err` carries how far the rule read.
 type Value = Result<(usize, usize), usize>;
 
@@ -519,10 +531,17 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Valu
     while end > start && is_blank(bytes[end - 1]) {
         end -= 1;
     }
-    if has_mark(&input[start..end]) {
-        return Err(end);
+    // An earlier replacement on the line ends the value: one forward search,
+    // and the header before it is still redacted.
+    let mut end = before_mark(input, start, end);
+    while end > start && is_blank(bytes[end - 1]) {
+        end -= 1;
     }
-    Ok((start, end))
+    if end > start {
+        Ok((start, end))
+    } else {
+        Err(end)
+    }
 }
 
 /// The value after a secret-named key: `KEY=v`, `"key": "v"`, `key: v`,
@@ -537,12 +556,12 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
         && is_value_byte(first)
     {
         let v = word_end + 1;
-        let end = value_end(bytes, v);
+        let end = before_mark(input, v, value_end(bytes, v));
         let value = &input[v..end];
         if let Some(hit) = scheme_credential(input, v, end) {
             return hit;
         }
-        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value) && !has_mark(value);
+        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
         return if ok { Ok((v, end)) } else { Err(end) };
     }
     let mut j = word_end;
@@ -571,17 +590,17 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
     }
     if quoted {
         let end = run_end(bytes, v, |b| !is_quote(b) && b != b'\\' && b != b'\n');
+        let end = before_mark(input, v, end);
         let value = &input[v..end];
-        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value) && !has_mark(value);
+        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
         return if ok { Ok((v, end)) } else { Err(end) };
     }
-    let end = value_end(bytes, v);
+    let end = before_mark(input, v, value_end(bytes, v));
     let value = &input[v..end];
     if let Some(hit) = scheme_credential(input, v, end) {
         return hit;
     }
     let ok = is_literal_value(value)
-        && !has_mark(value)
         && if tight && sep == b'=' {
             value.len() >= ASSIGNED_MIN_LEN
         } else {
@@ -604,7 +623,8 @@ fn scheme_credential(input: &str, v: usize, end: usize) -> Option<Value> {
     }
     let token_end = run_end(bytes, start, is_token_byte);
     let token = &input[start..token_end];
-    Some(if is_credential_like(token) && !has_mark(token) {
+    // Token bytes exclude `[`, so a token never holds a replacement.
+    Some(if is_credential_like(token) {
         Ok((start, token_end))
     } else {
         Err(token_end)

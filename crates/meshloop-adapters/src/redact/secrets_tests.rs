@@ -422,6 +422,15 @@ fn scrubbing_is_linear_on_adversarial_input() {
         "aB3+".repeat(300_000),
         "\u{1b}[".repeat(300_000),
         format!("Authorization:{}", " ".repeat(600_000)),
+        // An earlier replacement at the end of a long line of headers.
+        format!("{}[REDACTED]", "Authorization: basic ".repeat(100_000)),
+        format!("{}[REDACTED]", "Authorization: token ".repeat(110_000)),
+        format!(
+            "{}[REDACTED]",
+            "Proxy-Authorization: digest ".repeat(75_000)
+        ),
+        format!("{}[REDACTED]", "token: Bearer ".repeat(150_000)),
+        format!("{}[REDACTED]", "api_key=\"abcdefgh ".repeat(110_000)),
     ];
     for input in &inputs {
         let start = std::time::Instant::now();
@@ -735,4 +744,18 @@ fn redacts_scheme_credentials_after_key_named_values() {
     ] {
         assert_eq!(redact(keep), keep);
     }
+}
+
+#[test]
+fn an_earlier_replacement_ends_a_header_value_but_does_not_disable_it() {
+    let token = fake(190, ALNUM, 20);
+    assert_eq!(
+        redact(&format!("Authorization: Bearer {token} [REDACTED] tail")),
+        "Authorization: [REDACTED] [REDACTED] tail"
+    );
+    assert_eq!(
+        redact(&format!("api_key=\"{token}[REDACTED]\"")),
+        "api_key=\"[REDACTED][REDACTED]\""
+    );
+    assert_eq!(redact("KEY=ab[REDACTED]"), "KEY=ab[REDACTED]");
 }
