@@ -539,6 +539,11 @@ pub trait RunStore:
     fn load_driver(&self, _graph_id: &str) -> Result<Option<DriverLiveness>, StoreError> {
         Ok(None)
     }
+    /// Forgets a graph's driver row, so a gone driver's row cannot describe the
+    /// process that is about to drive the graph (#195).
+    fn clear_driver(&mut self, _graph_id: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
     fn graph_from_run(&self, graph_id: &str) -> Result<TaskGraph, StoreError> {
         let row = self
             .load_run(graph_id)?

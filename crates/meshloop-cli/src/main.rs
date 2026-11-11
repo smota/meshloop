@@ -1183,6 +1183,9 @@ fn cmd_run(
         .active_graph
         .clone()
         .unwrap_or_else(|| graph_id.clone());
+    // This command drives the graph now (or spawns the driver that will); a gone
+    // driver's row must not describe it.
+    driver_liveness::forget_gone(&mut *saga.store, saga.processes, &gid);
     if detach {
         return spawn_driver(
             "meshloop:run",
@@ -1394,7 +1397,24 @@ fn cmd_resume_detached(
         (_, true) => &["--restart"],
         _ => &[],
     };
-    spawn_driver(command, &repo_root(), &gid, extra, &options, json, origin)
+    // The spawned driver registers only once it has composed its store. Until then
+    // the previous driver's exited row would read as `driver_gone` to `watch`.
+    let root = repo_root();
+    let db_path = options
+        .db
+        .clone()
+        .unwrap_or_else(|| compose::default_db(&root));
+    match meshloop_adapters::store::SqliteStore::open(&db_path) {
+        Ok(mut store) => driver_liveness::forget_gone(
+            &mut store,
+            &meshloop_adapters::process::HostProcessView {},
+            &gid,
+        ),
+        Err(error) => {
+            return read_error(command, origin, json, format!("{error:?}"));
+        }
+    }
+    spawn_driver(command, &root, &gid, extra, &options, json, origin)
 }
 
 fn with_saga(
@@ -1816,7 +1836,12 @@ fn cmd_resume(
                 return ExitCode::from(1);
             }
             let tracked = std::env::var_os(driver_liveness::LOG_ENV);
+            if tracked.is_none() {
+                // A foreground resume drives the graph itself without a driver row.
+                driver_liveness::forget_gone(&mut *saga.store, saga.processes, &id);
+            }
             if let Some(log) = &tracked {
+                driver_liveness::delay_register_if_requested(fixture_only);
                 if let Err(error) =
                     driver_liveness::register(saga.store, &id, std::path::Path::new(log))
                 {
@@ -2212,36 +2237,18 @@ fn watch_status_code(reason: &str) -> u8 {
     }
 }
 
-/// How long a detached driver must stay gone before `watch` gives up on it. A
-/// `resume --detach` returns before its new driver registers, so the previous
-/// driver's exited row can briefly describe a run that is about to move again.
-const WATCH_DRIVER_GRACE: std::time::Duration =
-    std::time::Duration::from_secs(2 * meshloop_engine::run_loop::DRIVER_HEARTBEAT.as_secs());
-
-/// Tracks whether a run's detached driver has exited or been lost while a node
-/// still needs it (#195). Nothing moves such a run until `meshloop resume`, so
-/// `watch` exits `driver_gone` once that holds for [`WATCH_DRIVER_GRACE`]. A run
-/// with no driver row (a foreground `run`) is never reported gone.
-#[derive(Default)]
-struct WatchDriverGone {
-    since: Option<std::time::Instant>,
-}
-
-impl WatchDriverGone {
-    fn observe(
-        &mut self,
-        saga: &RunLoop<'_>,
-        status: &RunStatus,
-    ) -> Option<driver_liveness::DriverReport> {
-        let report = driver_liveness::observe(saga.store, saga.processes, status)
-            .filter(|report| report.suggest_resume);
-        let Some(report) = report else {
-            self.since = None;
-            return None;
-        };
-        let since = *self.since.get_or_insert_with(std::time::Instant::now);
-        (since.elapsed() >= WATCH_DRIVER_GRACE).then_some(report)
-    }
+/// Reports a run whose detached driver has exited or been lost while a node
+/// still needs it (#195): nothing moves it until `meshloop resume`, so `watch`
+/// exits `driver_gone`. A run with no driver row is never reported gone: every
+/// command that drives a graph first clears a gone driver's row (see
+/// `driver_liveness::forget_gone`), so a foreground `run`/`resume`, and a
+/// `resume --detach` whose driver has not registered yet, keep `watch` waiting.
+fn watch_driver_gone(
+    saga: &RunLoop<'_>,
+    status: &RunStatus,
+) -> Option<driver_liveness::DriverReport> {
+    driver_liveness::observe(saga.store, saga.processes, status)
+        .filter(|report| report.suggest_resume)
 }
 
 /// Why a `watch` stopped, and the nodes responsible. Returns `None` while the run is still moving.
@@ -2591,7 +2598,6 @@ fn cmd_watch(
         let interval = std::time::Duration::from_secs(interval_secs);
         let mut seen: HashMap<u32, TaskState> = HashMap::new();
         let mut seen_plan: Option<PlanState> = None;
-        let mut gone = WatchDriverGone::default();
         loop {
             let frame = match saga.read_frame(&selection) {
                 Ok(frame) => frame,
@@ -2668,11 +2674,9 @@ fn cmd_watch(
                     println!("[{ts}] {} plan: {from} -> {:?}", s.graph_id, s.plan_state);
                 }
             }
-            // Checked on every still-moving frame, so a driver that comes back
-            // (`resume --detach`) resets the grace window.
             let (exit, driver) = match watch_exit(s) {
                 Some(exit) => (Some(exit), None),
-                None => match gone.observe(saga, s) {
+                None => match watch_driver_gone(saga, s) {
                     Some(report) => (
                         Some(("driver_gone", driver_liveness::needing_driver(s))),
                         Some(report),

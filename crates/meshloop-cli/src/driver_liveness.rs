@@ -66,6 +66,52 @@ pub fn finish(store: &mut dyn RunStore, graph_id: &str, code: i32) {
     let _ = store.record_driver_exit(graph_id, std::process::id(), code, &unix_secs());
 }
 
+/// Fixture-only test hook: milliseconds a detached driver waits before it
+/// registers, widening the window in which no driver row describes the run.
+pub const REGISTER_DELAY_ENV: &str = "MESHLOOP_DRIVER_REGISTER_DELAY_MS";
+
+pub fn delay_register_if_requested(fixture_only: bool) {
+    if !fixture_only {
+        return;
+    }
+    if let Some(ms) = std::env::var(REGISTER_DELAY_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+/// Removes the graph's driver row unless that driver is alive. Called by every
+/// command that is about to drive the graph (a foreground `run`/`resume`, and
+/// `run --detach`/`resume --detach` before spawning), so a previous driver's
+/// `exited(N)`/`lost` row never describes a run that is moving again: until the
+/// new detached driver registers, and for the whole of a foreground drive, the
+/// run has no driver row, and `watch` never reports it `driver_gone` (#195).
+/// A live driver's row is kept: that driver still owns the graph.
+pub fn forget_gone(store: &mut dyn RunStore, processes: &dyn ProcessView, graph_id: &str) {
+    let Ok(Some(row)) = store.load_driver(graph_id) else {
+        return;
+    };
+    if is_alive(&row, processes) {
+        return;
+    }
+    if let Err(error) = store.clear_driver(graph_id) {
+        eprintln!("driver liveness: could not clear the previous driver: {error:?}");
+    }
+}
+
+fn is_alive(row: &DriverLiveness, processes: &dyn ProcessView) -> bool {
+    let image = std::env::current_exe()
+        .ok()
+        .and_then(|path| meshloop_adapters::process::process_image_name(&path));
+    let live = processes.is_live(&ProcessHint {
+        pid: row.pid,
+        image_name: image,
+    });
+    driver_label(row, live, unix_now(), DRIVER_HEARTBEAT) == "alive"
+}
+
 pub fn panic_if_requested(fixture_only: bool) {
     if fixture_only && std::env::var(PANIC_ENV).ok().as_deref() == Some("1") {
         eprintln!("meshloop driver panic");

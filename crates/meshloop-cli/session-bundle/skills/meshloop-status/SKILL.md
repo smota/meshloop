@@ -18,4 +18,4 @@ change, and ends with `{"exit":<reason>,"nodes":[…]}`: `awaiting_review`,
 `awaiting_plan_acceptance`, `completed` (exit 0), `failed`/`cancelled` (exit 1),
 `timeout` (exit 3), `driver_gone` (exit 4: the detached driver exited or was lost
 while the listed nodes still need it; the line adds `driver`, `driver_log` and
-`"driver_hint":"resume"`, so run `meshloop resume`).
+`"driver_hint":"resume"`, so run `meshloop resume --detach --graph <id>`).

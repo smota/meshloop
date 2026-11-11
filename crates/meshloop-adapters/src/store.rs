@@ -1081,6 +1081,19 @@ impl RunStore for SqliteStore {
         Ok(())
     }
 
+    fn clear_driver(&mut self, graph_id: &str) -> Result<(), StoreError> {
+        if self.read_only {
+            return Err(StoreError::ReadOnly);
+        }
+        self.conn
+            .execute(
+                "DELETE FROM run_driver_liveness WHERE graph_id=?1",
+                params![graph_id],
+            )
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     fn load_driver(&self, graph_id: &str) -> Result<Option<DriverLiveness>, StoreError> {
         self.conn
             .query_row(
@@ -1346,6 +1359,8 @@ mod tests {
         assert_eq!(exited.heartbeat_at, "21");
         store.record_driver_heartbeat("g", 42, "99").unwrap();
         assert_eq!(store.load_driver("g").unwrap().unwrap().heartbeat_at, "21");
+        store.clear_driver("g").unwrap();
+        assert_eq!(store.load_driver("g").unwrap(), None);
     }
 
     #[test]
