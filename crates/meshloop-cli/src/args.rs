@@ -898,7 +898,7 @@ fn parse_priors(rest: &[String]) -> Result<Command, String> {
 }
 
 pub fn help_text() -> &'static str {
-    "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
+    "Meshloop session control plane. All skills/commands/tools are prefixed meshloop:.\n\
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
