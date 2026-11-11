@@ -27,6 +27,12 @@ run. Release source paths are relative to `~/.local/share/nodecode/98dd6dc80/src
 | A hub cell `nodecode-delegation` offers "named model routes for subagents" | `~/.nodecode/hub/2468c84d448ad2e1.json` | entry only |
 | Nodecode self-learning improves outcomes | none published | no; hypothesis until #140 |
 
+Run on 2026-11-11 against `0.1.14+cef1be5a3` for the worker harness (#138): the shell
+exits 2 without a terminal, `nodecode rpc` runs a turn only while its stdin stays open,
+and `update.mode` defaults to `auto` on an installed build. Findings and the worker's
+containment are in [harnesses.md](../engineering/harnesses.md#nodecode-worker-138) and
+[nodecode-containment.md](../engineering/nodecode-containment.md).
+
 ## Installing the cell for development
 
 The cell lives at `cells/nodecode-meshloop/`. A development install links the nodecode

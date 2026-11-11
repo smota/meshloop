@@ -443,6 +443,49 @@ mod tests {
         assert!(config.harnesses.contains_key("fixture"));
     }
 
+    /// Issue #138: the commented nodecode example in the example config loads once
+    /// uncommented, passes `{model_ref}` and `{prompt_file}` to the containment wrapper,
+    /// and names a provider in every `model_ref`.
+    #[test]
+    fn commented_nodecode_example_loads_when_uncommented() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join("config/meshloop.example.toml")).unwrap();
+        let start = text
+            .find("# [harnesses.nodecode]")
+            .expect("example config has a commented nodecode entry");
+        let block: String = text[start..]
+            .lines()
+            .take_while(|l| l.starts_with('#'))
+            .map(|l| l.strip_prefix("# ").unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = write_temp("nodecode-example", &format!("{text}\n{block}\n"));
+        let config = load(&path).expect("uncommented nodecode example loads");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        let hc = &config.harnesses["nodecode"];
+        assert_eq!(hc.kind.as_deref(), Some("nodecode"));
+        assert!(
+            hc.executable
+                .ends_with("adapters/nodecode/meshloop-nodecode-sandbox")
+        );
+        assert_eq!(
+            hc.version_args.last().map(String::as_str),
+            Some("--version")
+        );
+        assert_eq!(hc.prompt_via, "file");
+        let args = &hc.invoke_args_template;
+        let after = |flag: &str| {
+            let i = args.iter().position(|a| a == flag).unwrap();
+            args[i + 1].as_str()
+        };
+        assert_eq!(after("--model"), "{model_ref}");
+        assert_eq!(after("--prompt-file"), "{prompt_file}");
+        assert!(!args.iter().any(|a| a == "--" || a == "--run-command"));
+        let models = hc.model_entries();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.model_ref.contains('/')));
+    }
+
     fn write_temp(tag: &str, toml: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("meshloop-cfg-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
