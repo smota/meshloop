@@ -510,10 +510,10 @@ mod tests {
     /// A background process in the check's group that keeps stdout open.
     #[cfg(unix)]
     const BACKGROUND_HOLDER: &str = r#"echo $$ > "$1/group"; sleep 30 & echo done"#;
-    /// A process that left the check's group (`setsid`) and keeps stdout open.
+    /// A process that left the check's group (`setsid`) and keeps stdout open. The
+    /// script waits until it has escaped, so the end-of-check kill cannot catch it first.
     #[cfg(target_os = "linux")]
-    const ESCAPED_HOLDER: &str =
-        r#"echo $$ > "$1/group"; setsid sh -c 'echo $$ > "$0/escaped"; exec sleep 30' "$1" &"#;
+    const ESCAPED_HOLDER: &str = r#"echo $$ > "$1/group"; setsid sh -c 'echo $$ > "$0/escaped"; exec sleep 30' "$1" & while [ ! -s "$1/escaped" ]; do sleep 0.01; done;"#;
 
     /// Issue #186: a check whose direct child exits while a background process still
     /// holds its stdout returns at once, and the check's process group is ended.
