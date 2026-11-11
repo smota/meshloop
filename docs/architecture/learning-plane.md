@@ -149,7 +149,15 @@ only the spike's observation.
 ## Advisory input (#139)
 
 This section holds the mechanism for the ADR 0038 amendment of 2026-11-10 (#139). That
-amendment was **accepted on 2026-11-11** (coordinator, delegated owner authority); nothing here is built yet. It covers
+amendment was **accepted on 2026-11-11** (coordinator, delegated owner authority) and is
+**built** in #139: the kernel side in `meshloop-domain/src/advisory.rs` (value types and
+predicates), `meshloop-adapters/src/advisory.rs` (loader, ledger, snapshot),
+`meshloop-engine/src/priors.rs` (the oracle) and `meshloop-cli/src/priors.rs` (the verbs),
+with tests in `crates/meshloop-cli/tests/advisory_priors.rs`; the cell side in
+`cells/nodecode-meshloop/learn.lisp`, with its fixture tests in `test/pure_test.lisp`, a
+load-test round trip (learn, then check and accept in a shell, then a run routed with the
+priors in effect) and the contract cases `priors_attempts`, `priors_show` and
+`priors_check` asserted by `nodecode_cell_contract.rs`. It covers
 routing priors only. Tier hints, planning notes, repair constraints and plan-decision
 lessons are deferred until a GO at #140. Plan-decision lessons first need an append-only
 `plan_decisions` table, because today `review-plan` answers only the decision it just
@@ -162,9 +170,12 @@ Code references are at base `ac87e7a`.
 The #139 build adds three fields to the attempt JSON (`report.rs:154`, `attempt_json`).
 Each field is listed as required in the cell's `priors_attempts` case in `contract.json`,
 the fields only `/meshloop learn` reads, so an older binary still answers `report` and
-`accept` while `learn` fails closed. The fold also needs the node's tier, which `inspect`
-does not report before #139: the cell asks for `data.nodes[].tier` (the plan's tier, or
-`null` when the plan names none, which routing keys as `Tier2`), marked `pending_kernel`.
+`accept` while `learn` fails closed. #139 also adds the node's tier to `inspect`
+(`data.nodes[].tier`, `Tier1`, `Tier2` or `Tier3`), the tier routing uses: the plan's tier,
+or the one meshloop assigned at plan time when the plan named none (`DefaultTierAssigner`,
+`planner.rs`: Tier1 for a node nothing depends on, Tier2 for one others depend on, Tier3
+with two or more dependencies), and `Tier2` only when none is stored. The fold keys
+evidence by that value.
 
 | Field | Values | Source |
 |---|---|---|

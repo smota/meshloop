@@ -26,9 +26,13 @@ before it reads anything; /meshloop priors accept and revoke refuse and run
 nothing; the :tool veto refuses priors accept and revoke and lets show and check
 through. Against a binary without the #139 attempt fields learn fails closed in
 one line and writes no proposal. With a binary that has `meshloop priors', a
-fixture run whose template passes {model_ref} is folded into a proposal
-checked here against the v1 rules, then read back by priors check; without
-one those checks are skipped with a note.
+round trip with no model turn: a fixture run of five independent nodes whose
+template passes {model_ref} is folded by /meshloop learn into a proposal
+(checked against the v1 rules and its SHA-256), read back by /meshloop priors
+check, checked and accepted by the operator in a shell (`meshloop priors
+accept --as test-operator', never the cell), and a second run is routed with
+the priors in effect: priors show reports in_effect and routed attempts.
+Without that verb those checks are skipped with a note.
 
 Board (#137): with meshloop.board off nothing is posted; on, exactly one pointer
 post per event of a fixture run and none again after a second sync, a lost
@@ -394,48 +398,118 @@ def priors_section(answer, home, repo, meshloop):
         text,
     )
     text = answer("/meshloop priors show")
-    check("priors show: nothing promoted", text == "meshloop priors: promoted priors in effect: none", text)
+    check(
+        "priors show: nothing promoted, and why",
+        text == "meshloop priors: promoted priors in effect: none (not_promoted)",
+        text,
+    )
 
 
 def priors_proposal_section(answer, organism, work, meshloop, fixture_harness):
-    """#139 with a binary that has `meshloop priors': a fixture run whose
-    template passes {model_ref}, folded into a proposal under .agent-runs/."""
+    """#139 round trip, no model turn: a fixture run whose template passes
+    {model_ref}, folded by /meshloop learn into a proposal under .agent-runs/;
+    the operator checks and accepts it in a shell (never the cell); a second
+    run is then routed with the priors in effect, and priors show says so."""
     repo = work / "priors"
-    make_fixture(repo, fixture_harness, invoke=["--model", "{model_ref}", "--prompt-file", "{prompt_file}"], graph="g139")
+    # No plan tier: meshloop assigns one at plan time (an independent node is Tier1),
+    # reports it in inspect, and routes with it; the fold keys evidence by it.
+    independent = [{"id": i, "description": f"node {i}", "depends_on": [], "tier": None} for i in range(1, 6)]
+    make_fixture(
+        repo,
+        fixture_harness,
+        invoke=["--model", "{model_ref}", "--prompt-file", "{prompt_file}"],
+        graph="g139",
+        nodes=independent,
+        extra={
+            ".gitignore": "/.meshloop/\n/worktrees/\n/.agent-runs/\n",
+            "plan2.json": json.dumps({"graph_id": "g139b", "nodes": [
+                {"id": 1, "description": "routed with priors", "depends_on": [], "tier": None}]}),
+        },
+    )
     created = organism.call("POST", "/api/gateway/sessions", {"session_id": "s-PRIORS", "cwd": str(repo)})
     check("priors session opened", "http_error" not in created, json.dumps(created))
     if not has_priors(meshloop, repo):
-        note("[skip] the proposal end to end: this meshloop has no `priors' verb (the #139 kernel side)")
+        note("[skip] the priors round trip: this meshloop has no `priors' verb (the #139 kernel side)")
         return
     out = run([str(meshloop), "run", "--plan", "plan.json", "--accept-plan", "--worktree-base", "worktrees"], repo)
-    check("priors fixture run by the meshloop CLI", out.returncode == 0, out.stderr[-400:])
+    check("priors fixture run (5 independent nodes) by the meshloop CLI", out.returncode == 0, out.stderr[-400:])
     store_before = snapshot(repo)["store"]
+
     text = answer("/meshloop learn --graph g139 --out .agent-runs/priors/p.json", "s-PRIORS")
     path = repo / ".agent-runs" / "priors" / "p.json"
     check(
         "learn writes the proposal and lists each prior key with its counts",
         text.startswith("meshloop learn: wrote a routing-prior proposal to ") and path.is_file()
-        and "prior fixture / fixture-model / Tier2: 1 attempt, 1 passed, 0 failed; below the kernel's floor" in text
-        and "excluded by reason: not_subprocess 0" in text
+        and "prior fixture / fixture-model / Tier1: 5 attempts, 5 passed, 0 failed; clears the kernel's floor (n >= 5)" in text
+        and "excluded by reason: not_subprocess 0, model_not_passed 0, model_unverified 0, cancelled 0, no_check_result 0" in text
+        and "promoted priors in effect: none" in text
         and f"meshloop priors accept --file {path} --as <your-name>" in text,
         text,
     )
-    if path.is_file():
-        ok, why = proposal_holds_v1_rules(path)
-        check("the proposal holds the v1 rules", ok, why)
-        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-        check("the digest names the file's SHA-256", digest in text, digest)
+    if not path.is_file():
+        return
+    ok, why = proposal_holds_v1_rules(path)
+    check("the proposal holds the v1 rules", ok, why)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    check("the digest names the file's SHA-256", f"sha256:{digest}" in text, digest)
     check("learn wrote nothing to the meshloop store", snapshot(repo)["store"] == store_before)
     text = answer("/meshloop learn --graph g139 --out .agent-runs/priors/p.json", "s-PRIORS")
     check("learn refuses to overwrite a proposal", "exists; name a new file" in text, text)
     text = answer("/meshloop priors check .agent-runs/priors/p.json", "s-PRIORS")
     check(
-        "priors check reads the proposal and promotes nothing",
-        text.startswith("meshloop priors check: .agent-runs/priors/p.json: ") and "nothing promoted" in text,
+        "/meshloop priors check reads the proposal: one usable entry, nothing promoted",
+        text.startswith("meshloop priors check: .agent-runs/priors/p.json: 1 usable, 0 ignored")
+        and "usable fixture / fixture-model / Tier1: 5 attempts, 5 passed" in text and "nothing promoted" in text,
         text,
     )
+    check("priors check wrote nothing to the meshloop store", snapshot(repo)["store"] == store_before)
+
+    # The operator, in a shell: check, then accept, naming themselves. Never the cell.
+    shell_check = cli_json(meshloop, repo, "priors", "check", "--file", str(path))
+    data = shell_check.get("data") or {}
+    check(
+        "operator's meshloop priors check: no file fault, the entry usable, its references resolved",
+        shell_check.get("ok") is True and data.get("file_fault") is None and len(data.get("usable", [])) == 1
+        and data.get("resolved_refs") == 5 and data.get("unresolved_refs") == 0
+        and data.get("priors_sha256") == digest,
+        json.dumps(shell_check)[:600],
+    )
+    accepted = run([str(meshloop), "priors", "accept", "--file", str(path), "--as", "test-operator"], repo)
+    check("operator's meshloop priors accept --as test-operator", accepted.returncode == 0, accepted.stderr[-400:])
     text = answer("/meshloop priors show", "s-PRIORS")
-    check("still nothing promoted after learn and check", text == "meshloop priors: promoted priors in effect: none", text)
+    check(
+        "/meshloop priors show: in effect, accepted by test-operator, no routed attempt yet",
+        text.startswith(f"meshloop priors: promoted priors in effect: {digest} (ledger row ")
+        and ", accepted by test-operator); 1 usable entry; changed_top on 0 of 0 routed attempts" in text,
+        text,
+    )
+
+    # A second run is routed with the priors in effect.
+    out = run([str(meshloop), "run", "--plan", "plan2.json", "--accept-plan", "--worktree-base", "worktrees"], repo)
+    check("second run by the meshloop CLI", out.returncode == 0, out.stderr[-400:])
+    shown = cli_json(meshloop, repo, "priors", "show")
+    data = shown.get("data") or {}
+    routing = data.get("routing") or {}
+    check(
+        "priors show after the second run: in effect, routing.attempts > 0",
+        data.get("in_effect") is True and data.get("priors_sha256") == digest
+        and (routing.get("attempts") or 0) > 0 and (data.get("row") or {}).get("identity") == "test-operator",
+        json.dumps(shown)[:600],
+    )
+    text = answer("/meshloop priors show", "s-PRIORS")
+    check(
+        "/meshloop priors show counts the routed attempts",
+        f"changed_top on {routing.get('changed_top')} of {routing.get('attempts')} routed attempt" in text,
+        text,
+    )
+    text = answer("/meshloop learn --graph g139 --graph g139b --out .agent-runs/priors/p2.json", "s-PRIORS")
+    check(
+        "learn after promotion: both runs folded, the promoted digest named",
+        text.startswith("meshloop learn: wrote a routing-prior proposal to ")
+        and "folded 2 graphs (g139, g139b)" in text and "prior fixture / fixture-model / Tier1: 6 attempts, 6 passed" in text
+        and f"promoted priors in effect: {digest}" in text,
+        text,
+    )
 
 
 def drive_section(answer, organism, home, work, meshloop, fixture_harness):

@@ -166,8 +166,9 @@ outcomes, evidence summaries, node descriptions or Board posts. An attempt count
 is not `unverified`, its task is not `Cancelled`, and `check_result` is `passed` or `failed`.
 Any other attempt is excluded under the first reason that holds: `not_subprocess`,
 `model_not_passed`, `model_unverified`, `cancelled`, `no_check_result` (a crash or a
-timeout). Counted attempts are grouped by (harness, `model_ref`, tier, `subprocess`); a node
-with no tier is keyed `Tier2`, as routing keys it. Each entry carries one
+timeout). Counted attempts are grouped by (harness, `model_ref`, tier, `subprocess`), with
+the tier `inspect` reports, which is the one routing uses (the plan's, or the one meshloop
+assigned at plan time when the plan named none). Each entry carries one
 `{graph_id, task_id, attempt_id, passed}` reference per attempt, `successes` is the count of
 references with `passed` true, and a row seen twice is counted once. Entries and references
 are sorted, so the same attempts give the same bytes but for `generated_at`.
@@ -188,17 +189,29 @@ meshloop learn: wrote a routing-prior proposal to /home/op/.nodecode/meshloop/pr
   prior codex / gpt-x / Tier2: 6 attempts, 5 passed, 1 failed; clears the kernel's floor (n >= 5)
   prior grok / grok-4 / Tier2: 1 attempt, 1 passed, 0 failed; below the kernel's floor (n >= 5): it will be ignored
   excluded by reason: not_subprocess 3, model_not_passed 2, model_unverified 2, cancelled 1, no_check_result 2
-  promoted priors in effect: none
+  promoted priors in effect: none (not_promoted)
   This cell never promotes. To promote, type these in a shell yourself, reading the first one's diagnostics before the second:
     meshloop priors check --file /home/op/.nodecode/meshloop/priors/meshloop-1a2b3c4d5e6f/proposal-20261111T093000Z.json
     meshloop priors accept --file /home/op/.nodecode/meshloop/priors/meshloop-1a2b3c4d5e6f/proposal-20261111T093000Z.json --as <your-name>
 ```
 
-The digest's `promoted priors` line comes from `meshloop priors show --json`, with the
-`advisory_routing` `changed_top` count when priors are in effect; a binary without that verb
-says `unknown`. The fields the cell reads of `priors show` and `priors check`, and the
-node `tier` in `inspect`, are marked `pending_kernel` in [`contract.json`](contract.json)
-until the kernel side is integrated.
+The digest's `promoted priors` line comes from `meshloop priors show --json`: the promoted
+digest, its ledger row and who accepted it, how many entries apply, and the
+`advisory_routing` counts (routed attempts and those whose top candidate the priors
+changed). With nothing in effect it names the file-level reason, such as `not_promoted`. A
+binary without that verb says `unknown`. `learn` also takes the kernel's `evidence_floor`
+from that answer. `/meshloop priors check FILE` lists the entries routing would use once
+promoted, how many it would ignore, and each diagnostic with its level and key:
+
+```text
+meshloop priors check: .agent-runs/priors/p.json: 1 usable, 0 ignored; 0 diagnostics (read-only, nothing promoted)
+  usable fixture / fixture-model / Tier1: 5 attempts, 5 passed
+  To promote it, a person types in a shell: meshloop priors accept --file .agent-runs/priors/p.json --as <your-name>
+```
+
+The fields the cell reads of `inspect` (the #139 attempt fields and the node `tier`),
+`priors show` and `priors check` are the `priors_attempts`, `priors_show` and
+`priors_check` cases of [`contract.json`](contract.json).
 
 ### The `:tool` veto
 
@@ -461,10 +474,16 @@ list. To read a new field, add it to `contract.json` first.
   outside `.agent-runs/` before reading meshloop, that `/meshloop priors accept` and
   `revoke` refuse and run nothing, and the veto on `priors accept` and `revoke` through
   `hook-check`. Against a binary without the #139 attempt fields, `learn` fails closed in
-  one line and writes no file. With a binary that has `meshloop priors`, it also folds a
-  fixture run whose template passes `{model_ref}` into a proposal under `.agent-runs/`,
-  checks it against the v1 rules and its digest against the file's SHA-256, and reads it
-  back with `priors check`; without one those checks are skipped with a note.
+  one line and writes no file. With a binary that has `meshloop priors`, it runs a round
+  trip with no model turn: a fixture run of five independent nodes whose template passes
+  `{model_ref}`; `/meshloop learn` folds it into a proposal under `.agent-runs/` (one key
+  clearing the floor, the v1 rules held, the digest naming the file's SHA-256, nothing
+  written to the meshloop store, no overwrite); `/meshloop priors check` reads it back;
+  the operator checks it and accepts it in a shell (`meshloop priors accept --as
+  test-operator`, never the cell); `/meshloop priors show` names the row and who accepted
+  it; a second run is routed with the priors in effect, so `priors show` reports
+  `in_effect` and routed attempts; and `learn` over both runs names the promoted digest.
+  Without that verb those checks are skipped with a note.
   For the Board projection (#137), on a fixture repository of its own with the
   `nodecode-board` cell on and a supervising session on the board, it checks the
   following. With `board` off, `board-sync` refuses and `status` posts nothing. With it
@@ -535,6 +554,8 @@ list. To read a new field, add it to `contract.json` first.
   accept` and `priors revoke` in every reading above and lets `priors show`, `priors
   check` and `/meshloop learn` through, and reads the sources to check that learn asks
   meshloop only for `inspect`, `status`, `workspace inventory` and `priors show|check`.
+  It also summarizes `priors check` answers in the kernel's shape (usable entries, ignored
+  count, each diagnostic with its level and key, no promote command for a file fault).
   `MESHLOOP_PRIORS_SAMPLE=FILE` writes the fixture proposal to FILE, for a check against
   the schema with a JSON Schema validator. When the pinned
   nodecode release is installed, it also reads that release's board source for the

@@ -40,13 +40,15 @@ that holds is the attempt's one reason.")
   "The tiers a v1 entry may carry, as meshloop names them.")
 
 (defparameter +default-tier+ "Tier2"
-  "The tier the router keys a node that names none with (run_loop.rs,
-node.tier.unwrap_or(Tier::Tier2)), so its evidence is keyed as routing looks it up.")
+  "The tier routing keys a node with no stored tier (run_loop.rs,
+node.tier.unwrap_or(Tier::Tier2)). meshloop reports every node's routed tier in
+inspect since #139, so this only reads an answer that left it null.")
 
 (defparameter *evidence-floor* 5
-  "The kernel's evidence floor, a constant compiled in there. The digest says
-which entries clear it; the file carries every entry, and the kernel ignores
-those below it with a diagnostic.")
+  "The kernel's evidence floor, a constant compiled in there; learn uses the
+evidence_floor `priors show' reports when it answers. The digest says which
+entries clear it; the file carries every entry, and the kernel ignores those
+below it with a diagnostic.")
 
 (defparameter *priors-file-limit* (* 1024 1024)
   "The most UTF-8 bytes a proposal may hold; the kernel refuses a larger file.")
@@ -367,20 +369,32 @@ all reclaimed is only folded when named."
 
 (defun promoted-line (session-id)
   "One line on the priors in effect, from `meshloop priors show', or why it is
-unknown. Never a refusal: the proposal stands without it."
+unknown. Never a refusal: the proposal stands without it.
+=> (values LINE FLOOR), FLOOR the kernel's evidence floor when it said one."
   (handler-case
       (let* ((object (checked (ok-or-refuse (ask "priors" (list "show") session-id :command "meshloop:priors-show"))
                               "priors_show"))
-             (data (nlk:json-value object :object "data")))
-        (if (nlk:json-value data :boolean "in_effect")
-            (format nil "promoted priors in effect: ~a~@[; changed_top on ~d~]~@[ of ~d routed attempts~]"
-                    (let ((sha (nlk:json-value data :string "priors_sha256"))) (if sha (shown sha) "?"))
-                    (nlk:json-value data :integer "routing" "changed_top")
-                    (nlk:json-value data :integer "routing" "attempts"))
-            "promoted priors in effect: none"))
+             (data (nlk:json-value object :object "data"))
+             (row (nlk:json-value data :object "row")))
+        (values
+         (if (nlk:json-value data :boolean "in_effect")
+             (format nil "promoted priors in effect: ~a~@[ (ledger row ~d~@[, accepted by ~a~])~]; ~
+                          ~d usable entr~:@p; changed_top on ~d of ~d routed attempt~:p"
+                     (let ((sha (nlk:json-value data :string "priors_sha256"))) (if sha (shown sha) "?"))
+                     (nlk:json-value row :integer "seq")
+                     (let ((who (nlk:json-value row :string "identity"))) (and who (shown who)))
+                     (length (nlk:json-array data "priors"))
+                     (or (nlk:json-value data :integer "routing" "changed_top") 0)
+                     (or (nlk:json-value data :integer "routing" "attempts") 0))
+             (format nil "promoted priors in effect: none~@[ (~a)~]"
+                     (let ((first (find-if (lambda (d) (equal (nlk:json-value d :string "level") "file"))
+                                           (nlk:json-array data "diagnostics"))))
+                       (and first (shown (nlk:json-value first :string "code"))))))
+         (nlk:json-value data :integer "evidence_floor")))
     (meshloop-error (condition)
-      (format nil "promoted priors in effect: unknown (meshloop priors show: ~a)"
-              (nlk:one-line (meshloop-error-detail condition) :cap *text-cap*)))))
+      (values (format nil "promoted priors in effect: unknown (meshloop priors show: ~a)"
+                      (nlk:one-line (meshloop-error-detail condition) :cap *text-cap*))
+              nil))))
 
 ;;; --- where the proposal goes --------------------------------------------------------
 
@@ -503,19 +517,20 @@ still lists) into a routing-prior proposal, write it, and answer the digest."
                      (fail "found no finished run to fold~:[~;~:* (~{~a~^; ~})~]. Name graphs with --graph: ~a"
                            (mapcar (lambda (s) (format nil "~a: ~a" (car s) (cdr s))) (reverse skipped))
                            +learn-usage+))
-                   (let* ((fold (fold-priors runs))
-                          (promoted (promoted-line session-id)))
-                     (if (null (getf fold :priors))
-                         (fold-digest fold nil nil (reverse skipped) promoted)
-                         (let* ((text (priors-json fold (iso-time now)))
-                                (bytes (utf-8-length text)))
-                           (when (> bytes *priors-file-limit*)
-                             (fail "the proposal would hold ~d bytes; the kernel reads ~d at most. ~
-                                    Name fewer graphs with --graph" bytes *priors-file-limit*))
-                           (let ((path (if out (agent-runs-path root out) (default-proposal-path root now))))
-                             (nlk:write-file-atomically path text :mode #o600 :directory-mode #o700)
-                             (fold-digest fold (uiop:native-namestring path) (nlk:sha256-text text)
-                                          (reverse skipped) promoted))))))))))
+                   (multiple-value-bind (promoted floor) (promoted-line session-id)
+                     (let ((fold (fold-priors runs))
+                           (*evidence-floor* (or floor *evidence-floor*)))
+                       (if (null (getf fold :priors))
+                           (fold-digest fold nil nil (reverse skipped) promoted)
+                           (let* ((text (priors-json fold (iso-time now)))
+                                  (bytes (utf-8-length text)))
+                             (when (> bytes *priors-file-limit*)
+                               (fail "the proposal would hold ~d bytes; the kernel reads ~d at most. ~
+                                      Name fewer graphs with --graph" bytes *priors-file-limit*))
+                             (let ((path (if out (agent-runs-path root out) (default-proposal-path root now))))
+                               (nlk:write-file-atomically path text :mode #o600 :directory-mode #o700)
+                               (fold-digest fold (uiop:native-namestring path) (nlk:sha256-text text)
+                                            (reverse skipped) promoted)))))))))))
 
 (defun priors-file-of (text usage)
   "TEXT as a file path meshloop reads, relative to the repository root, or a refusal."
@@ -535,7 +550,7 @@ neither and says so."
                  (cond
                    ((string= sub "show")
                     (when (rest words) (fail "show takes nothing more: /meshloop priors show"))
-                    (format nil "meshloop priors: ~a" (promoted-line session-id)))
+                    (format nil "meshloop priors: ~a" (values (promoted-line session-id))))
                    ((string= sub "check")
                     (let* ((usage "/meshloop priors check FILE")
                            (rest (rest words))
@@ -552,23 +567,42 @@ neither and says so."
                           (string= sub "accept") sub (string= sub "accept")))
                    (t (fail "takes show or check FILE: /meshloop priors show | /meshloop priors check FILE")))))))
 
+(defun prior-key-text (object)
+  "OBJECT's key, a prior or diagnostic of `priors show|check', as HARNESS / MODEL / TIER, or NIL."
+  (let ((harness (nlk:json-value object :string "harness"))
+        (model (nlk:json-value object :string "model_ref"))
+        (tier (nlk:json-value object :string "tier")))
+    (and harness model tier (format nil "~a / ~a / ~a" (shown harness) (shown model) (shown tier)))))
+
 (defun summarize-priors-check (file object)
-  "`meshloop priors check --file FILE --json' as a few lines: what the kernel
-would use and every diagnostic code, then how a person promotes it."
+  "`meshloop priors check --file FILE --json' as a few lines: the entries routing
+would use once promoted, the ones it would ignore and why, every diagnostic,
+then how a person promotes it."
   (let* ((data (nlk:json-value object :object "data"))
-         (diagnostics (nlk:json-array data "diagnostics")))
+         (usable (nlk:json-array data "usable"))
+         (ignored (nlk:json-array data "ignored"))
+         (diagnostics (nlk:json-array data "diagnostics"))
+         (fault (nlk:json-value data :string "file_fault")))
     (with-output-to-string (out)
       (format out "meshloop priors check: ~a: ~:[~;~:*file fault ~a, no priors would apply; ~]~
-                   ~a usable, ~a ignored; ~d diagnostic~:p (read-only, nothing promoted)"
-              file (let ((fault (nlk:json-value data :string "file_fault"))) (and fault (shown fault)))
-              (or (nlk:json-value data :integer "usable") "?") (or (nlk:json-value data :integer "ignored") "?")
-              (length diagnostics))
+                   ~d usable, ~d ignored; ~d diagnostic~:p (read-only, nothing promoted)"
+              file (and fault (shown fault)) (length usable) (length ignored) (length diagnostics))
+      (loop for entry across usable
+            for index from 0
+            while (< index *prior-lines*)
+            do (format out "~%  usable ~a: ~a attempt~:p, ~a passed"
+                       (or (prior-key-text entry) "?")
+                       (nlk:json-value entry :integer "attempts") (nlk:json-value entry :integer "successes")))
       (loop for d across diagnostics
             for index from 0
             while (< index *prior-lines*)
-            do (format out "~%  ~a~@[: ~a~]" (shown (nlk:json-value d :string "code"))
+            do (format out "~%  ~a [~a]~@[ ~a~]~@[: ~a~]"
+                       (shown (nlk:json-value d :string "code"))
+                       (shown (or (nlk:json-value d :string "level") "?"))
+                       (prior-key-text d)
                        (let ((detail (nlk:json-value d :string "detail"))) (and detail (shown detail)))))
       (when (> (length diagnostics) *prior-lines*)
-        (format out "~%  ... ~d more" (- (length diagnostics) *prior-lines*)))
-      (format out "~%  To promote it, a person types in a shell: meshloop priors accept --file ~a --as <your-name>"
-              (shell-word file)))))
+        (format out "~%  ... ~d more diagnostics" (- (length diagnostics) *prior-lines*)))
+      (unless fault
+        (format out "~%  To promote it, a person types in a shell: meshloop priors accept --file ~a --as <your-name>"
+                (shell-word file))))))

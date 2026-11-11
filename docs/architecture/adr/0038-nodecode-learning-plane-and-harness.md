@@ -269,5 +269,6 @@ in the build; the rules may not. Mechanism, code references and tests are in
 
 Accepted 2026-11-10 after architecture review against ADRs 0003, 0022 and 0032, jointly
 with ADR 0039 (see Approval evidence). Implementation evidence comes from #134 to #141 and
-#138. The #139 amendment is Proposed; the regression tests it requires are listed in
+#138. The #139 amendment was accepted on 2026-11-11 and is built (kernel and cell, #139); the
+regression tests it requires are listed in
 [learning-plane.md](../learning-plane.md#required-regression-tests).

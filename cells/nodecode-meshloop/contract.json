@@ -1,6 +1,6 @@
 {
   "schema": "nodecode-meshloop/cli-contract/1",
-  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on fixture repositories and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null. A field with \"optional\": true may be absent, and has its type when present. `command` names the envelope's command when it is not meshloop:<first argv word>. `graph` lists the fields the cell reads of a plan (the plan file review-plan shows, and data.graph of plan and review-plan). accept, and integrate without --deliverable, answer text, not JSON: the cell reads their exit code, then reads back what they recorded through inspect_attempts and status. A case or field with \"pending_kernel\" names what the #139 kernel build adds and the cell reads: the value says what the cell assumes, and the coordinator aligns the name with the kernel's actual shape (ADR 0038, amendment 2026-11-10). priors_attempts holds the fields only /meshloop learn reads, so an older binary still answers report and accept while learn fails closed.",
+  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on fixture repositories and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null. A field with \"optional\": true may be absent, and has its type when present. `command` names the envelope's command when it is not meshloop:<first argv word>. `graph` lists the fields the cell reads of a plan (the plan file review-plan shows, and data.graph of plan and review-plan). accept, and integrate without --deliverable, answer text, not JSON: the cell reads their exit code, then reads back what they recorded through inspect_attempts and status. priors_attempts holds the fields only /meshloop learn reads (the #139 attempt fields and the node tier), so an older binary still answers report and accept while learn fails closed.",
   "envelope": [
     { "path": "ok", "type": "boolean" },
     { "path": "command", "type": "string" }
@@ -98,39 +98,54 @@
     "priors_attempts": {
       "argv": ["inspect", "--attempts", "--graph", "gcell"],
       "ok": true,
-      "pending_kernel": "#139 adds dispatch_mode, model_passed and check_result to every attempt (learning-plane.md, New read-only attempt fields) and, asked by the cell, the node's tier, so the fold keys evidence as routing does",
       "fields": [
-        { "path": "data.nodes[].tier", "type": "string?", "pending_kernel": "the plan node's tier, Tier1|Tier2|Tier3, null when the plan names none (routing then keys Tier2); not in inspect before #139" },
+        { "path": "data.nodes[].tier", "type": "string" },
         { "path": "data.nodes[].attempts[].attempt_id", "type": "integer" },
-        { "path": "data.nodes[].attempts[].dispatch_mode", "type": "string?", "pending_kernel": "\"subprocess\" (DispatchMode, exhaustive match)" },
-        { "path": "data.nodes[].attempts[].model_passed", "type": "boolean?", "pending_kernel": "attempts.model_passed, null before #139" },
-        { "path": "data.nodes[].attempts[].check_result", "type": "string?", "pending_kernel": "\"passed\", \"failed\" or null" }
+        { "path": "data.nodes[].attempts[].dispatch_mode", "type": "string?" },
+        { "path": "data.nodes[].attempts[].model_passed", "type": "boolean?" },
+        { "path": "data.nodes[].attempts[].check_result", "type": "string?" }
       ]
     },
     "priors_show": {
       "argv": ["priors", "show"],
       "command": "meshloop:priors-show",
       "ok": true,
-      "pending_kernel": "meshloop priors show --json: whether promoted priors are in effect, their digest, and advisory_routing counts; names assumed by the cell",
       "fields": [
-        { "path": "data.in_effect", "type": "boolean", "pending_kernel": "true when the latest ledger row is an accept whose priors apply" },
-        { "path": "data.priors_sha256", "type": "string?", "optional": true, "pending_kernel": "the promoted bytes' SHA-256" },
-        { "path": "data.routing.attempts", "type": "integer", "optional": true, "pending_kernel": "advisory_routing rows" },
-        { "path": "data.routing.changed_top", "type": "integer", "optional": true, "pending_kernel": "advisory_routing rows with changed_top" }
+        { "path": "data.in_effect", "type": "boolean" },
+        { "path": "data.priors_sha256", "type": "string?" },
+        { "path": "data.evidence_floor", "type": "integer" },
+        { "path": "data.row", "type": "object?" },
+        { "path": "data.row.seq", "type": "integer", "optional": true },
+        { "path": "data.row.identity", "type": "string", "optional": true },
+        { "path": "data.priors", "type": "array" },
+        { "path": "data.routing.attempts", "type": "integer" },
+        { "path": "data.routing.changed_top", "type": "integer" },
+        { "path": "data.diagnostics", "type": "array" },
+        { "path": "data.diagnostics[].code", "type": "string" },
+        { "path": "data.diagnostics[].level", "type": "string" }
       ]
     },
     "priors_check": {
       "argv": ["priors", "check", "--file", "advisory-priors.json"],
       "command": "meshloop:priors-check",
       "ok": true,
-      "pending_kernel": "meshloop priors check --file F --json: read-only; the loader's verdict on F; names assumed by the cell",
       "fields": [
-        { "path": "data.file_fault", "type": "string?", "pending_kernel": "a file-level code (too_large, not_json, wrong_schema, wrong_version), null when none" },
-        { "path": "data.usable", "type": "integer", "optional": true, "pending_kernel": "entries routing would use once promoted" },
-        { "path": "data.ignored", "type": "integer", "optional": true, "pending_kernel": "entries the loader or accept would ignore" },
+        { "path": "data.file_fault", "type": "string?" },
+        { "path": "data.usable", "type": "array" },
+        { "path": "data.usable[].harness", "type": "string" },
+        { "path": "data.usable[].model_ref", "type": "string" },
+        { "path": "data.usable[].tier", "type": "string" },
+        { "path": "data.usable[].attempts", "type": "integer" },
+        { "path": "data.usable[].successes", "type": "integer" },
+        { "path": "data.ignored", "type": "array" },
+        { "path": "data.ignored[].code", "type": "string" },
         { "path": "data.diagnostics", "type": "array" },
         { "path": "data.diagnostics[].code", "type": "string" },
-        { "path": "data.diagnostics[].detail", "type": "string?", "optional": true }
+        { "path": "data.diagnostics[].level", "type": "string" },
+        { "path": "data.diagnostics[].harness", "type": "string?" },
+        { "path": "data.diagnostics[].model_ref", "type": "string?" },
+        { "path": "data.diagnostics[].tier", "type": "string?" },
+        { "path": "data.diagnostics[].detail", "type": "string" }
       ]
     },
     "integrate_preview": {

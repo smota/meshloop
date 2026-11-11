@@ -139,7 +139,10 @@
              (num ()
                (let ((start i))
                  (loop while (and (< i n) (find (char text i) "-+0123456789.eE")) do (incf i))
-                 (parse-integer text :start start :end i))))
+                 (if (find-if (lambda (c) (find c ".eE")) text :start start :end i)
+                     (let ((*read-default-float-format* 'double-float))
+                       (read-from-string text t nil :start start :end i))
+                     (parse-integer text :start start :end i)))))
       (val))))
 (defun nlk::json-value (object type &rest path)
   (let ((value object) (present t))
@@ -617,7 +620,7 @@ define-cell) are nodecode's and are only read.")
 ;; inspect_attempts, which report and accept read, still holds.
 (setf *contract* (nlk:decode-json (pure-test::file-text-at (merge-pathnames "contract.json" pure-test::*cell*))))
 (let* ((old (nlk:decode-json (format nil "{\"ok\": true, \"command\": \"meshloop:inspect\", \"data\": {\"session_id\": \"g\", \"status\": \"completed\", \"plan_state\": \"PlanAccepted\", \"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"description\": \"d\", \"attempts\": [{\"attempt_id\": 1, \"harness\": \"h\", \"model_ref\": \"m\", \"outcome\": \"o\", \"evidence\": []}]}]}}")))
-       (new (nlk:decode-json (format nil "{\"ok\": true, \"command\": \"meshloop:inspect\", \"data\": {\"session_id\": \"g\", \"status\": \"completed\", \"plan_state\": \"PlanAccepted\", \"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"description\": \"d\", \"tier\": null, \"attempts\": [~a]}]}}" (attempt-json 1)))))
+       (new (nlk:decode-json (format nil "{\"ok\": true, \"command\": \"meshloop:inspect\", \"data\": {\"session_id\": \"g\", \"status\": \"completed\", \"plan_state\": \"PlanAccepted\", \"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"description\": \"d\", \"tier\": \"Tier2\", \"attempts\": [~a]}]}}" (attempt-json 1)))))
   (pure-test::check "contract: a pre-#139 answer lacks what learn reads, and learn refuses it"
                     (and (missing-field old (case-fields "priors_attempts"))
                          (null (missing-field old (case-fields "inspect_attempts")))))
@@ -625,6 +628,21 @@ define-cell) are nodecode's and are only read.")
                     (null (missing-field new (case-fields "priors_attempts")))
                     (missing-field new (case-fields "priors_attempts"))))
 (setf *contract* nil)
+
+;; priors check's answer as the kernel shapes it (crates/meshloop-cli/src/priors.rs).
+(let* ((object (nlk:decode-json "{\"ok\": true, \"command\": \"meshloop:priors-check\", \"data\": {\"file\": \"p.json\", \"bytes\": 900, \"priors_sha256\": \"ab12\", \"file_fault\": null, \"evidence_floor\": 5, \"resolved_refs\": 5, \"unresolved_refs\": 0, \"usable\": [{\"index\": 0, \"harness\": \"fixture\", \"model_ref\": \"fixture-model\", \"tier\": \"Tier2\", \"dispatch_mode\": \"subprocess\", \"attempts\": 5, \"successes\": 5, \"pi\": 0.857, \"candidate\": true}], \"ignored\": [{\"index\": 1, \"code\": \"below_evidence_floor\", \"harness\": \"fixture\", \"model_ref\": \"m2\", \"tier\": \"Tier1\", \"dispatch_mode\": \"subprocess\"}], \"diagnostics\": [{\"code\": \"below_evidence_floor\", \"level\": \"entry\", \"entry\": 1, \"harness\": \"fixture\", \"model_ref\": \"m2\", \"tier\": \"Tier1\", \"dispatch_mode\": \"subprocess\", \"detail\": \"1 attempts is below the floor\"}]}}"))
+       (text (summarize-priors-check "p.json" object)))
+  (pure-test::check "priors check summary: usable entries, ignored count, each diagnostic with its key, the promote command"
+                    (and (search "meshloop priors check: p.json: 1 usable, 1 ignored; 1 diagnostic (read-only, nothing promoted)" text)
+                         (search "usable fixture / fixture-model / Tier2: 5 attempts, 5 passed" text)
+                         (search "below_evidence_floor [entry] fixture / m2 / Tier1: 1 attempts is below the floor" text)
+                         (search "meshloop priors accept --file p.json --as <your-name>" text))
+                    text))
+(let ((text (summarize-priors-check "x.json" (nlk:decode-json "{\"ok\": true, \"command\": \"meshloop:priors-check\", \"data\": {\"file_fault\": \"not_json\", \"usable\": [], \"ignored\": [], \"diagnostics\": [{\"code\": \"not_json\", \"level\": \"file\", \"entry\": null, \"harness\": null, \"model_ref\": null, \"tier\": null, \"dispatch_mode\": null, \"detail\": \"expected value\"}]}}"))))
+  (pure-test::check "priors check summary: a file fault, and no promote command for it"
+                    (and (search "x.json: file fault not_json, no priors would apply; 0 usable" text)
+                         (search "not_json [file]: expected value" text) (not (search "priors accept" text)))
+                    text))
 
 ;; The digest: pointers and counts only.
 (let ((digest (fold-digest *fold* "/h/p.json" "sha256:abc" '(("g-c" . "running, not finished; name it with --graph to fold it anyway"))
