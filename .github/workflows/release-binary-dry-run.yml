@@ -1,7 +1,7 @@
 # Manual dry-run for the two ADR 0018 binary names.
 # Builds meshloop with --locked, records SHA-256, and uploads the pair as a
 # workflow artifact. It does not create a GitHub Release and does not publish
-# crates. xtask stays unpublished. meshloop-context is not a publish target.
+# crates. xtask stays unpublished.
 name: Release binary dry-run
 
 on:

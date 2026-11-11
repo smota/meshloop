@@ -127,7 +127,7 @@ The same command then runs the workspace lifecycle scenario on a separate dispos
 The WSL2 Tier A run of `check`, `live`, and `smoke`, including process-group cancellation and `.git/index.lock` behavior, is recorded in [evidence/issue-20/README.md](evidence/issue-20/README.md).
 
 ### 2.6 Packaging & Crate Isolation Check (`xtask publish-dry`)
-Packages all five publishable crates (`meshloop-domain`, `meshloop-context`, `meshloop-engine`, `meshloop-adapters`, `meshloop-cli`) in strict offline isolation:
+Packages all five publishable crates (`meshloop-domain`, `meshloop-context`, `meshloop-engine`, `meshloop-adapters`, `meshloop-cli`) in one workspace-resolved `cargo package` call (inter-crate dependencies resolve through a local overlay, so it passes while crates.io holds an older version) and checks that `publish.yml` lists the same crates in the same order:
 ```bash
 cargo run -p xtask -- publish-dry
 ```
