@@ -31,6 +31,9 @@ impl Collector {
                     }
                     Err(e) => panic!("collector: {e}"),
                 };
+                // On Windows an accepted socket inherits the listener's non-blocking
+                // mode; reads would then fail with WouldBlock instead of waiting.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
