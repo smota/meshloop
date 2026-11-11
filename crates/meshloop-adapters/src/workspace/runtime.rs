@@ -339,7 +339,7 @@ impl SqliteStore {
         git: &std::path::Path,
         checkout: &std::path::Path,
     ) -> Result<Vec<DriverRecord>, StoreError> {
-        let mut command = crate::process::OwnedSpawnSpec::new(git);
+        let mut command = crate::host_git::spec(git);
         command.arg("-C").arg(checkout).args([
             "rev-parse",
             "--path-format=absolute",
@@ -1837,7 +1837,7 @@ impl CancellationClient {
         checkout: &std::path::Path,
         ledger: &std::path::Path,
     ) -> Result<Self, StoreError> {
-        let mut command = crate::process::OwnedSpawnSpec::new(git);
+        let mut command = crate::host_git::spec(git);
         command.arg("-C").arg(checkout).args([
             "rev-parse",
             "--path-format=absolute",

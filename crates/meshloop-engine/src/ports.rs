@@ -151,10 +151,18 @@ pub enum StoreError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceError {
-    CommandFailed { stderr: String },
+    CommandFailed {
+        stderr: String,
+    },
     Io(String),
     Conflict,
     Dirty,
+    /// A worktree's `.git` link no longer points at its own admin dir (worker output
+    /// modified it). Git was not run there; `path` is that `.git` (#180).
+    GitLinkModified {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

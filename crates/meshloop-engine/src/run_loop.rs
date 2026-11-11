@@ -31,7 +31,8 @@ use crate::ports::{
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
 use crate::verify::{
-    all_paths_allowed, annotate_with_lattice, git_diff_exit_code, verification_passed,
+    all_paths_allowed, annotate_with_lattice, git_diff_exit_code, reserved_paths,
+    verification_passed,
 };
 
 mod ownership;
@@ -1893,6 +1894,16 @@ impl<'a> RunLoop<'a> {
                 output_redacted: format!("changed {:?}", diff.files),
             }));
         }
+        let reserved = reserved_paths(&diff.files);
+        if !reserved.is_empty() {
+            rows.push(Evidence::Deterministic(DeterministicEvidence {
+                candidate: candidate_ref.clone(),
+                tool: "reserved-paths".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: format!("prompt-file paths may not be changed: {reserved:?}"),
+            }));
+        }
         let mut lattice_out = None;
         let mut diag_out = String::new();
         if !self.verify_command.is_empty() {
@@ -2228,10 +2239,20 @@ impl<'a> RunLoop<'a> {
     ) -> Result<Tick, OrchestratorError> {
         let prompt = format!(".meshloop-prompt-{}", attempt_id.0);
         let _ = self.workspace.remove_file(wt, &prompt);
-        let mut current_revision = self.workspace.commit_all(
+        let commit = self.workspace.commit_all(
             wt,
             &format!("meshloop: attempt {} for task {}", attempt_id.0, node.id.0),
-        )?;
+        );
+        let mut current_revision = match commit {
+            Ok(revision) => revision,
+            // The worker modified its worktree's `.git` link: git was not run there,
+            // and the attempt fails with that reason (#180).
+            Err(WorkspaceError::GitLinkModified { reason, .. }) => {
+                return self
+                    .fail_modified_git_link(graph_id, node, attempt_id, tier, candidate, &reason);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let (mut rows, current_lattice, mut current_diag) =
             self.run_deterministic_checks(node, attempt_id, wt, base, &current_revision)?;
@@ -2445,6 +2466,47 @@ impl<'a> RunLoop<'a> {
         } else {
             self.maybe_fallback(graph_id, node.id, rec, &[])
         }
+    }
+
+    /// Records the refused `.git` link as failing deterministic evidence and fails the
+    /// attempt (`git-link-modified`). The evidence names the worktree-relative `.git`.
+    fn fail_modified_git_link(
+        &mut self,
+        graph_id: &str,
+        node: &meshloop_domain::task_graph::TaskNode,
+        attempt_id: AttemptId,
+        tier: Tier,
+        candidate: &Candidate,
+        reason: &str,
+    ) -> Result<Tick, OrchestratorError> {
+        self.store
+            .record(Evidence::Deterministic(DeterministicEvidence {
+                candidate: CandidateRef {
+                    task_id: node.id,
+                    attempt_id,
+                    revision: String::new(),
+                },
+                tool: "git-link".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: format!(
+                    "refused: the worktree's .git link was modified ({reason}); git was not run"
+                ),
+            }))?;
+        let rec = self.append_deterministic_result(
+            graph_id,
+            node,
+            attempt_id,
+            false,
+            Some("git-link-modified".into()),
+        )?;
+        let key = FeedbackKey {
+            harness: candidate.harness.clone(),
+            model_ref: candidate.model_ref.clone(),
+            tier: crate::ports::TierKey::from(tier),
+        };
+        let _ = self.store.record_outcome(&key, false);
+        self.maybe_fallback(graph_id, node.id, rec, &[])
     }
 
     fn maybe_fallback(

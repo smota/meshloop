@@ -521,9 +521,7 @@ impl HarnessCapabilities for CliHarness {
             }
         }
         let launch = (|| {
-            fs::write(&prompt_file, &spec.prompt).map_err(|e| HarnessError::ProcessFault {
-                detail: e.to_string(),
-            })?;
+            write_prompt_file(&prompt_file, spec.prompt.as_bytes())?;
 
             let mut cmd = OwnedSpawnSpec::new(&self.config.executable);
             cmd.args(&args)
@@ -732,6 +730,103 @@ impl HarnessCapabilities for CliHarness {
                 None => std::thread::sleep(Duration::from_millis(20)),
             }
         }
+    }
+}
+
+/// Detail of the refusal when the prompt-file path already exists (#180).
+pub const PROMPT_FILE_EXISTS: &str = "prompt-file-exists";
+
+/// Creates the prompt file; never opens an existing path. Worker output can leave a
+/// (symlink) file at a predictable future prompt name, so an existing entry of any
+/// kind refuses the attempt instead of being written through (#180).
+fn write_prompt_file(path: &Path, prompt: &[u8]) -> Result<(), HarnessError> {
+    let fault = |detail: String| HarnessError::ProcessFault { detail };
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(fault(PROMPT_FILE_EXISTS.into()));
+    }
+    let mut options = fs::OpenOptions::new();
+    // `create_new` is O_CREAT|O_EXCL (CREATE_NEW on Windows): it fails on any
+    // existing entry, including a dangling symlink, so losing a race with the check
+    // above still refuses.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: act on a reparse point itself, never its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let mut file = options.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            fault(PROMPT_FILE_EXISTS.into())
+        } else {
+            fault(e.to_string())
+        }
+    })?;
+    file.write_all(prompt).map_err(|e| fault(e.to_string()))
+}
+
+#[cfg(test)]
+mod prompt_file_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "meshloop-prompt-{tag}-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn prompt_file_is_created_fresh() {
+        let dir = scratch("fresh");
+        let path = dir.join(".meshloop-prompt-1");
+        write_prompt_file(&path, b"hello").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_existing_prompt_path_refuses_and_is_left_alone() {
+        let dir = scratch("exists");
+        let path = dir.join(".meshloop-prompt-2");
+        fs::write(&path, b"worker bytes").unwrap();
+        assert!(matches!(
+            write_prompt_file(&path, b"prompt"),
+            Err(HarnessError::ProcessFault { detail }) if detail == PROMPT_FILE_EXISTS
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"worker bytes");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// #180 (v): a symlink at the prompt name, live or dangling, is never written through.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_prompt_path_is_never_followed() {
+        let dir = scratch("symlink");
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"operator bytes").unwrap();
+        let live = dir.join(".meshloop-prompt-3");
+        std::os::unix::fs::symlink(&victim, &live).unwrap();
+        let dangling = dir.join(".meshloop-prompt-4");
+        let missing = dir.join("never-created.txt");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+        for path in [&live, &dangling] {
+            assert!(matches!(
+                write_prompt_file(path, b"prompt"),
+                Err(HarnessError::ProcessFault { detail }) if detail == PROMPT_FILE_EXISTS
+            ));
+        }
+        assert_eq!(fs::read(&victim).unwrap(), b"operator bytes");
+        assert!(fs::symlink_metadata(&missing).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 

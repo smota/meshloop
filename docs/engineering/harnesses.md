@@ -128,6 +128,87 @@ request with new live evidence from #152. Nodecode also needs an ADR 0038 amendm
 |---|---|---|---|
 | (none proven yet) | — | — | — |
 
+## Host-side git
+
+A worker can write anything in its worktree, and an unsandboxed one anything the
+operator can. Meshloop runs git on the host in that worktree afterwards (diff, status,
+add, commit, merge, cherry-pick, reset, worktree add/remove, cleanup probes), with the
+operator's authority. Issue [#180](https://github.com/smota/meshloop/issues/180): every
+one of those git processes is built by `meshloop_adapters::host_git` (`command` for
+`std::process::Command`, `spec` for owned spawns), so git never runs a program the
+worker chose and never follows a `.git` link the worker rewrote.
+
+Neutralised for every host-side git process:
+
+- **System and global config are not read** (`GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_ATTR_NOSYSTEM=1`). Filter, diff and merge drivers
+  defined there (git-lfs, for example) therefore never run on worker-chosen content
+  selected by a worker's `.gitattributes`. A fixed allowlist of data-only keys is read
+  from the operator's system and global config once per process and passed back with
+  `-c`: `core.autocrlf`, `core.eol`, `core.safecrlf`, `core.longpaths`,
+  `core.symlinks`, `core.fscache` (short plain words only) and `safe.directory` (a
+  protected-config key that git honours from `-c`). Identity for Meshloop's own commits
+  stays `GIT_AUTHOR_*`/`GIT_COMMITTER_*` = `meshloop`.
+- **Hooks**: `core.hooksPath` is a path below a non-directory (`/dev/null` on Unix, the
+  Meshloop executable on Windows), so no hook (`pre-commit`, `post-checkout`,
+  `reference-transaction`, `fsmonitor-watchman`, ...) can exist.
+- **Executable config keys a repository config could set**, overridden on the command
+  line: `core.fsmonitor=false`, `core.editor=:` and `sequence.editor=:` (plus
+  `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR`), `commit.gpgSign=false`, `tag.gpgSign=false`,
+  `merge.verifySignatures=false`, `log.showSignature=false` (no `gpg.program`),
+  `protocol.allow=never`, `credential.helper=` and `GIT_NO_LAZY_FETCH=1`,
+  `GIT_TERMINAL_PROMPT=0` (no transport, so no `core.sshCommand`, proxy, `uploadpack`,
+  credential helper or askpass), `submodule.recurse=false`, `gc.auto=0` and
+  `maintenance.auto=false`. `--no-pager` on every call. Diffs also pass
+  `--no-ext-diff --no-textconv` (no `diff.external`, `diff.<driver>.command` or
+  textconv).
+- **Inherited environment** that would redirect git or name a program is removed:
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, object-directory
+  variables, `GIT_CONFIG*` parameters, `GIT_ATTR_SOURCE`, `GIT_EXTERNAL_DIFF`, `GIT_SSH*`,
+  `GIT_PROXY_COMMAND`, askpass and `GIT_PAGER`.
+- **The worktree link**: before git runs in an attempt (or integrate/deliverable)
+  worktree, `<worktree>/.git` must be a regular file naming an admin dir directly under
+  `<common dir>/worktrees/`, whose `gitdir` points back at this `.git` and whose
+  `commondir` is the repository's. Otherwise git is not run: the adapter returns
+  `WorkspaceError::GitLinkModified { path, reason }`, verification records a failing
+  `git-link` evidence row and fails the attempt (`git-link-modified`), removal refuses
+  the worktree, and cleanup treats its content as unknown (blocked). A verified
+  worktree is then pinned (`--git-dir=<admin> --work-tree=.`), so git never reads the
+  link itself.
+- **The prompt file** `.meshloop-prompt-<attempt>` is created with `create_new` and
+  `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Any existing entry,
+  including a dangling symlink, refuses the attempt (`prompt-file-exists`); it is never
+  written through. A worker change that touches any `.meshloop-prompt-*` path fails the
+  `reserved-paths` check, whatever `allowed_paths` says.
+
+Not neutralised, by design or for now:
+
+- **Operator global and system config is dropped**, apart from the allowlist above.
+  Global git-lfs filters, `core.attributesFile` drivers, global aliases and credential
+  helpers do not apply to Meshloop's git. An LFS repository needs the filter in its
+  repository config (`git lfs install --local`) for Meshloop's commits to store
+  pointers. A global `safe.directory` exemption still applies (imported).
+- **Drivers in the repository's own config** (`filter.<x>`, `merge.<x>.driver`) still
+  run when a worker's `.gitattributes` selects them: they are the operator's programs,
+  chosen for this repository. Their names cannot be enumerated to override.
+- **A worker that can write the repository's common dir** (any unsandboxed harness can)
+  can change that repository config, `info/attributes` or the admin dir itself; such a
+  worker already runs with the operator's authority. The overrides above still stop the
+  listed executable keys; config-defined hooks of a future git (`hook.<name>.command`)
+  are not covered.
+- **Time of check**: the link is checked before each command and git is pinned to the
+  checked admin dir; a worker process still running during that window could change
+  files in the admin dir. Meshloop runs git in an attempt worktree after the worker's
+  process tree has exited.
+- `xtask` and test helpers run plain git on fixture repositories and are not host-side
+  product paths.
+
+Tests: `crates/meshloop-cli/tests/host_git_hardening.rs` (Unix: a `/bin/sh` worker that
+rewrites `.git`, plants hooks, sets executable repository config, selects global-config
+drivers with `.gitattributes`, or commits symlinks at future prompt names; no marker
+file appears across verify, integrate and cleanup), `git::tests::a_modified_git_link_is_refused_before_git_runs`,
+`harness::prompt_file_tests` and `verify::tests::prompt_file_paths_are_reserved_anywhere_in_a_change`.
+
 ## Nodecode worker (#138)
 
 Nodecode is a worker harness through operator configuration only, and only under the

@@ -114,8 +114,10 @@ operator's files and credentials, the operator's own nodecode organism and its h
   and neither is any other secret the worker can read.
 - **The prompt file path** ([#180](https://github.com/smota/meshloop/issues/180)).
   meshloop writes `.meshloop-prompt-<attempt>` into the worktree on the host before the
-  worker starts. If a symlink stands at that path, the host-side write follows it. This
-  is meshloop's own write, for every harness, and is fixed there, not in this recipe.
+  worker starts. Fixed in meshloop for every harness: the file is created new and never
+  through an existing entry, and a change touching a prompt-file path is refused. See
+  [harnesses.md#host-side-git](harnesses.md#host-side-git), which also covers host-side
+  git for harnesses that Meshloop does not sandbox.
 - **`--raw-log` output.** The raw rpc frame log is written into the worktree, the only
   writable path, so it is committed with the attempt and holds tool output. Use it for
   spikes only, never in an `invoke_args_template`.

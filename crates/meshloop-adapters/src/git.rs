@@ -3,16 +3,22 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::OnceLock;
+
+use crate::host_git::GitLinkError;
 
 use meshloop_engine::ports::{DiffSummary, WorkspaceError, WorkspacePort};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
-    CommandFailed { stderr: String },
+    CommandFailed {
+        stderr: String,
+    },
     Io(String),
     Conflict,
     Dirty,
+    /// The worktree's `.git` link was modified; git was not run there (#180).
+    LinkModified(GitLinkError),
 }
 
 impl From<GitError> for WorkspaceError {
@@ -22,6 +28,10 @@ impl From<GitError> for WorkspaceError {
             GitError::Io(s) => WorkspaceError::Io(s),
             GitError::Conflict => WorkspaceError::Conflict,
             GitError::Dirty => WorkspaceError::Dirty,
+            GitError::LinkModified(e) => WorkspaceError::GitLinkModified {
+                path: e.link,
+                reason: e.reason.to_string(),
+            },
         }
     }
 }
@@ -36,15 +46,73 @@ const LAYOUT_HINT: &str = "set --worktree-base or [workspace] root";
 
 pub struct GitWorktreeAdapter {
     repo_root: PathBuf,
+    /// The repository's common dir, read once from `repo_root` (trusted).
+    common: OnceLock<PathBuf>,
 }
 
 impl GitWorktreeAdapter {
     pub fn new(repo_root: PathBuf) -> Self {
-        Self { repo_root }
+        Self {
+            repo_root,
+            common: OnceLock::new(),
+        }
+    }
+
+    fn common_dir(&self) -> Result<&Path, GitError> {
+        if let Some(common) = self.common.get() {
+            return Ok(common);
+        }
+        let output = self.spawn(
+            &self.repo_root,
+            None,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        if !output.status.success() {
+            return Err(Self::failed(&["rev-parse", "--git-common-dir"], &output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err(GitError::Io("empty git common dir".into()));
+        }
+        Ok(self.common.get_or_init(|| PathBuf::from(text)))
+    }
+
+    fn is_repo_root(&self, cwd: &Path) -> bool {
+        cwd == self.repo_root
+            || matches!(
+                (std::fs::canonicalize(cwd), std::fs::canonicalize(&self.repo_root)),
+                (Ok(a), Ok(b)) if a == b
+            )
+    }
+
+    /// The verified admin dir of a worktree other than the repository root. A link
+    /// the worker modified is refused before any git runs there (#180).
+    fn verified_admin(&self, worktree: &Path) -> Result<PathBuf, GitError> {
+        let common = self.common_dir()?.to_path_buf();
+        crate::host_git::verify_worktree_link(worktree, &common).map_err(GitError::LinkModified)
     }
 
     fn output_in(&self, cwd: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
-        let mut cmd = Command::new("git");
+        let admin = if self.is_repo_root(cwd) {
+            None
+        } else {
+            Some(self.verified_admin(cwd)?)
+        };
+        self.spawn(cwd, admin.as_deref(), args)
+    }
+
+    /// Every git process this adapter starts: hardened, and pinned to `admin` when
+    /// it runs in a worktree.
+    fn spawn(
+        &self,
+        cwd: &Path,
+        admin: Option<&Path>,
+        args: &[&str],
+    ) -> Result<std::process::Output, GitError> {
+        let mut cmd = crate::host_git::command("git");
+        if let Some(admin) = admin {
+            cmd.args(crate::host_git::pinned(admin));
+        }
         cmd.current_dir(cwd).args(args);
         cmd.env("GIT_AUTHOR_NAME", "meshloop");
         cmd.env("GIT_AUTHOR_EMAIL", "meshloop@localhost");
@@ -116,6 +184,7 @@ impl GitWorktreeAdapter {
     }
 
     pub fn remove_worktree(&self, path: &Path) -> Result<(), GitError> {
+        self.verified_admin(path)?;
         self.run_admin_with_retry(&["worktree", "remove", "--force", &path.to_string_lossy()])
             .map(|_| ())
     }
@@ -316,8 +385,29 @@ impl WorkspacePort for GitWorktreeAdapter {
     fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError> {
         let head = self.head(worktree)?;
         let files_raw = self
-            .run_in(worktree, &["diff", "--name-only", base, "HEAD"])
-            .or_else(|_| self.run_in(worktree, &["diff", "--name-only", base]))
+            .run_in(
+                worktree,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--name-only",
+                    base,
+                    "HEAD",
+                ],
+            )
+            .or_else(|_| {
+                self.run_in(
+                    worktree,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--name-only",
+                        base,
+                    ],
+                )
+            })
             .map_err(WorkspaceError::from)?;
         let files: Vec<String> = files_raw
             .lines()
@@ -325,8 +415,23 @@ impl WorkspacePort for GitWorktreeAdapter {
             .filter(|l| !l.is_empty())
             .collect();
         let stat = self
-            .run_in(worktree, &["diff", "--stat", base, "HEAD"])
-            .or_else(|_| self.run_in(worktree, &["diff", "--stat", base]))
+            .run_in(
+                worktree,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--stat",
+                    base,
+                    "HEAD",
+                ],
+            )
+            .or_else(|_| {
+                self.run_in(
+                    worktree,
+                    &["diff", "--no-ext-diff", "--no-textconv", "--stat", base],
+                )
+            })
             .unwrap_or_default();
         Ok(DiffSummary {
             base: base.into(),
@@ -362,6 +467,7 @@ impl WorkspacePort for GitWorktreeAdapter {
     fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError> {
         match self.run_in(worktree, &["merge", "--no-ff", "--no-edit", from_ref]) {
             Ok(_) => Ok(()),
+            Err(e @ GitError::LinkModified(_)) => Err(e.into()),
             Err(_) => {
                 let _ = self.run_in(worktree, &["merge", "--abort"]);
                 Err(WorkspaceError::Conflict)
@@ -382,6 +488,7 @@ impl WorkspacePort for GitWorktreeAdapter {
         }
         match self.run_in(worktree, &["cherry-pick", &range]) {
             Ok(_) => Ok(()),
+            Err(e @ GitError::LinkModified(_)) => Err(e.into()),
             Err(_) => {
                 let _ = self.run_in(worktree, &["cherry-pick", "--abort"]);
                 Err(WorkspaceError::Conflict)
@@ -465,19 +572,40 @@ impl WorkspacePort for GitWorktreeAdapter {
 
     fn remove_file(&self, worktree: &Path, rel: &str) -> Result<(), WorkspaceError> {
         let path = worktree.join(rel);
-        if path.exists() {
+        // `symlink_metadata`: a (dangling) symlink at `rel` is removed, never followed.
+        if std::fs::symlink_metadata(&path).is_ok() {
             std::fs::remove_file(&path).map_err(|e| WorkspaceError::Io(e.to_string()))?;
         }
         Ok(())
     }
 
     fn unified_diff(&self, worktree: &Path, base: &str) -> Result<String, WorkspaceError> {
-        self.run_in(worktree, &["diff", "--no-color", base, "HEAD"])
-            .or_else(|_| self.run_in(worktree, &["diff", "--no-color", base]))
-            .map_err(Into::into)
+        self.run_in(
+            worktree,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                base,
+                "HEAD",
+            ],
+        )
+        .or_else(|_| {
+            self.run_in(
+                worktree,
+                &["diff", "--no-ext-diff", "--no-textconv", "--no-color", base],
+            )
+        })
+        .map_err(Into::into)
     }
 
     fn remove_worktree(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if !path.is_dir() {
+            return Ok(());
+        }
+        // A worktree whose `.git` link was modified is refused, not skipped.
+        self.verified_admin(path)?;
         if !self.worktree_exists(path) {
             return Ok(());
         }
@@ -591,6 +719,60 @@ mod tests {
                 .is_err()
         );
         fs::remove_dir_all(&wt_path).ok();
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    /// #180: a worktree whose `.git` link was rewritten (to another gitdir, to a sibling
+    /// worktree's admin dir, or replaced by a directory) is refused before git runs.
+    #[test]
+    fn a_modified_git_link_is_refused_before_git_runs() {
+        let repo = disposable_repo();
+        let adapter = GitWorktreeAdapter::new(repo.clone());
+        let head = adapter.current_head().unwrap();
+        let parent = repo.parent().unwrap();
+        let wt = parent.join(format!("wt-link-{}", uuid_ish()));
+        let sibling = parent.join(format!("wt-sibling-{}", uuid_ish()));
+        adapter
+            .add_worktree_from(&wt, "meshloop/link", &head)
+            .unwrap();
+        adapter
+            .add_worktree_from(&sibling, "meshloop/sibling", &head)
+            .unwrap();
+        assert!(adapter.worktree_exists(&wt));
+        let original = fs::read_to_string(wt.join(".git")).unwrap();
+        let sibling_link = fs::read_to_string(sibling.join(".git")).unwrap();
+        let elsewhere = parent.join(format!("elsewhere-{}", uuid_ish()));
+        fs::create_dir_all(&elsewhere).unwrap();
+        let rewrites = [
+            format!("gitdir: {}\n", elsewhere.display()),
+            sibling_link,
+            "not a link\n".to_string(),
+        ];
+        for text in rewrites {
+            fs::write(wt.join(".git"), &text).unwrap();
+            let err = adapter.commit_all(&wt, "x").unwrap_err();
+            assert!(
+                matches!(&err, WorkspaceError::GitLinkModified { path, .. } if path == &wt.join(".git")),
+                "{text}: {err:?}"
+            );
+            assert!(!adapter.worktree_exists(&wt));
+            assert!(matches!(
+                WorkspacePort::remove_worktree(&adapter, &wt),
+                Err(WorkspaceError::GitLinkModified { .. })
+            ));
+        }
+        fs::remove_file(wt.join(".git")).unwrap();
+        fs::create_dir(wt.join(".git")).unwrap();
+        assert!(matches!(
+            adapter.status_porcelain(&wt),
+            Err(WorkspaceError::GitLinkModified { .. })
+        ));
+        fs::remove_dir(wt.join(".git")).unwrap();
+        fs::write(wt.join(".git"), original).unwrap();
+        assert!(adapter.worktree_exists(&wt));
+        WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
+        WorkspacePort::remove_worktree(&adapter, &sibling).unwrap();
+        fs::remove_dir_all(&elsewhere).ok();
         fs::remove_dir_all(&repo).ok();
     }
 

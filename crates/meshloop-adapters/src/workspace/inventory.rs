@@ -2,7 +2,6 @@
 //! Never creates a ledger, fence, registry, or root.
 
 use super::{RegistryView, bounded_stdout, native_identity, read_registry};
-use crate::process::OwnedSpawnSpec;
 use crate::store::SqliteStore;
 use meshloop_domain::workspace::*;
 use meshloop_engine::ports::StoreError;
@@ -1196,7 +1195,7 @@ fn driver_is_active(phase: DriverPhase) -> bool {
 }
 
 fn git_bytes(checkout: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
-    let mut command = OwnedSpawnSpec::new("git");
+    let mut command = crate::host_git::spec("git");
     command.arg("-C").arg(checkout);
     command.args(args.iter().copied());
     bounded_stdout(command, Duration::from_secs(10)).map_err(|_| ())
