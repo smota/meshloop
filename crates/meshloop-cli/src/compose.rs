@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use meshloop_adapters::check::CommandCheckRunner;
+use meshloop_adapters::check::VerifyChecks;
 use meshloop_adapters::git::GitWorktreeAdapter;
 use meshloop_adapters::harness::{CliHarness, CliHarnessConfig, PromptVia};
 use meshloop_adapters::process::HostProcessView;
@@ -104,7 +104,8 @@ pub struct Composed {
     pub store: SqliteStore,
     pub db_path: PathBuf,
     pub processes: HostProcessView,
-    pub checks: CommandCheckRunner,
+    /// Host checks, or checks behind the operator's `[verify] runner` (issue #181).
+    pub checks: VerifyChecks,
     pub limits: RunLimits,
     pub verify_command: Vec<String>,
     pub worktree_base: PathBuf,
@@ -297,7 +298,9 @@ fn compose_store(req: ComposeRequest<'_>, read_only: bool) -> Result<Option<Comp
         store,
         db_path: db,
         processes: HostProcessView {},
-        checks: CommandCheckRunner,
+        checks: VerifyChecks::from_runner(
+            req.config.verify.runner().map_err(|e| format!("{e:?}"))?,
+        ),
         limits: RunLimits {
             max_retries: req.config.limits.max_retries,
             task_timeout: Duration::from_secs(req.config.limits.task_timeout_seconds),

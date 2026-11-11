@@ -35,7 +35,20 @@ probe_timeout_seconds = 15
 
 [verify]
 # Optional structured argv run in the attempt worktree after git-diff. Empty = git-diff only.
+# It runs on the host with your authority: a check that executes repository code runs
+# whatever the worker wrote (#181). To run every check in a bubblewrap sandbox (Linux/WSL2;
+# worktree the only writable path, no credentials, no network), set `runner`, an argv
+# prefix; `{worktree}` must be a whole argument. See
+# docs/engineering/nodecode-containment.md#contained-verification.
 verify_command = []
+# runner = [
+#   "/path/to/meshloop/adapters/sandbox/meshloop-verify-sandbox",
+#   "--worktree", "{worktree}",
+#   "--ro-path", "/home/me/.cargo", "--ro-path", "/home/me/.rustup",
+#   "--path", "/home/me/.cargo/bin",
+#   "--env", "CARGO_HOME=/home/me/.cargo", "--env", "RUSTUP_HOME=/home/me/.rustup",
+#   "--",
+# ]
 
 # Optional worktree root for new runs. Relative paths resolve from the repository.
 # Absolute paths are allowed. Omit this table to use `<repo>/.meshloop/worktrees`

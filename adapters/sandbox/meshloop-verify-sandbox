@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# meshloop-verify-sandbox: run one verification command under bubblewrap (issue #181).
+#
+# Operator configuration, not a shipped default (ADR 0003). Put it in front of every
+# verify_command with `[verify] runner`:
+#
+#   [verify]
+#   runner = ["/abs/path/meshloop-verify-sandbox", "--worktree", "{worktree}", "--"]
+#
+# meshloop replaces `{worktree}` with the attempt worktree (one argument, no shell) and
+# appends verify_command after the prefix. Design, threat model and limits:
+# docs/engineering/nodecode-containment.md#contained-verification.
+#
+#   meshloop-verify-sandbox [OPTIONS] --worktree DIR -- PROGRAM ARGS...
+#
+# The working directory must be DIR (meshloop sets it). DIR is the only host path the
+# check can write. The exit code is PROGRAM's, so a passing check exits 0 and a failing
+# one non-zero, exactly as on the host; 125 is a wrapper refusal (no sandbox was run).
+#
+# Options:
+#   --worktree DIR        the attempt worktree, meshloop's {worktree}. Required. It must
+#                         be a linked git worktree on ext4, xfs or btrfs, and the
+#                         current working directory.
+#   --ro-path PATH        bind a host path read-only at the same path, for toolchains
+#                         outside /usr (for example ~/.cargo and ~/.rustup). Repeatable.
+#                         Refused: /, the operator's home or a folder containing it;
+#                         a path that is, is inside or contains a secret store under a
+#                         home (~/.nodecode, ~/.ssh, ~/.gnupg, ~/.config, ~/.aws,
+#                         ~/.azure, ~/.kube, ~/.docker, ~/.local/share/keyrings,
+#                         ~/.password-store, ~/.claude, ~/.codex, ~/.gemini, ~/.grok,
+#                         ~/.m2, ~/.gradle, ~/.gem, ~/.terraform.d, ~/.netrc,
+#                         ~/.git-credentials, ~/.npmrc, ~/.pypirc; a denylist, not a
+#                         guarantee); a path at, under or around /tmp, /run, /var/run,
+#                         /dev, /proc, /sys, /mnt/wsl* or $XDG_RUNTIME_DIR (host
+#                         sockets); and a path inside or around the worktree or the
+#                         repository's git directory. A `credentials.toml` or
+#                         `credentials` file directly inside a bound folder, or inside
+#                         --env CARGO_HOME, is masked by an empty file.
+#   --mask PATH           hide one more path inside a --ro-path: a file reads as empty, a
+#                         folder as an empty read-only folder. PATH is resolved first; one
+#                         outside every --ro-path is not mounted, so needs no mask.
+#                         Repeatable.
+#   --path DIR            put DIR in front of PATH (default /usr/local/bin:/usr/bin:/bin).
+#                         DIR must be under /usr or a --ro-path. Repeatable; the first
+#                         given comes first.
+#   --env NAME=VALUE      set one variable inside the sandbox (for example CARGO_HOME,
+#                         RUSTUP_HOME). Never a secret: the value is in meshloop's config
+#                         and the process list. HOME, PATH, TMPDIR, USER, PWD and names
+#                         that look like credentials (TOKEN, SECRET, PASSWORD, KEY,
+#                         CREDENTIAL, AUTH, COOKIE, SESSION) are refused. Repeatable.
+#   --allow-network       share the host's network. Default: a new network namespace with
+#                         only its own loopback, so the check reaches no host, no host
+#                         loopback service and no abstract Unix socket of the host.
+#   --tmpfs-size BYTES    size cap of the sandbox home, /tmp and /dev/shm (default 1 GiB).
+#   --git-metadata ro|none  bind the worktree's git admin and common dirs read-only
+#                         (default ro), or not at all. `ro` is refused when the git
+#                         config holds credentials (an extraheader, user@ in a URL).
+#   --print-bwrap         print the bwrap argv and exit 2 (never a passing check).
+#
+# Arguments are passed to bwrap as an argv array: nothing here is evaluated by a shell.
+set -euo pipefail
+
+die() {
+  printf 'meshloop-verify-sandbox: %s\n' "$*" >&2
+  exit 125
+}
+
+# Homes a sandbox must never bind: the caller's HOME and the account's home.
+op_homes=()
+for h in "${HOME:-}" "$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"; do
+  [[ -n "$h" ]] && op_homes+=("$(realpath -m -- "$h")")
+done
+
+# under DIR PATH: whether PATH is DIR or inside it.
+under() { [[ "$2" == "$1" || "$2" == "$1"/* ]]; }
+
+# refuse_bind DIR LABEL: DIR is about to be bound into the sandbox. Refuse /, an
+# operator home, a folder containing one, and anything inside a ~/.nodecode.
+refuse_bind() {
+  local dir="$1" label="$2" h
+  [[ "$dir" != "/" ]] || die "refusing / as the $label"
+  for h in "${op_homes[@]}"; do
+    [[ "$dir" != "$h" ]] || die "refusing the operator's home as the $label"
+    case "$h/" in "$dir"/*) die "refusing a $label that contains the operator's home" ;; esac
+    case "$dir/" in "$h/.nodecode/"*) die "refusing a $label inside the operator's nodecode home" ;; esac
+  done
+}
+
+# Secret stores under a home that a bound path may never be, be inside, or contain.
+# A denylist of well-known stores, not a guarantee: list toolchain folders narrowly.
+secret_dirs=(.nodecode .ssh .gnupg .config .aws .azure .kube .docker .local/share/keyrings
+  .password-store .claude .codex .gemini .grok .m2 .gradle .gem .terraform.d)
+secret_files=(.netrc .git-credentials .npmrc .pypirc)
+
+# refuse_secret DIR LABEL: refuse a DIR that is, is inside, or contains a secret store
+# under an operator home.
+refuse_secret() {
+  local dir="$1" label="$2" h s t
+  for h in "${op_homes[@]}"; do
+    for s in "${secret_dirs[@]}" "${secret_files[@]}"; do
+      # A store may itself be a symlink (~/.aws -> vault/aws): check where it leads too.
+      for t in "$h/$s" "$(realpath -m -- "$h/$s")"; do
+        under "$t" "$dir" && die "refusing a $label inside a secret store: $h/$s"
+        under "$dir" "$t" && die "refusing a $label that contains a secret store: $h/$s"
+      done
+    done
+  done
+  return 0
+}
+
+# Host folders that hold Unix sockets and other live host state; a bound path may not
+# be, be inside, or contain one of them.
+host_state=(/tmp /run /var/run /dev /proc /sys)
+[[ -n "${XDG_RUNTIME_DIR:-}" && "${XDG_RUNTIME_DIR}" == /* ]] && host_state+=("$(realpath -m -- "$XDG_RUNTIME_DIR")")
+refuse_host_state() {
+  local dir="$1" label="$2" x
+  for x in "${host_state[@]}"; do
+    under "$x" "$dir" && die "refusing a $label at or under $x (host sockets and state)"
+    under "$dir" "$x" && die "refusing a $label that contains $x (host sockets and state)"
+  done
+  case "$dir" in
+    /mnt | /mnt/wsl*) die "refusing a $label at or under /mnt/wsl (WSL host sockets)" ;;
+  esac
+  return 0
+}
+
+worktree_arg=""
+ro_paths=()
+masks=()
+path_dirs=()
+env_pairs=()
+allow_network=0
+tmpfs_size=$((1024 * 1024 * 1024))
+git_metadata="ro"
+print_only=0
+
+while (($#)); do
+  case "$1" in
+    --worktree) (($# >= 2)) || die "--worktree needs a path"; worktree_arg="$2"; shift 2 ;;
+    --ro-path) (($# >= 2)) || die "--ro-path needs a path"; ro_paths+=("$2"); shift 2 ;;
+    --mask) (($# >= 2)) || die "--mask needs a path"; masks+=("$2"); shift 2 ;;
+    --path) (($# >= 2)) || die "--path needs a directory"; path_dirs+=("$2"); shift 2 ;;
+    --env) (($# >= 2)) || die "--env needs NAME=VALUE"; env_pairs+=("$2"); shift 2 ;;
+    --allow-network) allow_network=1; shift ;;
+    --tmpfs-size) (($# >= 2)) || die "--tmpfs-size needs bytes"; tmpfs_size="$2"; shift 2 ;;
+    --git-metadata) (($# >= 2)) || die "--git-metadata needs ro or none"; git_metadata="$2"; shift 2 ;;
+    --print-bwrap) print_only=1; shift ;; # prints, then exits 2: never a passing check
+    --) shift; break ;;
+    *) die "unknown option '$1' (wrapper options come before --)" ;;
+  esac
+done
+(($#)) || die "no program after --"
+
+# --- platform and tools --------------------------------------------------------
+[[ "$(uname -s)" == "Linux" ]] || die "Linux (or WSL2) only"
+command -v bwrap >/dev/null 2>&1 || die "bwrap (bubblewrap) is not installed"
+[[ "$tmpfs_size" =~ ^[1-9][0-9]{0,15}$ ]] || die "--tmpfs-size must be a positive byte count"
+[[ "$git_metadata" == "ro" || "$git_metadata" == "none" ]] || die "--git-metadata must be ro or none"
+
+# --- the worktree: the one writable host path ----------------------------------
+[[ -n "$worktree_arg" ]] || die "--worktree is required (meshloop's {worktree})"
+[[ "$worktree_arg" == /* ]] || die "--worktree must be an absolute path"
+worktree="$(realpath -e -- "$worktree_arg" 2>/dev/null)" || die "--worktree does not exist"
+[[ -d "$worktree" ]] || die "--worktree is not a directory"
+[[ "$(pwd -P)" == "$worktree" ]] || die "the working directory is not the --worktree"
+refuse_bind "$worktree" worktree
+[[ -f "$worktree/.git" ]] || die "refusing a worktree that is not a linked git worktree"
+# ADR 0038 invariant 12: Linux or WSL on a native Linux filesystem, never /mnt/<drive>.
+fstype="$(stat -f -c %T -- "$worktree")"
+case "$fstype" in
+  ext2/ext3 | xfs | btrfs) ;;
+  *) die "worktree filesystem '$fstype' is not supported (ext4, xfs or btrfs; never a Windows drive)" ;;
+esac
+
+# --- git metadata of the linked worktree (read-only) ------------------------------
+# The check runs worker-written code, so the worktree's `.git` file is never handed to
+# a git process here. It is parsed by hand and accepted only when the admin dir's own
+# `gitdir` file points back at this worktree. The `.git` file is bound read-only, so
+# the check cannot redirect the git commands meshloop later runs on the host.
+resolve_from() { # $1 base dir, $2 path (absolute or relative to $1)
+  if [[ "$2" == /* ]]; then realpath -m -- "$2"; else realpath -m -- "$1/$2"; fi
+}
+git_binds=(--ro-bind "$worktree/.git" "$worktree/.git")
+git_dirs=()
+IFS= read -r line <"$worktree/.git" || true
+if [[ "$line" == "gitdir: "* ]]; then
+  admin="$(resolve_from "$worktree" "${line#gitdir: }")"
+  back=""
+  [[ -f "$admin/gitdir" ]] && IFS= read -r back <"$admin/gitdir" || true
+  if [[ -n "$back" && "$(resolve_from "$admin" "$back")" == "$worktree/.git" ]]; then
+    common="$admin"
+    if [[ -f "$admin/commondir" ]]; then
+      IFS= read -r rel <"$admin/commondir" || true
+      common="$(resolve_from "$admin" "$rel")"
+    fi
+    # Only git's own layout: the admin dir outside the worktree and exactly
+    # <common>/worktrees/<name>. Anything else (a forged `.git`) binds nothing.
+    if ! under "$worktree" "$admin" && [[ "$(dirname -- "$admin")" == "$common/worktrees" ]]; then
+      git_dirs=("$admin" "$common")
+    fi
+  fi
+fi
+if [[ "$git_metadata" == "ro" ]]; then
+  for d in "${git_dirs[@]}"; do
+    [[ -d "$d" ]] || continue
+    under "$worktree" "$d" && continue
+    refuse_bind "$d" "git directory"
+    refuse_secret "$d" "git directory"
+    refuse_host_state "$d" "git directory"
+    git_binds+=(--ro-bind "$d" "$d")
+  done
+  # Git config can hold credentials (an http.*.extraheader, user:token@ in a remote URL,
+  # credentials persisted by a CI checkout). A check could copy them into the worktree.
+  # Files pulled in by include.path / includeIf.*.path are scanned too when they are
+  # inside the bound git dirs; a target elsewhere (~/..., another folder) is not mounted.
+  if ((${#git_dirs[@]})); then
+    queue=("${git_dirs[1]}/config" "${git_dirs[0]}/config.worktree" "${git_dirs[1]}/config.worktree")
+    scanned=$'\n'
+    n=0
+    while ((${#queue[@]})) && ((n < 32)); do
+      f="${queue[0]}"
+      queue=("${queue[@]:1}")
+      [[ -f "$f" ]] || continue
+      fr="$(realpath -e -- "$f" 2>/dev/null)" || continue
+      [[ "$scanned" != *$'\n'"$fr"$'\n'* ]] || continue
+      scanned+="$fr"$'\n'
+      n=$((n + 1))
+      if grep -qiE 'extraheader|(https?|ftp)://[^/@[:space:]]+@' -- "$fr"; then
+        die "git config $fr holds credentials (extraheader or user@ in an http(s)/ftp URL); use --git-metadata none"
+      fi
+      while IFS= read -r inc; do
+        [[ -n "$inc" && "$inc" != "~"* ]] || continue
+        inc="$(resolve_from "$(dirname -- "$fr")" "$inc")"
+        for d in "${git_dirs[@]}"; do
+          if under "$d" "$inc"; then queue+=("$inc"); break; fi
+        done
+      done < <(sed -nE 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/Ip' -- "$fr")
+    done
+    # Fail closed: a config chain longer than the cap is not scanned in full.
+    if ((${#queue[@]})); then
+      die "git config includes more than 32 files inside the git dirs; use --git-metadata none"
+    fi
+  fi
+fi
+
+# --- operator-listed read-only paths (toolchains) ----------------------------------
+ro_binds=()
+ro_real=()
+for p in "${ro_paths[@]}"; do
+  [[ "$p" == /* ]] || die "--ro-path must be absolute: $p"
+  r="$(realpath -e -- "$p" 2>/dev/null)" || die "--ro-path does not exist: $p"
+  refuse_bind "$r" "--ro-path"
+  refuse_secret "$r" "--ro-path"
+  refuse_host_state "$r" "--ro-path"
+  under "$r" "$worktree" && die "refusing a --ro-path that contains the worktree: $r"
+  under "$worktree" "$r" && die "refusing a --ro-path inside the worktree: $r"
+  for d in "${git_dirs[@]}"; do
+    under "$r" "$d" && die "refusing a --ro-path that contains the git directory: $r"
+    under "$d" "$r" && die "refusing a --ro-path inside the git directory: $r"
+  done
+  ro_real+=("$r")
+  ro_binds+=(--ro-bind "$r" "$r")
+  # Cargo keeps registry tokens in $CARGO_HOME/credentials.toml (or `credentials`).
+  if [[ -d "$r" ]]; then
+    for c in credentials.toml credentials; do
+      [[ -e "$r/$c" || -L "$r/$c" ]] && masks+=("$r/$c")
+    done
+  fi
+done
+
+# --- environment ---------------------------------------------------------------------
+env_args=()
+for pair in "${env_pairs[@]}"; do
+  [[ "$pair" == *=* ]] || die "--env needs NAME=VALUE: $pair"
+  name="${pair%%=*}"
+  value="${pair#*=}"
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || die "--env name is not a variable name: $name"
+  case "$name" in
+    HOME | PATH | TMPDIR | USER | PWD) die "--env must not set $name" ;;
+  esac
+  upper="${name^^}"
+  for w in TOKEN SECRET PASSWORD PASSWD KEY CREDENTIAL AUTH COOKIE SESSION; do
+    [[ "$upper" != *"$w"* ]] || die "--env refuses a name that looks like a credential: $name"
+  done
+  env_args+=(--setenv "$name" "$value")
+  # Cargo's registry tokens live in $CARGO_HOME, wherever it points.
+  if [[ "$name" == CARGO_HOME && "$value" == /* ]]; then
+    masks+=("$value/credentials.toml" "$value/credentials")
+  fi
+done
+
+# A mask hides what the path resolves to, so a symlinked credential file is hidden at
+# its target. A target outside every --ro-path is not mounted, so needs no mask.
+mask_binds=()
+keep_fds=" "
+masked=$'\n'
+for m in "${masks[@]}"; do
+  [[ "$m" == /* ]] || die "--mask must be absolute: $m"
+  mr="$(realpath -e -- "$m" 2>/dev/null)" || continue
+  # One mount per target: a file named by --ro-path, --env CARGO_HOME and --mask at
+  # once is masked once (bwrap cannot bind over its own data bind).
+  [[ "$masked" != *$'\n'"$mr"$'\n'* ]] || continue
+  masked+="$mr"$'\n'
+  inside=0
+  for r in "${ro_real[@]}"; do
+    [[ "$mr" != "$r" ]] || die "--mask is a whole --ro-path; drop that --ro-path instead: $m"
+    under "$r" "$mr" && inside=1
+  done
+  ((inside)) || continue
+  if [[ -d "$mr" ]]; then
+    mask_binds+=(--tmpfs "$mr" --remount-ro "$mr")
+  else
+    # An empty regular file bwrap reads from a descriptor, so tools still open it.
+    exec {mask_fd}</dev/null
+    keep_fds+="$mask_fd "
+    mask_binds+=(--perms 0444 --ro-bind-data "$mask_fd" "$mr")
+  fi
+done
+
+# --- PATH ------------------------------------------------------------------------
+sandbox_path="/usr/local/bin:/usr/bin:/bin"
+for ((i = ${#path_dirs[@]} - 1; i >= 0; i--)); do
+  d="${path_dirs[$i]}"
+  [[ "$d" == /* && "$d" != *:* ]] || die "--path must be an absolute directory without ':': $d"
+  ok=0
+  under /usr "$d" && ok=1
+  for r in "${ro_real[@]}"; do under "$r" "$(realpath -m -- "$d")" && ok=1; done
+  ((ok)) || die "--path must be under /usr or a --ro-path: $d"
+  sandbox_path="$d:$sandbox_path"
+done
+
+# --- the sandbox -----------------------------------------------------------------
+sandbox_home="/home/verifier"
+net_args=(--unshare-net)
+((allow_network)) && net_args=()
+args=(
+  --die-with-parent
+  --new-session
+  --unshare-user --disable-userns
+  --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+  "${net_args[@]}"
+  --hostname meshloop-verify
+  --cap-drop ALL
+  --clearenv
+  --setenv HOME "$sandbox_home"
+  --setenv PATH "$sandbox_path"
+  --setenv TERM dumb
+  --setenv NO_COLOR 1
+  --setenv LANG C.UTF-8
+  --setenv TMPDIR /tmp
+  --setenv USER verifier
+  "${env_args[@]}"
+  # System files, read-only. Merged-/usr layout; /etc only what TLS, DNS, git and the
+  # Debian alternatives links (cc, c++, ld, editor) need.
+  --ro-bind /usr /usr
+  --symlink usr/bin /bin
+  --symlink usr/sbin /sbin
+  --symlink usr/lib /lib
+  --symlink usr/lib64 /lib64
+  --ro-bind-try /etc/ssl /etc/ssl
+  --ro-bind-try /etc/ca-certificates /etc/ca-certificates
+  --ro-bind-try /etc/resolv.conf /etc/resolv.conf
+  --ro-bind-try /etc/hosts /etc/hosts
+  --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+  --ro-bind-try /etc/gai.conf /etc/gai.conf
+  --ro-bind-try /etc/host.conf /etc/host.conf
+  --ro-bind-try /etc/localtime /etc/localtime
+  --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache
+  --ro-bind-try /etc/passwd /etc/passwd
+  --ro-bind-try /etc/group /etc/group
+  --ro-bind-try /etc/alternatives /etc/alternatives
+  --proc /proc
+  --dev /dev
+  --size "$tmpfs_size" --tmpfs /dev/shm
+  --size "$tmpfs_size" --tmpfs /tmp
+  --size "$tmpfs_size" --tmpfs "$sandbox_home"
+)
+# Toolchains, then their masks, then the worktree with its read-only git binds on top.
+args+=("${ro_binds[@]}" "${mask_binds[@]}")
+args+=(--bind "$worktree" "$worktree" "${git_binds[@]}" --chdir "$worktree")
+# Everything not mounted above is the sandbox's own root, now read-only, and so is the
+# small /dev tmpfs bwrap builds (device nodes still work; /dev/shm is its own tmpfs).
+args+=(--remount-ro /dev --remount-ro /)
+
+if ((print_only)); then
+  printf '%q ' bwrap "${args[@]}" -- "$@"
+  printf '\n'
+  # Never 0: a runner prefix that kept --print-bwrap must not make every check pass.
+  exit 2
+fi
+
+# --- what the sandbox inherits ------------------------------------------------------
+# bwrap passes every open descriptor on to the sandbox, and meshloop's spawn closes
+# none, so a descriptor the caller left open (a file, a socket, a directory) would be a
+# path out. Close everything above 2 that survives exec, except the empty-file
+# descriptors bwrap reads for the masks.
+open_fds=()
+for f in /proc/$$/fd/*; do
+  f="${f##*/}"
+  [[ "$f" =~ ^[0-9]+$ ]] && ((f > 2)) || continue
+  [[ "$keep_fds" != *" $f "* ]] || continue
+  # Close-on-exec descriptors (bash's own, such as the script on 255) end at exec.
+  flags="$(sed -n 's/^flags:[[:space:]]*//p' "/proc/$$/fdinfo/$f" 2>/dev/null || true)"
+  [[ -n "$flags" ]] || continue
+  (((8#$flags & 8#2000000) == 0)) || continue
+  open_fds+=("$f")
+done
+for f in "${open_fds[@]}"; do
+  exec {f}>&- || true
+done
+# No core files: a crashing check would write its memory into the worktree.
+ulimit -c 0
+ulimit -Hc 0
+
+# exec keeps this process's PID, so the PID and process group meshloop owns are
+# bwrap's. bwrap with --die-with-parent and --unshare-pid takes every process in the
+# sandbox with it when it is killed (ADR 0025), on cancel and on timeout alike.
+exec bwrap "${args[@]}" -- "$@"

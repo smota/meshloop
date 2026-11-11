@@ -1,4 +1,4 @@
-//! Length-cap and secret-pattern redaction before persistence (ADR 0007 / ML-008).
+//! Length-cap and secret-shape redaction before persistence (ADR 0007 / ML-008, #183).
 //! Evidence longer than the cap keeps diagnostic lines, a suffix, and the original length.
 
 const CAP: usize = 2048;
@@ -6,10 +6,9 @@ const CAP: usize = 2048;
 /// Previous cap kept `CAP` bytes and then pushed `…` (3 bytes).
 const MAX_STORED: usize = CAP + 3;
 
-const PATTERNS: &[&str] = &["-----BEGIN", "sk-", "ghp_", "Bearer ", "api_key="];
-
-/// `sk-` plus at least this many ASCII alphanumeric characters is a key.
-const SK_MIN_KEY_CHARS: usize = 40;
+mod secrets;
+#[cfg(test)]
+mod secrets_tests;
 
 /// Substrings that mark a line the repair lattice can use.
 /// `error:` does not match rustc `error[E0308]`, so the bracket forms are separate.
@@ -17,61 +16,14 @@ const DIAGNOSTIC_NEEDLES: &[&str] = &[
     "error:", "error[", "warning:", "warning[", "-->", "FAILED", "panicked",
 ];
 
+/// Scrubs secret shapes (see the `secrets` module), then caps the length.
 pub fn redact(input: &str) -> String {
-    let mut out = input.to_string();
-    for p in PATTERNS {
-        if !out.contains(p) {
-            continue;
-        }
-        // Bare `sk-` is also the tail of `task-1`; only a bounded key is a secret.
-        out = if *p == "sk-" {
-            redact_sk_keys(&out)
-        } else {
-            out.replace(p, "[REDACTED]")
-        };
-    }
     // Secrets are removed on the full string, before any bytes are dropped.
+    let out = secrets::scrub(input);
     if out.len() > CAP {
         return shrink_evidence(&out);
     }
     out
-}
-
-fn redact_sk_keys(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if let Some(end) = sk_key_end(bytes, i) {
-            out.push_str("[REDACTED]");
-            i = end;
-            continue;
-        }
-        let Some(ch) = input[i..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-/// End offset of `sk-` plus its key characters, when this index starts a key.
-fn sk_key_end(bytes: &[u8], i: usize) -> Option<usize> {
-    let prefix = b"sk-";
-    if i + prefix.len() > bytes.len() || &bytes[i..i + prefix.len()] != prefix {
-        return None;
-    }
-    if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
-        return None;
-    }
-    let mut end = i + prefix.len();
-    let mut count = 0usize;
-    while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
-        end += 1;
-        count += 1;
-    }
-    (count >= SK_MIN_KEY_CHARS).then_some(end)
 }
 
 /// Marker plus a char-aligned suffix, with the last diagnostic lines in front.
@@ -191,6 +143,7 @@ fn suffix_within(text: &str, max_bytes: usize) -> &str {
 mod tests {
     use meshloop_domain::diagnostic::parse_diagnostics;
 
+    use super::secrets::SK_MIN_KEY_CHARS;
     use super::*;
 
     fn non_diagnostic_noise(min_bytes: usize) -> String {

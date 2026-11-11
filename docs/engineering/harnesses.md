@@ -252,6 +252,19 @@ verify, integrate and cleanup), `git::tests::a_modified_git_link_is_refused_befo
 `git::tests::nested_git_entries_are_found_without_following_links`,
 `harness::prompt_file_tests` and `verify::tests::prompt_file_paths_are_reserved_anywhere_in_a_change`.
 
+## Verification runs worker-written code (#181)
+
+Whatever the harness, `verify_command` runs in the attempt worktree after the worker
+exits. By default it runs on the host with the operator's full authority and
+environment, so a check that executes repository code (`cargo test`, `npm test`, `make`,
+build scripts, test runners that load repository config) executes code the worker
+wrote, outside any worker containment. Either use checks that only read the worktree
+(`git diff --check`, `grep`, a parse-only linter), or set `[verify] runner` to run every
+check under `adapters/sandbox/meshloop-verify-sandbox`: worktree the only writable path,
+no credential, no network unless `--allow-network`. How to enable it, toolchain paths and
+what is and is not contained: [Contained verification](nodecode-containment.md#contained-verification).
+`meshloop doctor` warns when a harness runs under containment but verification does not.
+
 ## Nodecode worker (#138)
 
 Nodecode is a worker harness through operator configuration only, and only under the
@@ -291,6 +304,13 @@ Meshloop treats any non-zero exit as a failed attempt. The attempt's stdout evid
 the assistant's messages, one `nodecode-turn: usage PROVIDER/MODEL input N output N
 cost_usd X` line per model call, and a final `nodecode-turn: <outcome>` line. The exact
 value of the bound key is replaced by `[redacted]` in stdout, stderr and the raw log.
+Meshloop then applies its own redaction to every harness's stdout and stderr before
+storing them (`meshloop_adapters::redact`, #183): documented provider key shapes, JWTs,
+PEM private keys, bearer and `Authorization` credentials, URL passwords
+(`scheme://user:…@host`), secret-named assignments and flags (`API_KEY=…`,
+`"token": "…"`, `--password …`) and long high-entropy tokens, including standard base64,
+become `[REDACTED]`, also inside ANSI colour codes. Commit SHAs, sha256 digests and UUIDs
+are kept. A key split across lines or encoded is not reliably caught.
 
 The probe goes through the wrapper (`version_args = ["--version"]`, plus `--nodecode`
 when the operator names a private copy). It runs `nodecode --version` inside the sandbox

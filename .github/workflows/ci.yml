@@ -26,7 +26,9 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch --locked
       # #138: tests/nodecode_containment.rs runs adapters/nodecode/containment-test.sh,
-      # which skips without bubblewrap or unprivileged user namespaces. Install bwrap and
+      # and #181: tests/verify_containment.rs runs adapters/sandbox/verify-containment-test.sh
+      # plus contained `meshloop run` checks. Both skip without bubblewrap or
+      # unprivileged user namespaces. Install bwrap and
       # make the test required (MESHLOOP_REQUIRE_CONTAINMENT=1, a skip then fails) only
       # where the probe shows the sandbox can be built; ubuntu-24.04's AppArmor policy
       # may block user namespaces, and then the test skips with that reason.
@@ -40,7 +42,7 @@ jobs:
           fi
           bwrap --version
           if probe="$(bwrap --unshare-user --disable-userns --unshare-pid --unshare-ipc \
-                --unshare-uts --unshare-cgroup-try --die-with-parent --new-session \
+                --unshare-uts --unshare-cgroup-try --unshare-net --die-with-parent --new-session \
                 --ro-bind / / true 2>&1)"; then
             echo "MESHLOOP_REQUIRE_CONTAINMENT=1" >> "$GITHUB_ENV"
             echo "bwrap builds the sandbox here: the nodecode containment test is required"
