@@ -274,6 +274,36 @@ and stderr. On Unix, zombies count as group members, so in a container whose PID
 not reap orphans (e.g. docker without `--init`) checks can fail with
 `check-process-tree-survived`; run with a reaping init.
 
+Ignored files are not part of the candidate (#196). Right before every check (the first
+check, every repair round's and micro-repair's re-check, and the re-check of an
+orphaned or resumed verification), Meshloop removes the attempt worktree's ignored
+files and directories, so a check cannot pass on build output the worker left there:
+the reviewed diff does not contain them. It removes them again after the check, so the
+check's own ignored output (a `target/`) does not keep a landed run from being
+reclaimed. With no `verify_command`, the one removal is the after-verification one.
+The removal is `git clean -f -d -X -q -- .` through `host_git`, run only in a linked
+attempt worktree, never in the repository checkout, and only after the worktree link
+and the nested-repository walk pass (the same checks as `commit_all`; a refusal removes
+nothing). `-X` removes ignored entries only: tracked files, even ones an ignore rule
+matches, and untracked files that are not ignored are kept. A single `-f` never removes
+a nested repository, links are removed and never followed, and no `-e` is passed (under
+`-X` it would widen the removal). Each removal is a `clean-ignored` evidence row with
+the count of entries and their bytes, never their names. A removal that fails before
+the check fails it closed (exit 1, the check does not run); one that fails after the
+check is recorded with exit 0, because the check already ran on a clean tree, and
+cleanup then reports what is left. Integrate and deliverable worktrees are not cleaned:
+no check runs there and Meshloop writes no ignored files there.
+Cost: every check builds from a clean tree, so an incremental build cache in the
+worktree is never reused. Keep caches outside the worktree (for example
+`CARGO_TARGET_DIR` on an uncontained host check). The contained runner has no writable
+path outside the worktree that outlives a check; see
+[Contained verification](nodecode-containment.md#contained-verification).
+Tests: `crates/meshloop-cli/tests/ignored_clean.rs` (Unix: prebuilt ignored output
+cannot pass a check, a check's ignored output does not block reclaiming a landed run,
+a planted link and the operator's own ignored files survive, a nested repository is
+refused before anything is removed, a long ignored listing is not `dirty-tracked`),
+`git::tests::clean_ignored_*` and `run_loop::tests::*removal*`.
+
 ## Nodecode worker (#138)
 
 Nodecode is a worker harness through operator configuration only, and only under the

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use std::collections::BTreeMap;
 
-use meshloop_domain::cleanup::RunOutcome;
+use meshloop_domain::cleanup::{RunOutcome, StatusRefusal};
 use meshloop_domain::workspace::{
     EntrySource, GitRef, InventoryEntry, LifecycleId, LocationScope, ObjectId, OwnershipCode,
     RelativePath,
@@ -141,6 +141,7 @@ fn run_loop_facts(
         observation.dirty_tracked = false;
         observation.dirty_untracked = false;
         observation.unknown_ignored = false;
+        observation.status_refusal = None;
         observation.commit = None;
         observation.commit_reachable = false;
         observation.commit_unproven = false;
@@ -203,25 +204,7 @@ fn contain_and_read(
 
 fn git_facts(path: &Path, checkout: &Path, retained: Option<&ObjectId>) -> CleanupObservation {
     let mut observation = CleanupObservation::default();
-    match git_in_worktree(
-        path,
-        checkout,
-        &[
-            "status",
-            "--porcelain",
-            "--ignore-submodules=all",
-            "--ignored",
-            "--untracked-files=all",
-            "-z",
-        ],
-    ) {
-        Ok(bytes) => {
-            if classify_porcelain(&bytes, &mut observation).is_err() {
-                content_unknown(&mut observation);
-            }
-        }
-        Err(()) => content_unknown(&mut observation),
-    }
+    status_facts(path, checkout, &mut observation);
     match git_in_worktree(
         path,
         checkout,
@@ -250,38 +233,111 @@ fn git_facts(path: &Path, checkout: &Path, retained: Option<&ObjectId>) -> Clean
     observation
 }
 
-fn content_unknown(observation: &mut CleanupObservation) {
-    observation.dirty_tracked = true;
-    observation.dirty_untracked = true;
-    observation.unknown_ignored = true;
-}
+/// Bound of one `git status` listing (#196). The listing is parsed as it streams, so
+/// this bounds time and pipe traffic, not memory. A larger listing is refused as
+/// `status-too-large`.
+const STATUS_LIMIT: u64 = 256 * 1024 * 1024;
 
-fn classify_porcelain(bytes: &[u8], observation: &mut CleanupObservation) -> Result<(), ()> {
-    let parts: Vec<&[u8]> = bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .collect();
-    let mut index = 0;
-    while index < parts.len() {
-        let record = parts[index];
-        if record.len() < 4 || record[2] != b' ' {
-            return Err(());
+/// Content facts from `git status --ignored --untracked-files=all`, parsed as it
+/// streams (#196). A status that is not read (a refused link, a failed or timed-out
+/// git, an oversized or malformed listing) sets only `status_refusal`: an unread
+/// status is unknown content, never dirty tracked or untracked files.
+fn status_facts(path: &Path, checkout: &Path, observation: &mut CleanupObservation) {
+    let scanned = worktree_command(
+        path,
+        checkout,
+        &[
+            "status",
+            "--porcelain",
+            "--ignore-submodules=all",
+            "--ignored",
+            "--untracked-files=all",
+            "-z",
+        ],
+    )
+    .ok_or(super::ScanFault::Failed)
+    .and_then(|command| {
+        super::scan_stdout(
+            command,
+            Duration::from_secs(10),
+            STATUS_LIMIT,
+            StatusScan::default(),
+            StatusScan::feed,
+        )
+    })
+    .and_then(|scan| scan.finish().map_err(|_| super::ScanFault::Failed));
+    match scanned {
+        Ok(scan) => {
+            observation.dirty_tracked = scan.dirty_tracked;
+            observation.dirty_untracked = scan.dirty_untracked;
+            observation.unknown_ignored = scan.unknown_ignored;
         }
-        let xy = [record[0], record[1]];
-        match &xy {
-            b"??" => observation.dirty_untracked = true,
-            b"!!" => observation.unknown_ignored = true,
-            _ => observation.dirty_tracked = true,
+        Err(super::ScanFault::TooLarge) => {
+            observation.status_refusal = Some(StatusRefusal::TooLarge);
         }
-        index += 1;
-        if xy[0] == b'R' || xy[0] == b'C' || xy[1] == b'R' || xy[1] == b'C' {
-            if index >= parts.len() {
-                return Err(());
-            }
-            index += 1;
+        Err(super::ScanFault::Failed) => {
+            observation.status_refusal = Some(StatusRefusal::Unreadable);
         }
     }
-    Ok(())
+}
+
+/// Incremental parser of `git status --porcelain -z` records. Keeps three bytes of
+/// the current record, never the record itself.
+#[derive(Debug, Default)]
+struct StatusScan {
+    dirty_tracked: bool,
+    dirty_untracked: bool,
+    unknown_ignored: bool,
+    head: [u8; 3],
+    len: usize,
+    /// The next record is the original path of a rename or copy.
+    origin_next: bool,
+}
+
+impl StatusScan {
+    fn feed(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        for &byte in bytes {
+            if byte == 0 {
+                self.end_record()?;
+            } else {
+                if self.len < self.head.len() {
+                    self.head[self.len] = byte;
+                }
+                self.len = self.len.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn end_record(&mut self) -> Result<(), ()> {
+        let len = std::mem::take(&mut self.len);
+        if len == 0 {
+            return Ok(());
+        }
+        if std::mem::take(&mut self.origin_next) {
+            return Ok(());
+        }
+        if len < 4 || self.head[2] != b' ' {
+            return Err(());
+        }
+        let xy = [self.head[0], self.head[1]];
+        match &xy {
+            b"??" => self.dirty_untracked = true,
+            b"!!" => self.unknown_ignored = true,
+            _ => self.dirty_tracked = true,
+        }
+        self.origin_next = matches!(xy[0], b'R' | b'C') || matches!(xy[1], b'R' | b'C');
+        Ok(())
+    }
+
+    /// The verdict once the listing ended; a record cut short is refused.
+    fn finish(mut self) -> Result<Self, ()> {
+        self.end_record()?;
+        if self.origin_next {
+            return Err(());
+        }
+        Ok(self)
+    }
 }
 
 fn location_root(
@@ -437,15 +493,26 @@ fn unbound_repository() -> LifecycleId {
 /// Git inside a candidate worktree: refused (`Err`) unless the worktree's `.git` link
 /// verifies against the checkout's common dir, then pinned to it (#180).
 fn git_in_worktree(path: &Path, checkout: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
-    let common = common_dir(checkout).ok_or(())?;
-    let admin = crate::host_git::verify_worktree_link(path, &common).map_err(|_| ())?;
+    let command = worktree_command(path, checkout, args).ok_or(())?;
+    super::bounded_stdout(command, Duration::from_secs(10)).map_err(|_| ())
+}
+
+/// The hardened git command for a candidate worktree, or `None` when its `.git` link
+/// does not verify (#180).
+fn worktree_command(
+    path: &Path,
+    checkout: &Path,
+    args: &[&str],
+) -> Option<crate::process::OwnedSpawnSpec> {
+    let common = common_dir(checkout)?;
+    let admin = crate::host_git::verify_worktree_link(path, &common).ok()?;
     let mut command = crate::host_git::spec("git");
     command.arg("--no-optional-locks");
     command.arg("-C").arg(path);
     command.args(crate::host_git::pinned(&admin));
     command.args(args.iter().copied());
     command.env("GIT_OPTIONAL_LOCKS", "0");
-    super::bounded_stdout(command, Duration::from_secs(10)).map_err(|_| ())
+    Some(command)
 }
 
 fn git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
@@ -1163,4 +1230,55 @@ pub fn reclaim_run(
     };
     result.cleanup = Some(applied);
     Ok(result)
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn scan(chunks: &[&[u8]]) -> Result<StatusScan, ()> {
+        let mut scan = StatusScan::default();
+        for chunk in chunks {
+            scan.feed(chunk)?;
+        }
+        scan.finish()
+    }
+
+    /// #196: records split across chunks parse as whole records; only the record kind
+    /// sets a fact, and a rename's original path is not read as a record.
+    #[test]
+    fn status_records_parse_across_chunk_boundaries() {
+        let listing = b"!! target/a\0!! target/b\0R  new\0?? old\0";
+        for split in 0..listing.len() {
+            let (left, right) = listing.split_at(split);
+            let facts = scan(&[left, right]).unwrap();
+            assert!(facts.unknown_ignored, "{split}");
+            assert!(facts.dirty_tracked, "{split}");
+            // `?? old` is the rename's origin, not an untracked file.
+            assert!(!facts.dirty_untracked, "{split}");
+        }
+        let ignored_only = scan(&[b"!! target/\0".as_slice()]).unwrap();
+        assert!(ignored_only.unknown_ignored);
+        assert!(!ignored_only.dirty_tracked && !ignored_only.dirty_untracked);
+        assert!(scan(&[b"".as_slice()]).is_ok());
+    }
+
+    #[test]
+    fn malformed_or_cut_status_listings_are_refused() {
+        assert!(scan(&[b"!!x\0".as_slice()]).is_err());
+        assert!(scan(&[b"!! \0".as_slice()]).is_err());
+        assert!(scan(&[b"R  new\0".as_slice()]).is_err());
+    }
+
+    /// #196: an unread status is its own refusal and never fabricates dirty facts.
+    #[test]
+    fn an_unread_status_is_a_refusal_not_dirty_content() {
+        let elsewhere = std::env::temp_dir();
+        let mut observation = CleanupObservation::default();
+        status_facts(&elsewhere, &elsewhere, &mut observation);
+        assert_eq!(observation.status_refusal, Some(StatusRefusal::Unreadable));
+        assert!(!observation.dirty_tracked);
+        assert!(!observation.dirty_untracked);
+        assert!(!observation.unknown_ignored);
+    }
 }

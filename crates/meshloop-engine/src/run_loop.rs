@@ -25,8 +25,8 @@ use crate::converge::{
 use crate::planner::{DefaultTierAssigner, PlanError, assign_tiers, decompose_owned};
 use crate::ports::{
     AttemptRow, CheckRunner, DecisionPort, FeedbackKey, HarnessCapabilities, HarnessHandle,
-    HarnessOutcome, LiveCheck, ProcessHint, ProcessView, RunRow, RunStore, StoreError,
-    TransitionRecord, WorkspaceError, WorkspacePort,
+    HarnessOutcome, IgnoredClean, LiveCheck, ProcessHint, ProcessView, RunRow, RunStore,
+    StoreError, TransitionRecord, WorkspaceError, WorkspacePort,
 };
 use crate::recovery::replay_tasks;
 use crate::router::{Candidate, Router, RoutingContext};
@@ -1915,11 +1915,32 @@ impl<'a> RunLoop<'a> {
         }
         let mut lattice_out = None;
         let mut diag_out = String::new();
-        if !self.verify_command.is_empty() {
-            match self
+        // #196: ignored files are not part of the candidate. They are removed before
+        // the check, so it cannot reuse build output the worker (or an earlier check)
+        // left behind, and again after it, so the check's own output does not block
+        // reclamation. A failed removal before the check fails closed: the check does
+        // not run. With no check, the one removal is the after-verification one.
+        let before = self.workspace.clean_ignored(wt);
+        let before_ok = matches!(&before, Ok(clean) if clean.remaining == 0);
+        let when = if self.verify_command.is_empty() {
+            CleanPoint::AfterVerification
+        } else {
+            CleanPoint::BeforeCheck
+        };
+        rows.push(clean_ignored_evidence(&candidate_ref, when, &before));
+        if self.verify_command.is_empty() {
+            rows.push(skipped_verify_evidence(&candidate_ref));
+        } else if before_ok {
+            let result = self
                 .checks
-                .run(wt, &self.verify_command, self.limits.task_timeout)
-            {
+                .run(wt, &self.verify_command, self.limits.task_timeout);
+            let after = self.workspace.clean_ignored(wt);
+            rows.push(clean_ignored_evidence(
+                &candidate_ref,
+                CleanPoint::AfterCheck,
+                &after,
+            ));
+            match result {
                 Ok(mut ev) => {
                     ev.candidate = candidate_ref.clone();
                     let (lat, annotated) = annotate_with_lattice(&ev.output_redacted);
@@ -1939,8 +1960,6 @@ impl<'a> RunLoop<'a> {
                     }));
                 }
             }
-        } else {
-            rows.push(skipped_verify_evidence(&candidate_ref));
         }
         Ok((rows, lattice_out, diag_out))
     }
@@ -3715,6 +3734,78 @@ fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
     })
 }
 
+/// When ignored files were removed from an attempt worktree (#196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanPoint {
+    BeforeCheck,
+    AfterCheck,
+    AfterVerification,
+}
+
+/// Evidence tool name of an ignored-file removal (#196).
+const CLEAN_IGNORED_TOOL: &str = "clean-ignored";
+
+/// The evidence note of one ignored-file removal: counts and sizes, never names, and no
+/// worker text. Only a failed removal before a check fails (exit 1): that check did
+/// not run. A failed removal after it is recorded with exit 0, because the check
+/// already ran on a clean tree; cleanup then reports the entries left behind.
+fn clean_ignored_evidence(
+    candidate: &CandidateRef,
+    when: CleanPoint,
+    result: &Result<IgnoredClean, WorkspaceError>,
+) -> Evidence {
+    let label = match when {
+        CleanPoint::BeforeCheck => "before check",
+        CleanPoint::AfterCheck => "after check",
+        CleanPoint::AfterVerification => "after verification",
+    };
+    let outcome = match result {
+        Ok(clean) if clean.remaining == 0 => Ok(clean),
+        Ok(clean) => Err(format!(
+            "{} ignored entries could not be removed",
+            clean.remaining
+        )),
+        Err(error) => Err(clean_failure(error).to_string()),
+    };
+    let (exit_code, output_redacted) = match outcome {
+        Ok(clean) => (
+            0,
+            format!(
+                "{label}: removed {} ignored entries, {}{} bytes",
+                clean.entries,
+                if clean.bytes_partial { "at least " } else { "" },
+                clean.bytes
+            ),
+        ),
+        Err(reason) if when == CleanPoint::BeforeCheck => (
+            1,
+            format!("{label}: not cleaned ({reason}); the check did not run"),
+        ),
+        Err(reason) => (
+            0,
+            format!("{label}: not cleaned ({reason}); cleanup reports what is left"),
+        ),
+    };
+    Evidence::Deterministic(DeterministicEvidence {
+        candidate: candidate.clone(),
+        tool: CLEAN_IGNORED_TOOL.into(),
+        tool_version: "n/a".into(),
+        exit_code,
+        output_redacted,
+    })
+}
+
+/// A short, path-free reason for a failed ignored-file removal.
+fn clean_failure(error: &WorkspaceError) -> &'static str {
+    match error {
+        WorkspaceError::GitLinkModified { .. } => "git-link-modified",
+        WorkspaceError::NestedGit { .. } => "nested-git",
+        WorkspaceError::StagingFailed { .. } => "worktree-walk-failed",
+        WorkspaceError::CommandFailed { .. } => "git-clean-failed",
+        WorkspaceError::Io(_) | WorkspaceError::Conflict | WorkspaceError::Dirty => "clean-refused",
+    }
+}
+
 /// The failing evidence row of a refused worktree. No revision: nothing was committed.
 fn refusal_evidence(
     task_id: TaskId,
@@ -3898,6 +3989,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
@@ -4758,6 +4850,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5716,6 +5809,7 @@ mod tests {
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
+            fn clean_ignored(&self, worktree: &Path) -> Result<IgnoredClean, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5772,6 +5866,21 @@ mod tests {
 
     struct GateWorkspace {
         files: Vec<String>,
+        /// Scripted `clean_ignored` results, in call order; then a clean success.
+        cleans:
+            std::cell::RefCell<std::collections::VecDeque<Result<IgnoredClean, WorkspaceError>>>,
+        /// Order of `clean_ignored` calls and checks (#196).
+        log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+
+    impl GateWorkspace {
+        fn new(files: Vec<String>) -> Self {
+            Self {
+                files,
+                cleans: Default::default(),
+                log: Default::default(),
+            }
+        }
     }
 
     impl WorkspacePort for GateWorkspace {
@@ -5804,6 +5913,13 @@ mod tests {
         }
         fn head(&self, _worktree: &Path) -> Result<String, WorkspaceError> {
             Ok("rev".into())
+        }
+        fn clean_ignored(&self, _worktree: &Path) -> Result<IgnoredClean, WorkspaceError> {
+            self.log.borrow_mut().push("clean");
+            self.cleans
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Ok(IgnoredClean::default()))
         }
         forbidden_port_calls! {
             fn repo_root(&self) -> &Path;
@@ -5848,7 +5964,7 @@ mod tests {
         routed_tier: Tier,
         files: Vec<String>,
     ) -> (Tick, DispatchStore) {
-        let workspace = GateWorkspace { files };
+        let workspace = GateWorkspace::new(files);
         let other = admission_ports(Ok(None));
         let mut store = DispatchStore::new();
         let mut run = RunLoop {
@@ -5927,13 +6043,188 @@ mod tests {
         }
     }
 
+    /// A check that passes and logs its run into the workspace's log (#196).
+    struct LoggedChecks(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>);
+
+    impl CheckRunner for LoggedChecks {
+        fn run(
+            &self,
+            _worktree: &Path,
+            _argv: &[String],
+            _timeout: Duration,
+        ) -> Result<DeterministicEvidence, crate::ports::CheckError> {
+            self.0.borrow_mut().push("check");
+            Ok(DeterministicEvidence {
+                candidate: CandidateRef {
+                    task_id: TaskId(1),
+                    attempt_id: AttemptId(1),
+                    revision: "rev".into(),
+                },
+                tool: "check".into(),
+                tool_version: "n/a".into(),
+                exit_code: 0,
+                output_redacted: "ok".into(),
+            })
+        }
+    }
+
+    /// `run_deterministic_checks` on `workspace` with a logged, passing check (or none).
+    fn checks_on(workspace: &GateWorkspace, verify_command: Vec<String>) -> Vec<Evidence> {
+        let checks = LoggedChecks(workspace.log.clone());
+        let other = admission_ports(Ok(None));
+        let mut store = DispatchStore::new();
+        let run = RunLoop {
+            harnesses: HashMap::new(),
+            candidates: vec![],
+            workspace,
+            store: &mut store,
+            processes: &other,
+            checks: &checks,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 1,
+                task_timeout: Duration::from_secs(1),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: true,
+            verify_command,
+            worktree_base: PathBuf::from("wt-base"),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+            micro_repair: None,
+            ownership: None,
+        };
+        let node = gate_node(None, AcceptanceGate::Human);
+        run.run_deterministic_checks(&node, AttemptId(1), Path::new("wt"), "base", "rev")
+            .expect("checks")
+            .0
+    }
+
+    fn clean_rows(rows: &[Evidence]) -> Vec<(i32, String)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Evidence::Deterministic(ev) if ev.tool == CLEAN_IGNORED_TOOL => {
+                    Some((ev.exit_code, ev.output_redacted.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #196: ignored files are removed right before every check and again after it,
+    /// and each removal is an evidence note with counts only.
+    #[test]
+    fn ignored_files_are_removed_before_and_after_every_check() {
+        let workspace = GateWorkspace::new(vec!["a.txt".into()]);
+        workspace.cleans.borrow_mut().extend([
+            Ok(IgnoredClean {
+                entries: 2,
+                bytes: 300,
+                bytes_partial: false,
+                remaining: 0,
+            }),
+            Ok(IgnoredClean {
+                entries: 1,
+                bytes: 7,
+                bytes_partial: true,
+                remaining: 0,
+            }),
+        ]);
+        let rows = checks_on(&workspace, vec!["check".into()]);
+        assert_eq!(*workspace.log.borrow(), ["clean", "check", "clean"]);
+        assert_eq!(
+            clean_rows(&rows),
+            [
+                (
+                    0,
+                    "before check: removed 2 ignored entries, 300 bytes".to_string()
+                ),
+                (
+                    0,
+                    "after check: removed 1 ignored entries, at least 7 bytes".to_string()
+                ),
+            ]
+        );
+        assert!(verification_passed(&rows), "{rows:?}");
+    }
+
+    /// #196: a removal that fails before the check fails closed: the check never runs
+    /// on a tree that may still hold the worker's build output.
+    #[test]
+    fn a_failed_removal_before_the_check_fails_verification_without_running_it() {
+        let refusals = [
+            Err(WorkspaceError::NestedGit {
+                path: PathBuf::from("target/x/.git"),
+                reason: "nested .git entry".into(),
+            }),
+            Err(WorkspaceError::CommandFailed {
+                stderr: "warning: failed to remove target/".into(),
+            }),
+            Ok(IgnoredClean {
+                entries: 0,
+                bytes: 0,
+                bytes_partial: false,
+                remaining: 3,
+            }),
+        ];
+        for refusal in refusals {
+            let workspace = GateWorkspace::new(vec!["a.txt".into()]);
+            workspace.cleans.borrow_mut().push_back(refusal.clone());
+            let rows = checks_on(&workspace, vec!["check".into()]);
+            assert_eq!(*workspace.log.borrow(), ["clean"], "{refusal:?}");
+            let notes = clean_rows(&rows);
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert_eq!(notes[0].0, 1, "{notes:?}");
+            assert!(notes[0].1.contains("the check did not run"), "{notes:?}");
+            // No path or git output reaches the evidence note.
+            assert!(!notes[0].1.contains("target"), "{notes:?}");
+            assert!(!verification_passed(&rows), "{refusal:?}");
+        }
+    }
+
+    /// #196: a removal that fails after the check is recorded, but does not fail a
+    /// check that already ran on a clean tree; with no check, the one removal is the
+    /// after-verification one.
+    #[test]
+    fn a_failed_removal_after_the_check_is_recorded_without_failing_it() {
+        let workspace = GateWorkspace::new(vec!["a.txt".into()]);
+        workspace.cleans.borrow_mut().extend([
+            Ok(IgnoredClean::default()),
+            Err(WorkspaceError::GitLinkModified {
+                path: PathBuf::from("wt/.git"),
+                reason: "rewritten".into(),
+            }),
+        ]);
+        let rows = checks_on(&workspace, vec!["check".into()]);
+        assert_eq!(*workspace.log.borrow(), ["clean", "check", "clean"]);
+        let notes = clean_rows(&rows);
+        assert_eq!(notes[1].0, 0, "{notes:?}");
+        assert!(
+            notes[1]
+                .1
+                .starts_with("after check: not cleaned (git-link-modified)")
+        );
+        assert!(verification_passed(&rows), "{rows:?}");
+
+        let workspace = GateWorkspace::new(vec!["a.txt".into()]);
+        let rows = checks_on(&workspace, vec![]);
+        assert_eq!(*workspace.log.borrow(), ["clean"]);
+        assert_eq!(
+            clean_rows(&rows),
+            [(
+                0,
+                "after verification: removed 0 ignored entries, 0 bytes".to_string()
+            )]
+        );
+        assert!(verification_passed(&rows), "{rows:?}");
+    }
+
     fn verify_after_cancel(
         cancel: bool,
     ) -> (Result<Tick, OrchestratorError>, DispatchStore, usize) {
         let h = ScriptedModels::new("fixture", &[]);
-        let workspace = GateWorkspace {
-            files: vec!["a.txt".into()],
-        };
+        let workspace = GateWorkspace::new(vec!["a.txt".into()]);
         let other = admission_ports(Ok(None));
         let mut store = DispatchStore::new();
         store.compare_and_append = true;
@@ -6200,9 +6491,7 @@ mod tests {
 
     #[test]
     fn orphaned_awaiting_review_appends_verify_gate_once() {
-        let workspace = GateWorkspace {
-            files: vec!["a.txt".into()],
-        };
+        let workspace = GateWorkspace::new(vec!["a.txt".into()]);
         let other = admission_ports(Ok(None));
         let node = gate_node(Some(Tier::Tier1), AcceptanceGate::Verify);
         let mut store = DispatchStore::new();

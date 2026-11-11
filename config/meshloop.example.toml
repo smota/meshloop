@@ -40,6 +40,9 @@ probe_timeout_seconds = 15
 # worktree the only writable path, no credentials, no network), set `runner`, an argv
 # prefix; `{worktree}` must be a whole argument. See
 # docs/engineering/nodecode-containment.md#contained-verification.
+# Before every check and after verification, Meshloop removes the attempt worktree's
+# ignored files (`git clean -d -X`), so a check rebuilds from a clean tree and never
+# reuses build output the worker left (#196). Keep caches outside the worktree.
 verify_command = []
 # runner = [
 #   "/path/to/meshloop/adapters/sandbox/meshloop-verify-sandbox",

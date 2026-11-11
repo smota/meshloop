@@ -832,6 +832,61 @@ fn workspace_git_process_is_bounded() {
     assert!(bounded_stdout(command("large"), Duration::from_secs(2)).is_err());
 }
 
+/// #196: a streamed listing has no 16 KiB cap; its bound is explicit and reported as
+/// `TooLarge`, distinct from a failed or timed-out process.
+#[test]
+fn streamed_git_output_is_bounded_by_its_own_limit() {
+    let command = |mode: &str| {
+        let mut c = OwnedSpawnSpec::new(std::env::current_exe().unwrap());
+        c.args([
+            "--exact",
+            "workspace::tests::workspace_git_process_child",
+            "--nocapture",
+        ])
+        .env("MESHLOOP_S2_PROCESS_CHILD", mode);
+        c
+    };
+    let count = |total: &mut u64, chunk: &[u8]| -> Result<(), ()> {
+        *total += chunk.iter().filter(|byte| **byte == b'x').count() as u64;
+        Ok(())
+    };
+    let seen = scan_stdout(
+        command("large"),
+        Duration::from_secs(5),
+        1 << 20,
+        0u64,
+        count,
+    );
+    assert!(matches!(seen, Ok(total) if total >= 20 * 1024), "{seen:?}");
+    assert_eq!(
+        scan_stdout(command("large"), Duration::from_secs(5), 1024, 0u64, count),
+        Err(ScanFault::TooLarge)
+    );
+    let refuse = |_: &mut u64, _: &[u8]| -> Result<(), ()> { Err(()) };
+    assert_eq!(
+        scan_stdout(
+            command("large"),
+            Duration::from_secs(5),
+            1 << 20,
+            0u64,
+            refuse
+        ),
+        Err(ScanFault::Failed)
+    );
+    let started = Instant::now();
+    assert_eq!(
+        scan_stdout(
+            command("sleep"),
+            Duration::from_millis(100),
+            1 << 20,
+            0u64,
+            count
+        ),
+        Err(ScanFault::Failed)
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
 #[test]
 fn workspace_root_alias_rebinding_refuses() {
     let f = Fixture::new();

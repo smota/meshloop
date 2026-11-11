@@ -40,6 +40,29 @@ pub struct CleanupCandidateFacts {
     /// The owning run recorded no base branch (started on a detached HEAD or a
     /// Meshloop branch), so it is never judged landed.
     pub base_unknown: bool,
+    /// `git status` of the entry could not be read, so its content is unknown (#196).
+    /// It blocks cleanup with its own reason and never stands for dirty content.
+    pub status_refusal: Option<StatusRefusal>,
+}
+
+/// Why an entry's `git status` was not read (#196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusRefusal {
+    /// The listing exceeded its byte bound.
+    TooLarge,
+    /// Git was refused (a modified `.git` link), failed, timed out, or printed a
+    /// listing that does not parse.
+    Unreadable,
+}
+
+impl StatusRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TooLarge => "too-large",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// Task outcome of a run the run loop owns. Only `Landed` permits cleanup:
@@ -124,6 +147,8 @@ pub enum CleanupReason {
     RunFailed,
     RunIncomplete,
     StaleFacts,
+    StatusTooLarge,
+    StatusUnreadable,
     UniqueCommit,
     UnknownIgnored,
     UnsafePath,
@@ -145,6 +170,8 @@ impl CleanupReason {
             Self::RunFailed => "run-failed",
             Self::RunIncomplete => "run-incomplete",
             Self::StaleFacts => "stale-facts",
+            Self::StatusTooLarge => "status-too-large",
+            Self::StatusUnreadable => "status-unreadable",
             Self::UniqueCommit => "unique-commit",
             Self::UnknownIgnored => "unknown-ignored",
             Self::UnsafePath => "unsafe-path",
@@ -198,6 +225,11 @@ fn reasons_for(candidate: &CleanupCandidateFacts, stale: bool) -> Vec<CleanupRea
     if candidate.unknown_ignored {
         push(&mut reasons, CleanupReason::UnknownIgnored);
     }
+    match candidate.status_refusal {
+        None => {}
+        Some(StatusRefusal::TooLarge) => push(&mut reasons, CleanupReason::StatusTooLarge),
+        Some(StatusRefusal::Unreadable) => push(&mut reasons, CleanupReason::StatusUnreadable),
+    }
     if unique_commit(candidate) {
         push(&mut reasons, CleanupReason::UniqueCommit);
     }
@@ -232,6 +264,7 @@ fn reasons_for(candidate: &CleanupCandidateFacts, stale: bool) -> Vec<CleanupRea
         && (candidate.dirty_tracked
             || candidate.dirty_untracked
             || candidate.unknown_ignored
+            || candidate.status_refusal.is_some()
             || unique_commit(candidate))
     {
         push(&mut reasons, CleanupReason::AttemptFailed);
@@ -326,6 +359,11 @@ fn candidate_block(candidate: &CleanupCandidateFacts) -> String {
             bit(unknown)
         ),
     };
+    // Like the run-loop facts, a status refusal is appended only when present.
+    let status = candidate
+        .status_refusal
+        .map(|refusal| format!("\nstatus={}", refusal.as_str()))
+        .unwrap_or_default();
     let block = format!(
         "id={}\nsource={}\ngraph={}\nscope={}\nalias={}\npath={}\nclass={}\nownership={}\nwithheld={}\nblockers={}\ndirty-tracked={}\ndirty-untracked={}\nunknown-ignored={}\ncommit={}\nreachable={}\nunproven={}\nactive={}\nreparse={}\nsymlink={}\nescape={}\noutside={}\nmissing-dependency={}\nmissing-recovery={}\nreceipt={}",
         id_token(entry.lifecycle_id.as_ref()),
@@ -362,7 +400,7 @@ fn candidate_block(candidate: &CleanupCandidateFacts) -> String {
         bit(candidate.missing_recovery_object),
         receipt_token(candidate.receipt.as_ref()),
     );
-    block + &run
+    block + &run + &status
 }
 
 fn receipt_token(receipt: Option<&DeliveryReceipt>) -> String {
@@ -448,6 +486,7 @@ mod tests {
             run_container: false,
             attempt_failed: false,
             base_unknown: false,
+            status_refusal: None,
         }
     }
 
@@ -487,6 +526,8 @@ mod tests {
             (CleanupReason::RunFailed, "run-failed"),
             (CleanupReason::RunIncomplete, "run-incomplete"),
             (CleanupReason::StaleFacts, "stale-facts"),
+            (CleanupReason::StatusTooLarge, "status-too-large"),
+            (CleanupReason::StatusUnreadable, "status-unreadable"),
             (CleanupReason::UniqueCommit, "unique-commit"),
             (CleanupReason::UnknownIgnored, "unknown-ignored"),
             (CleanupReason::UnsafePath, "unsafe-path"),
@@ -562,8 +603,15 @@ mod tests {
         });
         adversarial.push(("missing-recovery-object", recovery, None));
         adversarial.push(("stale-facts", baseline.clone(), Some("0")));
+        // #196: an unread status blocks with its own reason, never as dirty content.
+        let mut too_large = baseline.clone();
+        too_large.candidates[0].status_refusal = Some(StatusRefusal::TooLarge);
+        adversarial.push(("status-too-large", too_large, None));
+        let mut unreadable = baseline.clone();
+        unreadable.candidates[0].status_refusal = Some(StatusRefusal::Unreadable);
+        adversarial.push(("status-unreadable", unreadable, None));
 
-        assert_eq!(adversarial.len(), 13, "adversarial cleanup cases");
+        assert_eq!(adversarial.len(), 15, "adversarial cleanup cases");
         for (reason, sample, bound) in &adversarial {
             let preview = cleanup_policy(sample, *bound);
             assert!(!preview.apply, "{reason}");
@@ -594,7 +642,16 @@ mod tests {
         retained_changed.retained_commit = Some(oid('f'));
         let mut ref_changed = baseline.clone();
         ref_changed.retained_ref = GitRef::new("refs/heads/kept").unwrap();
+        let mut status_changed = baseline.clone();
+        status_changed.candidates[0].status_refusal = Some(StatusRefusal::TooLarge);
+        let mut status_unreadable = baseline.clone();
+        status_unreadable.candidates[0].status_refusal = Some(StatusRefusal::Unreadable);
+        assert_ne!(
+            cleanup_policy(&status_changed, None).digest,
+            cleanup_policy(&status_unreadable, None).digest
+        );
         for changed in [
+            status_changed,
             path_changed,
             dirty_variant(&baseline),
             commit_changed,

@@ -10,7 +10,7 @@
 - Approval evidence: Samuel explicitly stated "ok, now ADR033 is accepted" on 2026-10-28 after reviewing this concrete decision
 - Supersedes: only ADR 0021's worktree placement and destructive history-reset semantics; narrowly amends runtime-design §4's prohibition on persisted paths outside the repository for a protected local operational root registry
 - Superseded by: none
-- Amended: 2026-11-10, decided by the repository owner (run-loop ownership and run reclamation, [#142](https://github.com/smota/meshloop/issues/142)); see the amendment section at the end
+- Amended: 2026-11-10, decided by the repository owner (run-loop ownership and run reclamation, [#142](https://github.com/smota/meshloop/issues/142)); 2026-11-11, architect decision recorded in [#196](https://github.com/smota/meshloop/issues/196) (ignored files in attempt worktrees); see the amendment sections at the end
 - Tracking: [#71](https://github.com/smota/meshloop/issues/71), S1 [#72](https://github.com/smota/meshloop/issues/72)
 
 ## Context and constraints
@@ -224,3 +224,42 @@ Limits: a run whose worktree root is outside the repository is not reclaimed, be
 cleanup treats paths outside the checkout as unsafe. A crash between `git worktree
 remove` and `git branch -d` leaves the branch, with no cleanup candidate for it.
 Windows evidence comes from the CI `windows-latest` job; it was not run locally.
+
+## Amendment 2026-11-11: ignored files in attempt worktrees (issue #196)
+
+- Decision: the architect decision recorded in
+  [#196](https://github.com/smota/meshloop/issues/196), found by the 0.3.0 release
+  candidate dogfood run. Release-blocking for 0.3.0.
+- Builder: Claude Code (Claude Opus 5.5). No independent review is claimed here.
+
+Problem: a check reused the `target/` the worker had built on the host, and ignored
+files are not in the reviewed diff, so a worker could leave prebuilt output that makes
+a check pass. The check's own ignored output then blocked reclamation
+(`unknown-ignored`), and cleanup's 16 KiB status bound turned a long ignored listing
+into a false `dirty-tracked`.
+
+Decided:
+
+1. Meshloop removes ignored files from an attempt worktree it owns, with the hardened
+   host git, right before every deterministic check and after verification. The
+   attempt worktree is Meshloop's; its ignored content is not part of the deliverable.
+   This is a run-loop verification step, not cleanup: decision 4's ban on broad
+   ignored-file deletion still governs cleanup, which never deletes ignored files and
+   still blocks on them.
+2. The repository checkout, integrate worktrees and deliverable worktrees are never
+   cleaned this way: no check runs there and Meshloop writes no ignored files there.
+3. A status that cleanup cannot read is unknown content with its own reason
+   (`status-too-large`, `status-unreadable`), never `dirty-tracked`.
+
+Implementation (builder: Claude Code, Claude Opus 5.5): `WorkspacePort::clean_ignored`
+runs `git clean -f -d -X -q -- .` after the worktree link and nested-repository checks
+pass, and records counts and bytes only (`clean-ignored` evidence). A failed removal
+before a check fails that check closed. Cleanup parses `git status` as it streams, up
+to 256 MiB. Details and consequences:
+[Verification runs worker-written code](../../engineering/harnesses.md#verification-runs-worker-written-code-181).
+
+Limits: checks always build from a clean tree, so build caches inside the worktree are
+not reused; the contained runner offers no persistent writable cache outside the
+worktree yet. A process that outlives the worker's process tree (see the harness
+contract's time-of-check note) could still write ignored files between the removal and
+the check.

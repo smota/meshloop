@@ -2,7 +2,7 @@
 //! There is no apply path and this module does not remove anything.
 
 use meshloop_domain::cleanup::{
-    CleanupCandidateFacts, CleanupFacts, CleanupPreview, RunOutcome, cleanup_policy,
+    CleanupCandidateFacts, CleanupFacts, CleanupPreview, RunOutcome, StatusRefusal, cleanup_policy,
 };
 use meshloop_domain::workspace::{DeliveryReceipt, GitRef, InventoryEntry, LifecycleId, ObjectId};
 
@@ -32,6 +32,9 @@ pub struct CleanupObservation {
     pub attempt_failed: bool,
     #[serde(default)]
     pub base_unknown: bool,
+    /// `git status` was not read (#196). Absent in older journal tokens.
+    #[serde(default)]
+    pub status_refusal: Option<StatusRefusal>,
 }
 
 /// Retained identity plus one observation per inventory entry, in that order.
@@ -78,6 +81,7 @@ pub fn cleanup_preview(
                 run_container: observed.run_container,
                 attempt_failed: observed.attempt_failed,
                 base_unknown: observed.base_unknown,
+                status_refusal: observed.status_refusal,
             }
         })
         .collect();
@@ -112,5 +116,6 @@ fn fail_closed() -> CleanupObservation {
         run_container: false,
         attempt_failed: false,
         base_unknown: false,
+        status_refusal: None,
     }
 }

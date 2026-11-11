@@ -479,6 +479,82 @@ fn bounded_stdout(mut command: OwnedSpawnSpec, timeout: Duration) -> Result<Vec<
     Ok(bytes)
 }
 
+/// Why [`scan_stdout`] did not finish (#196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScanFault {
+    /// Stdout exceeded the byte bound; the process was ended.
+    TooLarge,
+    /// The process could not start, failed, timed out, or `scan` refused its output.
+    Failed,
+}
+
+/// Runs `command` and feeds its stdout to `feed(&mut state, chunk)` as it arrives,
+/// never holding more than one chunk, so a long listing (`git status` of a worktree
+/// with a build directory) needs no in-memory bound (#196). Stops with `TooLarge`
+/// past `limit` bytes and with `Failed` on a non-zero exit, a timeout or a `feed`
+/// error. Returns `state` for its final verdict.
+pub(crate) fn scan_stdout<T: Send + 'static>(
+    mut command: OwnedSpawnSpec,
+    timeout: Duration,
+    limit: u64,
+    mut state: T,
+    feed: fn(&mut T, &[u8]) -> Result<(), ()>,
+) -> Result<T, ScanFault> {
+    command
+        .stdin(OwnedStdio::Null)
+        .stdout(OwnedStdio::Piped)
+        .stderr(OwnedStdio::Null);
+    let mut child = crate::process::spawn_owned(command).map_err(|_| ScanFault::Failed)?;
+    let mut pipe = child.stdout.take().ok_or(ScanFault::Failed)?;
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut chunk = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        let result = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break Ok(state),
+                Ok(read) => {
+                    total = total.saturating_add(read as u64);
+                    if total > limit {
+                        break Err(ScanFault::TooLarge);
+                    }
+                    if feed(&mut state, &chunk[..read]).is_err() {
+                        break Err(ScanFault::Failed);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break Err(ScanFault::Failed),
+            }
+        };
+        // Closing the pipe early ends a writer that is still producing output.
+        drop(pipe);
+        let _ = send.send(result);
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => {
+                child.kill_tree();
+                break None;
+            }
+        }
+    };
+    // Kill any descendant still holding stdout before waiting for the reader.
+    drop(child);
+    let scanned = receive
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| ScanFault::Failed)?;
+    match (scanned, status) {
+        (Err(ScanFault::TooLarge), _) => Err(ScanFault::TooLarge),
+        (Ok(state), Some(status)) if status.success() => Ok(state),
+        _ => Err(ScanFault::Failed),
+    }
+}
+
 pub(crate) fn pin_database(path: &Path) -> Result<(same_file::Handle, NativeIdentity), StoreError> {
     let file = OpenOptions::new()
         .read(true)

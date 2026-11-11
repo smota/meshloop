@@ -49,6 +49,18 @@ Apply removes each eligible worktree with `git worktree remove` (no `--force`) a
 
 Failed, cancelled and interrupted runs are retained with `run-failed`, `run-cancelled` or `run-incomplete`, even when their worktrees are clean. Inside a landed run, a failed attempt whose task was integrated through another attempt is reclaimed only when its worktree is clean and its commits are on the base branch; otherwise it is retained as `attempt-failed`. An unreadable ledger retains every entry.
 
+Ignored files do not block reclamation of attempt worktrees: verification removes them
+before every check and again after it (#196,
+[details](engineering/harnesses.md#verification-runs-worker-written-code-181)), so the
+ignored output of Meshloop's own check (a `target/`) is gone by the time the run lands.
+Ignored files written later, or into the integrate worktree, still block it as
+`unknown-ignored`; cleanup itself never deletes them. Cleanup reads each worktree's
+`git status --ignored --untracked-files=all` as it streams, up to 256 MiB. A larger
+listing blocks the worktree as `status-too-large`; a status that cannot be read at all
+(a modified `.git` link, a failed or timed-out git, a listing that does not parse)
+blocks it as `status-unreadable`. Neither is reported as dirty tracked or untracked
+content.
+
 ### Known limitations
 
 - A run whose worktree root is outside the repository is not reclaimed, because cleanup treats paths outside the checkout as unsafe. On Windows this includes an explicitly configured short external root.
