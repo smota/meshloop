@@ -151,6 +151,23 @@ fn main() {
             }
             deliver_prompt_file(path);
         }
+        // `--gated-prompt-file <prompt> <gate>`: a prompt containing `GATED` waits
+        // (at most 120s) for the file `<gate>` to exist before delivering, so a test
+        // controls exactly when that node leaves Running. Other prompts deliver at once.
+        Some("--gated-prompt-file") => {
+            let path = args.get(1).expect("fixture requires a prompt file path");
+            let gate = Path::new(args.get(2).expect("fixture requires a gate path"));
+            if fs::read_to_string(path)
+                .unwrap_or_default()
+                .contains("GATED")
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                while !gate.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            deliver_prompt_file(path);
+        }
         Some("--record-verify") => {
             let log = args.get(1).expect("verify log path");
             let ms: u64 = args

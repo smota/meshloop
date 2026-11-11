@@ -29,7 +29,8 @@ This origin pane must not implement the work. Current branch stays put.
 
 Do not poll `inspect`. Block with `watch`, which starts nothing, so you can run it
 yourself (NDJSON state changes; last line such as `{"exit":"awaiting_review","nodes":[2]}`; exit 0 =
-needs a human or completed, 1 = failed/cancelled, 3 = `--timeout`):
+needs a human or completed, 1 = failed/cancelled, 3 = `--timeout`, 4 = `driver_gone`:
+the detached driver stopped with work left, so `meshloop resume --detach --graph <id>`):
 
 ```bash
 meshloop watch --graph issue-12 --config "/home/me/runs/issue-12/meshloop.toml" --json

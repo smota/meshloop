@@ -430,6 +430,28 @@ impl RepositoryFence for RepositoryLease {
 }
 pub(crate) mod schema;
 
+/// Checks that `path` still names the file `handle` pins.
+///
+/// On Unix this must not open and close a descriptor on `path`: POSIX record
+/// locks belong to the process, and closing *any* descriptor on an inode drops
+/// every lock the process holds on it. When `path` is a SQLite ledger, that
+/// silently releases the connection's WAL-mode SHARED lock, so another
+/// process's last close checkpoints and unlinks the `-wal`/`-shm` files under
+/// this connection, which then reads (or writes) an orphaned WAL forever
+/// (#195). `stat` compares the same device and inode without a descriptor.
+#[cfg(unix)]
+pub(crate) fn verify_handle(handle: &same_file::Handle, path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::MetadataExt;
+    let actual = std::fs::metadata(path).map_err(io_refused)?;
+    if handle.dev() != actual.dev() || handle.ino() != actual.ino() {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Windows locks are per handle, so opening and closing a probe handle does
+/// not release a lock held through another handle.
+#[cfg(not(unix))]
 pub(crate) fn verify_handle(handle: &same_file::Handle, path: &Path) -> Result<(), StoreError> {
     let actual = same_file::Handle::from_path(path).map_err(io_refused)?;
     if *handle != actual {

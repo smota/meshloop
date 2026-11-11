@@ -1183,6 +1183,9 @@ fn cmd_run(
         .active_graph
         .clone()
         .unwrap_or_else(|| graph_id.clone());
+    // This command drives the graph now (or spawns the driver that will); a gone
+    // driver's row must not describe it.
+    driver_liveness::forget_gone(&mut *saga.store, saga.processes, &gid);
     if detach {
         return spawn_driver(
             "meshloop:run",
@@ -1394,7 +1397,24 @@ fn cmd_resume_detached(
         (_, true) => &["--restart"],
         _ => &[],
     };
-    spawn_driver(command, &repo_root(), &gid, extra, &options, json, origin)
+    // The spawned driver registers only once it has composed its store. Until then
+    // the previous driver's exited row would read as `driver_gone` to `watch`.
+    let root = repo_root();
+    let db_path = options
+        .db
+        .clone()
+        .unwrap_or_else(|| compose::default_db(&root));
+    match meshloop_adapters::store::SqliteStore::open(&db_path) {
+        Ok(mut store) => driver_liveness::forget_gone(
+            &mut store,
+            &meshloop_adapters::process::HostProcessView {},
+            &gid,
+        ),
+        Err(error) => {
+            return read_error(command, origin, json, format!("{error:?}"));
+        }
+    }
+    spawn_driver(command, &root, &gid, extra, &options, json, origin)
 }
 
 fn with_saga(
@@ -1816,7 +1836,12 @@ fn cmd_resume(
                 return ExitCode::from(1);
             }
             let tracked = std::env::var_os(driver_liveness::LOG_ENV);
+            if tracked.is_none() {
+                // A foreground resume drives the graph itself without a driver row.
+                driver_liveness::forget_gone(&mut *saga.store, saga.processes, &id);
+            }
             if let Some(log) = &tracked {
+                driver_liveness::delay_register_if_requested(fixture_only);
                 if let Err(error) =
                     driver_liveness::register(saga.store, &id, std::path::Path::new(log))
                 {
@@ -2207,8 +2232,23 @@ fn cmd_inspect(
 fn watch_status_code(reason: &str) -> u8 {
     match reason {
         "failed" | "cancelled" | "blocked" => 1,
+        "driver_gone" => 4,
         _ => 0,
     }
+}
+
+/// Reports a run whose detached driver has exited or been lost while a node
+/// still needs it (#195): nothing moves it until `meshloop resume`, so `watch`
+/// exits `driver_gone`. A run with no driver row is never reported gone: every
+/// command that drives a graph first clears a gone driver's row (see
+/// `driver_liveness::forget_gone`), so a foreground `run`/`resume`, and a
+/// `resume --detach` whose driver has not registered yet, keep `watch` waiting.
+fn watch_driver_gone(
+    saga: &RunLoop<'_>,
+    status: &RunStatus,
+) -> Option<driver_liveness::DriverReport> {
+    driver_liveness::observe(saga.store, saga.processes, status)
+        .filter(|report| report.suggest_resume)
 }
 
 /// Why a `watch` stopped, and the nodes responsible. Returns `None` while the run is still moving.
@@ -2634,7 +2674,17 @@ fn cmd_watch(
                     println!("[{ts}] {} plan: {from} -> {:?}", s.graph_id, s.plan_state);
                 }
             }
-            let (reason, nodes, code) = match watch_exit(s) {
+            let (exit, driver) = match watch_exit(s) {
+                Some(exit) => (Some(exit), None),
+                None => match watch_driver_gone(saga, s) {
+                    Some(report) => (
+                        Some(("driver_gone", driver_liveness::needing_driver(s))),
+                        Some(report),
+                    ),
+                    None => (None, None),
+                },
+            };
+            let (reason, nodes, code) = match exit {
                 Some((reason, nodes)) => (reason, nodes, watch_status_code(reason)),
                 None if timeout_secs > 0 && started.elapsed() >= timeout => {
                     ("timeout", Vec::new(), 3)
@@ -2650,6 +2700,11 @@ fn cmd_watch(
             };
             if json {
                 let mut exit = serde_json::json!({ "exit": reason, "nodes": nodes });
+                if let Some(report) = &driver {
+                    exit["driver"] = serde_json::json!(report.label);
+                    exit["driver_log"] = serde_json::json!(report.log_path);
+                    exit["driver_hint"] = serde_json::json!("resume");
+                }
                 if frame.generation_id.is_some() {
                     exit["generation_id"] = serde_json::json!(frame.generation_id);
                     exit["revision_id"] = serde_json::json!(frame.revision_id);
@@ -2658,6 +2713,9 @@ fn cmd_watch(
             } else {
                 let ids: Vec<String> = nodes.iter().map(u32::to_string).collect();
                 println!("exit: {reason} nodes=[{}]", ids.join(","));
+                if let Some(report) = &driver {
+                    print!("{}", report.text());
+                }
             }
             return ExitCode::from(code);
         }
@@ -3714,6 +3772,7 @@ mod watch_exit_tests {
         assert_eq!(watch_status_code("failed"), 1);
         assert_eq!(watch_status_code("awaiting_review"), 0);
         assert_eq!(watch_status_code("completed"), 0);
+        assert_eq!(watch_status_code("driver_gone"), 4);
     }
 
     #[test]
