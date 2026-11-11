@@ -891,6 +891,8 @@ fn cmd_review_plan(
 const EMPTY_VERIFY_WARNING: &str = "verify_command is empty: nodes are not checked beyond git diff";
 const PRIORS_NOT_IN_EFFECT_WARNING: &str =
     "a priors ledger row exists but no priors are in effect; see `meshloop priors show`";
+const PRIORS_UNREADABLE_WARNING: &str =
+    "the store could not be read to check advisory priors; see `meshloop priors show`";
 const NO_PLANNER_WARNING: &str = "no dispatchable harness can run the planner; see data.planner and set [planner] harness or tier";
 
 #[allow(clippy::too_many_arguments)]
@@ -3002,8 +3004,10 @@ fn cmd_doctor(
     let harnesses_ready = error.is_none();
     let db = db.unwrap_or_else(|| compose::default_db(&repo_root()));
     let store_ignored = gitignore::store_ignored(&db);
-    if priors::doctor_warning(&db) {
-        warnings.push(PRIORS_NOT_IN_EFFECT_WARNING);
+    match priors::doctor_priors(&db) {
+        priors::DoctorPriors::Quiet => {}
+        priors::DoctorPriors::NotInEffect => warnings.push(PRIORS_NOT_IN_EFFECT_WARNING),
+        priors::DoctorPriors::Unreadable => warnings.push(PRIORS_UNREADABLE_WARNING),
     }
 
     let data = serde_json::json!({

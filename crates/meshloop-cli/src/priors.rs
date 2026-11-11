@@ -182,8 +182,14 @@ fn ignored_json(items: &[IgnoredEntry]) -> Value {
     )
 }
 
+/// A ledger row for display. An unreadable ignored-entries JSON is shown as
+/// `ignored: null` with `ignored_error`; `priors_state` already reports it as
+/// `ledger_corrupt`, so nothing is in effect.
 fn row_json(row: &PromotionRow) -> Value {
-    let ignored: Value = serde_json::from_str(&row.ignored_json).unwrap_or(Value::Null);
+    let (ignored, ignored_error) = match serde_json::from_str::<Value>(&row.ignored_json) {
+        Ok(v) => (sanitize_value(v), Value::Null),
+        Err(e) => (Value::Null, Value::from(format!("unreadable: {e}"))),
+    };
     json!({
         "seq": row.seq,
         "action": row.action.as_str(),
@@ -193,7 +199,8 @@ fn row_json(row: &PromotionRow) -> Value {
         "source_path": opt_safe(&row.source_path),
         "resolved_refs": row.resolved_refs,
         "unresolved_refs": row.unresolved_refs,
-        "ignored": sanitize_value(ignored),
+        "ignored": ignored,
+        "ignored_error": ignored_error,
     })
 }
 
@@ -260,7 +267,10 @@ fn show(name: &str, req: &PriorsRequest, db: &Path, candidates: Option<&[Candida
     diagnostics.extend(candidate_report(&entries, candidates));
     let digest = state.snapshot.as_ref().map(|s| s.priors_sha256.clone());
     let routing = match (&store, &digest) {
-        (Some(store), Some(d)) => store.advisory_routing_counts(d).unwrap_or((0, 0)),
+        (Some(store), Some(d)) => match store.advisory_routing_counts(d) {
+            Ok(counts) => counts,
+            Err(e) => return fail(name, req, 2, format!("{e:?}"), Value::Null),
+        },
         _ => (0, 0),
     };
     if req.json {
@@ -456,19 +466,11 @@ fn accept(
         Ok(b) => b,
         Err(e) => return fail(name, req, 2, e, Value::Null),
     };
-    let mut store = match SqliteStore::open(db) {
-        Ok(store) => store,
-        Err(e) => return fail(name, req, 2, format!("{e:?}"), Value::Null),
-    };
-    crate::gitignore::ensure_store_ignored(db);
-    let a = match assess(&bytes, Some(&store), candidates) {
-        Ok(a) => a,
-        Err(e) => return fail(name, req, 2, e, Value::Null),
-    };
-    let mut diagnostics = a.loaded.diagnostics();
-    diagnostics.extend(a.report.iter().cloned());
-    let diagnostics_json: Vec<Value> = diagnostics.iter().map(diagnostic_json).collect();
-    if let Some(fault) = &a.loaded.file_fault {
+    // A file-level fault is refused before the store is opened, so a refused accept
+    // never creates, migrates or touches a ledger.
+    let early = load_priors(&bytes);
+    if let Some(fault) = &early.file_fault {
+        let diagnostics = early.diagnostics();
         if !req.json {
             print_diagnostics(&diagnostics);
         }
@@ -481,7 +483,32 @@ fn accept(
                 fault.code.as_str(),
                 display_safe(&fault.detail)
             ),
-            json!({ "file_fault": fault.code.as_str(), "diagnostics": diagnostics_json }),
+            json!({
+                "file_fault": fault.code.as_str(),
+                "diagnostics": diagnostics.iter().map(diagnostic_json).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    let mut store = match SqliteStore::open(db) {
+        Ok(store) => store,
+        Err(e) => return fail(name, req, 2, format!("{e:?}"), Value::Null),
+    };
+    crate::gitignore::ensure_store_ignored(db);
+    let a = match assess(&bytes, Some(&store), candidates) {
+        Ok(a) => a,
+        Err(e) => return fail(name, req, 2, e, Value::Null),
+    };
+    let mut diagnostics = a.loaded.diagnostics();
+    diagnostics.extend(a.report.iter().cloned());
+    let diagnostics_json: Vec<Value> = diagnostics.iter().map(diagnostic_json).collect();
+    if a.loaded.file_fault.is_some() {
+        // Unreachable: the same buffer passed the file-level check above.
+        return fail(
+            name,
+            req,
+            1,
+            "refused: file-level fault".into(),
+            Value::Null,
         );
     }
     let ignored = ignored_entries(&a.loaded.validated);
@@ -556,13 +583,25 @@ fn revoke(name: &str, req: &PriorsRequest, db: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// For `doctor`: a ledger row exists but no priors are in effect. Read-only.
-pub fn doctor_warning(db: &Path) -> bool {
+/// What `doctor` says about the priors ledger. Read-only; it never creates a ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorPriors {
+    /// No ledger, no row, or priors in effect: nothing to say.
+    Quiet,
+    /// A ledger row exists but no priors are in effect.
+    NotInEffect,
+    /// The ledger or its priors could not be read.
+    Unreadable,
+}
+
+pub fn doctor_priors(db: &Path) -> DoctorPriors {
     match SqliteStore::open_read_only(db) {
-        Ok(Some(store)) => store
-            .priors_state()
-            .map(|state| state.row.is_some() && !state.in_effect())
-            .unwrap_or(false),
-        _ => false,
+        Ok(None) => DoctorPriors::Quiet,
+        Ok(Some(store)) => match store.priors_state() {
+            Ok(state) if state.row.is_some() && !state.in_effect() => DoctorPriors::NotInEffect,
+            Ok(_) => DoctorPriors::Quiet,
+            Err(_) => DoctorPriors::Unreadable,
+        },
+        Err(_) => DoctorPriors::Unreadable,
     }
 }

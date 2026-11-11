@@ -877,6 +877,8 @@ impl RunStore for SqliteStore {
                     ended_at: r.get(10)?,
                     outcome: r.get(11)?,
                     model_passed: r.get(12)?,
+                    // No mode column yet: #147 reads it here.
+                    dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
                 })
             })
             .optional()
@@ -1155,6 +1157,7 @@ mod tests {
             ended_at: None,
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         };
         store.save_attempt(&row).unwrap();
         store
@@ -1179,6 +1182,7 @@ mod tests {
             ended_at: None,
             outcome: Some("base:abc".into()),
             model_passed,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         }
     }
 
@@ -1374,6 +1378,7 @@ mod tests {
                 ended_at: None,
                 outcome: None,
                 model_passed: None,
+                dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
             })
             .unwrap();
         store
@@ -1589,6 +1594,7 @@ mod tests {
             ended_at: None,
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         };
 
         store
@@ -1827,6 +1833,7 @@ mod tests {
             ended_at: None,
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         };
         let refused = store.record_transition_and_attempt(
             rec(

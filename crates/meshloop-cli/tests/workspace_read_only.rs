@@ -193,6 +193,7 @@ fn seed(store: &mut SqliteStore, repo: &Path, worktree: &Path) {
             ended_at: None,
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         })
         .unwrap();
 }

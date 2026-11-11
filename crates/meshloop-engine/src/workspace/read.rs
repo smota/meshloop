@@ -351,10 +351,12 @@ impl RunLoop<'_> {
                 events
                     .iter()
                     .filter(|e| e.attempt_id == Some(a.attempt_id))
-                    .map(|e| e.event),
+                    .map(|e| (e.event, e.reason.as_deref())),
             );
             attempts.entry(a.task_id).or_default().push(AttemptView {
-                dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(),
+                dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(
+                    a.dispatch,
+                ),
                 check_result,
                 model_passed: a.model_passed,
                 attempt_id: a.attempt_id,

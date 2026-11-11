@@ -179,12 +179,19 @@ evidence by that value.
 
 | Field | Values | Source |
 |---|---|---|
-| `dispatch_mode` | `"subprocess"` | A domain `DispatchMode` enum, read with an exhaustive `match`. Today it has the single variant `Subprocess`, because the binary has one dispatch path. When #147 adds `Native`, the match fails to compile until the value is read from the attempt row's mode column. #147 must not merge without that change. |
-| `check_result` | `"passed"`, `"failed"` or `null` | The attempt's final deterministic-result event. `DeterministicChecksPassed` or `VerifyGatePassed` gives `passed`; `DeterministicChecksFailed` gives `failed`. Anything else gives `null`, including a crash, a timeout, a cancellation, or a result whose append was refused (#167). |
+| `dispatch_mode` | `"subprocess"` | A domain `DispatchMode` enum, read with an exhaustive `match` through `DispatchMode::of_recorded_attempt(row.dispatch)`. The attempt row carries a `RecordedDispatch` placeholder (`NoColumn`) because the store has no mode column and the binary has one dispatch path. When #147 adds `Native`, the matches fail to compile until the row's mode column is threaded through `RecordedDispatch`. #147 must not merge without that change. `HarnessCapabilities::dispatch_mode()` has no default, so every harness states its mode. |
+| `check_result` | `"passed"`, `"failed"` or `null` | The attempt's final deterministic-result event. `DeterministicChecksPassed` or `VerifyGatePassed` gives `passed`; `DeterministicChecksFailed` gives `failed`, except the one Meshloop appends when its own driver died during verification (`fail_orphaned_verification`, reason `VERIFICATION_INFRASTRUCTURE_FAULT`, "driver died during verification"): an infrastructure fault is not a model failure and gives `null` (architect decision in the #139 review; the text is unchanged, so older ledgers read the same). Anything else gives `null`, including a crash, a timeout, a cancellation, or a result whose append was refused (#167). |
 | `model_passed` | `true`, `false` or `null` | A new nullable `attempts.model_passed` column, written when the attempt row is created for every attempt. It is true when the harness's `invoke_args_template` substitutes `{model_ref}` (`config.rs:156`, `harness.rs:100`). Rows written before #139 hold `null`. Write-once: attempt upserts keep it with `COALESCE(attempts.model_passed, excluded.model_passed)`. |
 
 A column on `attempts` is the least invasive place that is written for every attempt. The
 other new tables are written only while priors are in effect.
+
+**Additive changes with no promoted row.** Routing order and the plan, review-plan and run
+outputs are unchanged. These change anyway, all additive: the three attempt fields above;
+`inspect`'s `nodes[].tier`; the store schema bump to v9 (`advisory_promotions`,
+`advisory_routing`, `attempts.model_passed`); the `priors` verb in `--help` and in the
+`banner()` command list (`report.rs`); and two `doctor` warnings, one when a ledger row
+exists but no priors are in effect and one when the store cannot be read to check.
 
 An older binary refuses a schema-v9 store outright; against an older store it returns
 attempt JSON without these fields. The fold treats either as an
@@ -200,8 +207,8 @@ The fold counts an attempt only when every one of these holds:
 - the task is not `Cancelled`;
 - `check_result` is `passed` or `failed`.
 
-A failed check counts as a failure. A crash or timeout is excluded and never counts as a
-failure. Every excluded attempt is reported with one of these reasons:
+A failed check counts as a failure. A crash, a timeout or a Meshloop verification fault
+("driver died during verification") is excluded and never counts as a failure. Every excluded attempt is reported with one of these reasons:
 
 - `not_subprocess`
 - `model_not_passed`
@@ -402,7 +409,7 @@ tests, which run in the cell's own suite.
    - `model_passed` false or missing;
    - model `unverified`;
    - a cancelled task;
-   - a crash or timeout (`no_check_result`).
+   - a crash, a timeout, or a Meshloop verification fault (`no_check_result`).
 6. A native-routed candidate gets no prior. This test is added with #147.
 7. The attempt JSON reports `check_result` correctly for each terminal path.
 

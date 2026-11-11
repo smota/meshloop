@@ -1429,6 +1429,7 @@ impl RuntimeLedger for SqliteStore {
             harness: r.harness.clone(),
             model_ref: r.model_ref.clone(),
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
             location: PortableLocation {
                 root_alias: artifact.root_alias,
                 relative_path: artifact.relative_path,
@@ -1523,6 +1524,7 @@ impl RuntimeLedger for SqliteStore {
                         harness: row.harness,
                         model_ref: row.model_ref,
                         model_passed: row.model_passed,
+                        dispatch: row.dispatch,
                         location: PortableLocation {
                             root_alias: RootAlias::new(m.1).map_err(error)?,
                             relative_path: RelativePath::new(m.2).map_err(error)?,

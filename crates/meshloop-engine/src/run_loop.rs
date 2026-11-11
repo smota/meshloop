@@ -624,12 +624,19 @@ impl<'a> RunLoop<'a> {
         replay_tasks(&recs).map_err(Into::into)
     }
 
-    /// One read of the promoted priors (#139). Any fault means no priors: routing then
-    /// takes the pre-#139 path, and `priors show` reports why.
+    /// One read of the promoted priors (#139). A loader fault is `Ok(None)` and
+    /// `priors show` names it. A store fault is not swallowed: the adapter reports it
+    /// (warning and telemetry) and this dispatch routes without priors, because an
+    /// advisory input must never stop a run.
     fn priors_snapshot(&self) -> Option<crate::ports::PriorsSnapshot> {
-        self.store
-            .advisory_priors()
-            .and_then(|source| source.snapshot().ok().flatten())
+        let source = self.store.advisory_priors()?;
+        match source.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(fault) => {
+                source.report_fault(&fault);
+                None
+            }
+        }
     }
 
     pub fn graph(&self, graph_id: &str) -> Result<TaskGraph, OrchestratorError> {
@@ -1688,6 +1695,7 @@ impl<'a> RunLoop<'a> {
                 .harnesses
                 .get(&candidate.harness)
                 .map(|h| h.passes_model_ref()),
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         };
         let routing = match (&priors, changed_top) {
             (Some(snapshot), Some(changed_top)) => Some(crate::ports::AdvisoryRouting {
@@ -2825,7 +2833,8 @@ impl<'a> RunLoop<'a> {
             attempt,
             TaskState::Verifying,
             Event::DeterministicChecksFailed,
-            Some("driver died during verification".into()),
+            // Meshloop's own fault, not the worker's: no check result (#139).
+            Some(meshloop_domain::advisory::VERIFICATION_INFRASTRUCTURE_FAULT.into()),
         )?;
         Ok(Tick::Transition {
             task,
@@ -3234,11 +3243,14 @@ impl<'a> RunLoop<'a> {
         // The attempt row's `outcome` column holds the attempt's base revision ("base:<sha>"),
         // which recovery reads; the outcome shown is the attempt's last ledger event instead.
         let mut last_event: HashMap<AttemptId, Event> = HashMap::new();
-        let mut checks: HashMap<AttemptId, meshloop_domain::advisory::CheckResult> = HashMap::new();
+        let mut checks: HashMap<AttemptId, Option<meshloop_domain::advisory::CheckResult>> =
+            HashMap::new();
         for r in self.store.records_for_graph(graph_id)? {
             if let Some(id) = r.attempt_id {
                 last_event.insert(id, r.event);
-                if let Some(result) = meshloop_domain::advisory::CheckResult::of_event(r.event) {
+                if let Some(result) =
+                    meshloop_domain::advisory::CheckResult::of_record(r.event, r.reason.as_deref())
+                {
                     checks.insert(id, result);
                 }
             }
@@ -3262,8 +3274,10 @@ impl<'a> RunLoop<'a> {
                     .map(EvidenceView::from_evidence)
                     .collect();
                 Ok(AttemptView {
-                    dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(),
-                    check_result: checks.get(&a.attempt_id).copied(),
+                    dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(
+                        a.dispatch,
+                    ),
+                    check_result: checks.get(&a.attempt_id).copied().flatten(),
                     model_passed: a.model_passed,
                     attempt_id: a.attempt_id,
                     duration_s: duration_secs(&a.started_at, &a.ended_at),
@@ -4048,6 +4062,7 @@ mod tests {
             ended_at: ended_at.map(String::from),
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         }
     }
 
@@ -4280,6 +4295,7 @@ mod tests {
             ended_at: ended.map(str::to_string),
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         }
     }
 
@@ -4517,6 +4533,9 @@ mod tests {
     struct ClaudeImage;
 
     impl HarnessCapabilities for ClaudeImage {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             Ok(meshloop_domain::capability::HarnessProfile {
                 harness: "claude".into(),
@@ -4617,6 +4636,9 @@ mod tests {
         routing: Vec<crate::ports::AdvisoryRouting>,
         /// The oracle spend ledger the SQLite store keeps (zero budget), when set.
         spend: Option<crate::ports::SessionSpendLedger>,
+        /// A snapshot read fault to answer with, and the faults reported back.
+        priors_fault: Option<StoreError>,
+        reported: std::cell::RefCell<Vec<StoreError>>,
     }
 
     impl DispatchStore {
@@ -4643,6 +4665,8 @@ mod tests {
                 priors_reads: std::cell::Cell::new(0),
                 routing: Vec::new(),
                 spend: None,
+                priors_fault: None,
+                reported: std::cell::RefCell::new(Vec::new()),
             }
         }
     }
@@ -4650,7 +4674,13 @@ mod tests {
     impl crate::ports::AdvisoryPriorsSource for DispatchStore {
         fn snapshot(&self) -> Result<Option<crate::ports::PriorsSnapshot>, StoreError> {
             self.priors_reads.set(self.priors_reads.get() + 1);
-            Ok(self.priors.clone())
+            match &self.priors_fault {
+                Some(fault) => Err(fault.clone()),
+                None => Ok(self.priors.clone()),
+            }
+        }
+        fn report_fault(&self, fault: &StoreError) {
+            self.reported.borrow_mut().push(fault.clone());
         }
     }
 
@@ -5016,6 +5046,9 @@ mod tests {
     }
 
     impl HarnessCapabilities for ScriptedModels {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             Ok(meshloop_domain::capability::HarnessProfile {
                 harness: self.name.into(),
@@ -5279,6 +5312,23 @@ mod tests {
         assert_eq!(store.spend.as_ref().map(|l| l.remaining()), Some(0));
     }
 
+    /// Review item 5: a snapshot read fault is reported, not swallowed, and the
+    /// dispatch routes without priors (no routing row, baseline pick).
+    #[test]
+    fn a_snapshot_fault_is_reported_and_routes_without_priors() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let mut store = DispatchStore::new();
+        store.priors = Some(priors_snapshot(&[("codex", "second", 8, 8)]));
+        store.priors_fault = Some(StoreError::Io("disk".into()));
+        let store = dispatch_once(store, &codex);
+        assert_eq!(dispatched_model(&store), "first");
+        assert!(store.routing.is_empty());
+        assert_eq!(
+            *store.reported.borrow(),
+            vec![StoreError::Io("disk".into())]
+        );
+    }
+
     /// LP test 18: priors in effect that agree with the oracle-off pick record a row
     /// with `changed_top` false; an entry for a configured arm the router does not
     /// prefer does not change the pick either.
@@ -5314,6 +5364,7 @@ mod tests {
             ended_at: Some("2".into()),
             outcome: Some("base:base".into()),
             model_passed: Some(true),
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         });
         store.events.extend([TransitionRecord {
             graph_id: "g".into(),
@@ -6013,6 +6064,7 @@ mod tests {
             ended_at: Some("1".into()),
             outcome: Some("base:base".into()),
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         });
         let attempt = store
             .latest_attempt_for_task("g", TaskId(1))

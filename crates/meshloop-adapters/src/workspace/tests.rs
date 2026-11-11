@@ -1182,6 +1182,7 @@ fn advisory_tables_migrate_from_schema8_without_touching_history() {
             ended_at: None,
             outcome: Some("base:abc".into()),
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         })
         .unwrap();
     drop(store);
@@ -2017,6 +2018,9 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
         request: std::sync::Mutex<Option<CancellationObservation>>,
     }
     impl HarnessCapabilities for FinalCollectRequest {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<HarnessProfile, HarnessError> {
             Ok(HarnessProfile {
                 harness: "fixture".into(),
@@ -2866,6 +2870,7 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
             ended_at: None,
             outcome: None,
             model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         })
         .unwrap();
     let attempt = integrate(

@@ -468,14 +468,14 @@ impl SqliteStore {
         if !self.advisory_schema {
             return Err(StoreError::SchemaUpgradeRequired);
         }
-        check_identity(identity).map_err(|f| StoreError::Corrupt(f.message().into()))
+        check_identity(identity).map_err(|f| StoreError::InvalidInput(f.message().into()))
     }
 
     /// Appends one `accept` row in one transaction. Returns its sequence number.
     pub fn append_priors_accept(&mut self, accept: &PriorsAccept<'_>) -> Result<i64, StoreError> {
         self.writable_ledger(accept.identity)?;
         if accept.bytes.len() > MAX_PRIORS_BYTES {
-            return Err(StoreError::Corrupt("priors file is over 1 MiB".into()));
+            return Err(StoreError::InvalidInput("priors file is over 1 MiB".into()));
         }
         let tx = self
             .conn
@@ -667,6 +667,16 @@ impl SqliteStore {
 impl AdvisoryPriorsSource for SqliteStore {
     fn snapshot(&self) -> Result<Option<PriorsSnapshot>, StoreError> {
         Ok(self.priors_state()?.snapshot)
+    }
+
+    /// The engine routes past this fault without priors; say so where an operator
+    /// looks (the driver's stderr, which a detached run logs) and in telemetry.
+    fn report_fault(&self, fault: &StoreError) {
+        eprintln!(
+            "warning: advisory priors could not be read ({}); this dispatch routes without priors",
+            meshloop_domain::advisory::display_safe(&format!("{fault:?}"))
+        );
+        crate::telemetry::record("advisory.priors", "error", None);
     }
 }
 
@@ -923,7 +933,7 @@ mod tests {
         use meshloop_engine::ports::{AttemptRow, RunRow, RunStore};
 
         let mut store = SqliteStore::open_in_memory().unwrap();
-        let nodes: Vec<Value> = (1..=6)
+        let nodes: Vec<Value> = (1..=8)
             .map(|id| serde_json::json!({"id": id, "description": "x", "depends_on": [], "tier": "Tier2"}))
             .collect();
         store
@@ -938,16 +948,19 @@ mod tests {
                 review_note: None,
             })
             .unwrap();
-        // (task, model, model_passed, final event)
-        let cases: [(u32, &str, Option<bool>, &str); 6] = [
-            (1, "gpt", Some(true), "DeterministicChecksPassed"),
-            (2, "gpt", Some(false), "DeterministicChecksPassed"),
-            (3, "gpt", None, "DeterministicChecksPassed"),
-            (4, "unverified", Some(true), "DeterministicChecksPassed"),
-            (5, "gpt", Some(true), "HarnessCrashedOrTimeout"),
-            (6, "gpt", Some(true), "DeterministicChecksFailed"),
+        let infra = meshloop_domain::advisory::VERIFICATION_INFRASTRUCTURE_FAULT;
+        // (task, model, model_passed, how the attempt ended)
+        let cases: [(u32, &str, Option<bool>, &str); 8] = [
+            (1, "gpt", Some(true), "passed"),
+            (2, "gpt", Some(false), "passed"),
+            (3, "gpt", None, "passed"),
+            (4, "unverified", Some(true), "passed"),
+            (5, "gpt", Some(true), "crashed"),
+            (6, "gpt", Some(true), "failed"),
+            (7, "gpt", Some(true), "passed-then-cancelled"),
+            (8, "gpt", Some(true), "infrastructure-fault"),
         ];
-        for (task, model, model_passed, last) in cases {
+        for (task, model, model_passed, ending) in cases {
             store
                 .save_attempt(&AttemptRow {
                     attempt_id: AttemptId(task),
@@ -963,21 +976,61 @@ mod tests {
                     ended_at: Some("2".into()),
                     outcome: Some("base:abc".into()),
                     model_passed,
+                    dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
                 })
                 .unwrap();
-            let (from, to) = match last {
-                "HarnessCrashedOrTimeout" => ("Running", "Failed"),
-                "DeterministicChecksFailed" => ("Verifying", "Failed"),
-                _ => ("Verifying", "AwaitingReview"),
-            };
-            store
-                .conn
-                .execute(
-                    "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, executor, occurred_at)
-                     VALUES ('g', ?1, ?1, ?2, ?3, ?4, 't', '1')",
-                    params![task, from, to, last],
-                )
-                .unwrap();
+            // Whole legal chains, so the task states replay as every reader folds them.
+            let mut chain: Vec<(&str, &str, &str, Option<&str>)> = vec![
+                ("Pending", "Ready", "DependencySatisfied", None),
+                ("Ready", "Running", "AttemptStarted", None),
+            ];
+            let verifying = ("Running", "Verifying", "HarnessExited", None);
+            match ending {
+                "crashed" => chain.push(("Running", "Failed", "HarnessCrashedOrTimeout", None)),
+                "failed" => chain.extend([
+                    verifying,
+                    ("Verifying", "Failed", "DeterministicChecksFailed", None),
+                ]),
+                "infrastructure-fault" => chain.extend([
+                    verifying,
+                    (
+                        "Verifying",
+                        "Failed",
+                        "DeterministicChecksFailed",
+                        Some(infra),
+                    ),
+                ]),
+                "passed-then-cancelled" => chain.extend([
+                    verifying,
+                    (
+                        "Verifying",
+                        "AwaitingReview",
+                        "DeterministicChecksPassed",
+                        None,
+                    ),
+                    ("AwaitingReview", "Cancelled", "Cancel", None),
+                ]),
+                _ => chain.extend([
+                    verifying,
+                    (
+                        "Verifying",
+                        "AwaitingReview",
+                        "DeterministicChecksPassed",
+                        None,
+                    ),
+                ]),
+            }
+            for (from, to, event, reason) in chain {
+                let attempt = (event != "DependencySatisfied").then_some(task);
+                store
+                    .conn
+                    .execute(
+                        "INSERT INTO events (graph_id, task_id, attempt_id, from_state, to_state, event_type, reason, executor, occurred_at)
+                         VALUES ('g', ?1, ?2, ?3, ?4, ?5, ?6, 't', '1')",
+                        params![task, attempt, from, to, event, reason],
+                    )
+                    .unwrap();
+            }
         }
         let entry = |index: usize, task: u64, passed: bool, model: &str| PriorEntry {
             index,
@@ -1029,6 +1082,10 @@ mod tests {
                 },
                 ..entry(7, 1, true, "gpt")
             },
+            // A cancelled task is not evidence, whatever its checks said.
+            entry(8, 7, true, "gpt"),
+            // Meshloop's own verification fault is no check result, not a failure.
+            entry(9, 8, false, "gpt"),
         ];
         let report = meshloop_engine::priors::resolve_provenance(&store, &entries).unwrap();
         let why = |index: usize| {
@@ -1046,7 +1103,9 @@ mod tests {
         assert!(why(5).unwrap().contains("check_result failed"));
         assert_eq!(why(6), None);
         assert!(why(7).unwrap().contains("another tier"));
-        assert_eq!(report.resolved, 7);
+        assert!(why(8).unwrap().contains("cancelled task"));
+        assert!(why(9).unwrap().contains("check_result null"));
+        assert_eq!(report.resolved, 9);
         assert_eq!(report.unresolved, 2);
         assert_eq!(report.unresolved_by_entry, vec![(6, 2)]);
     }
@@ -1095,7 +1154,13 @@ mod tests {
     fn the_ledger_refuses_bad_identities_and_read_only_writes() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         for bad in ["", "-x", "a\nb"] {
-            assert!(store.append_priors_revoke(bad).is_err(), "{bad:?}");
+            assert!(
+                matches!(
+                    store.append_priors_revoke(bad),
+                    Err(StoreError::InvalidInput(_))
+                ),
+                "{bad:?}"
+            );
         }
         assert!(store.latest_promotion().unwrap().is_none());
     }

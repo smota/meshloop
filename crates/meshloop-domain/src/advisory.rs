@@ -32,14 +32,19 @@ impl DispatchMode {
         }
     }
 
-    /// The mode an attempt row was dispatched with. The binary has one dispatch path and
-    /// the store has no mode column, so every row is `Subprocess`. When #147 adds
-    /// `Native`, this match stops compiling: read the attempt row's mode column here
-    /// instead. #147 must not merge without that change.
-    pub const fn of_recorded_attempt() -> Self {
-        const ONLY_PATH: DispatchMode = DispatchMode::Subprocess;
-        match ONLY_PATH {
-            DispatchMode::Subprocess => ONLY_PATH,
+    /// The mode an attempt row was dispatched with, from the row's recorded mode. The
+    /// binary has one dispatch path and the store has no mode column, so every row
+    /// carries [`RecordedDispatch::NoColumn`] and reads `Subprocess`. When #147 adds
+    /// `Native`, both matches here stop compiling: add the attempts mode column, carry
+    /// it in `RecordedDispatch`, and read it here. #147 must not merge without that.
+    pub const fn of_recorded_attempt(recorded: RecordedDispatch) -> Self {
+        match recorded {
+            RecordedDispatch::NoColumn => {
+                const ONLY_PATH: DispatchMode = DispatchMode::Subprocess;
+                match ONLY_PATH {
+                    DispatchMode::Subprocess => ONLY_PATH,
+                }
+            }
         }
     }
 
@@ -51,6 +56,21 @@ impl DispatchMode {
         }
     }
 }
+
+/// The dispatch mode an attempt row records. A placeholder until the store has a mode
+/// column (#147): every row today was dispatched by the binary's one subprocess path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RecordedDispatch {
+    /// The row predates any mode column.
+    #[default]
+    NoColumn,
+}
+
+/// The reason recorded on a `DeterministicChecksFailed` that Meshloop appends when its
+/// own driver died during verification (`fail_orphaned_verification`). It is an
+/// infrastructure fault, not the worker's result, so it gives no check result. The
+/// text is the one rows have carried before #139, so existing ledgers read the same.
+pub const VERIFICATION_INFRASTRUCTURE_FAULT: &str = "driver died during verification";
 
 /// An attempt's deterministic check result: its final deterministic-result event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,21 +87,36 @@ impl CheckResult {
         }
     }
 
+    /// `Some` for a deterministic-result event, holding what it says:
     /// `DeterministicChecksPassed` and `VerifyGatePassed` are a pass,
-    /// `DeterministicChecksFailed` a failure; every other event is not a check result.
-    pub const fn of_event(event: Event) -> Option<Self> {
+    /// `DeterministicChecksFailed` a failure, except the infrastructure fault
+    /// ([`VERIFICATION_INFRASTRUCTURE_FAULT`]), which is no result. `None` for every
+    /// other event.
+    pub fn of_record(event: Event, reason: Option<&str>) -> Option<Option<Self>> {
         match event {
-            Event::DeterministicChecksPassed | Event::VerifyGatePassed => Some(Self::Passed),
-            Event::DeterministicChecksFailed => Some(Self::Failed),
+            Event::DeterministicChecksPassed | Event::VerifyGatePassed => Some(Some(Self::Passed)),
+            Event::DeterministicChecksFailed
+                if reason == Some(VERIFICATION_INFRASTRUCTURE_FAULT) =>
+            {
+                Some(None)
+            }
+            Event::DeterministicChecksFailed => Some(Some(Self::Failed)),
             _ => None,
         }
     }
 
-    /// The last check result among one attempt's events, in append order. `None` when
-    /// checks never recorded a result: a crash, a timeout, a cancellation before checks,
-    /// or a result whose append was refused (#167).
-    pub fn final_of(events: impl IntoIterator<Item = Event>) -> Option<Self> {
-        events.into_iter().filter_map(Self::of_event).last()
+    /// What the last deterministic-result event among one attempt's records, in append
+    /// order, says. `None` when checks never recorded a result (a crash, a timeout, a
+    /// cancellation before checks, a result whose append was refused (#167)) or when
+    /// the last one is an infrastructure fault.
+    pub fn final_of<'a>(
+        records: impl IntoIterator<Item = (Event, Option<&'a str>)>,
+    ) -> Option<Self> {
+        records
+            .into_iter()
+            .filter_map(|(event, reason)| Self::of_record(event, reason))
+            .last()
+            .flatten()
     }
 }
 
@@ -690,7 +725,7 @@ mod tests {
     #[test]
     fn dispatch_mode_reads_back_subprocess_for_every_recorded_attempt() {
         assert_eq!(
-            DispatchMode::of_recorded_attempt(),
+            DispatchMode::of_recorded_attempt(RecordedDispatch::NoColumn),
             DispatchMode::Subprocess
         );
         assert_eq!(DispatchMode::Subprocess.as_str(), "subprocess");
@@ -702,51 +737,112 @@ mod tests {
         assert_eq!(DispatchMode::parse(""), None);
     }
 
+    fn plain<const N: usize>(events: [Event; N]) -> Vec<(Event, Option<&'static str>)> {
+        events.into_iter().map(|e| (e, None)).collect()
+    }
+
+    /// Architect decision (#139 review): Meshloop's own verification fault is not the
+    /// worker's failure; it is `no_check_result`.
+    #[test]
+    fn an_infrastructure_fault_gives_no_check_result() {
+        use Event::*;
+        assert_eq!(
+            CheckResult::final_of([
+                (AttemptStarted, None),
+                (HarnessExited, None),
+                (
+                    DeterministicChecksFailed,
+                    Some(VERIFICATION_INFRASTRUCTURE_FAULT)
+                ),
+            ]),
+            None
+        );
+        assert_eq!(
+            CheckResult::final_of([
+                (HarnessExited, None),
+                (DeterministicChecksFailed, Some("git diff failed")),
+            ]),
+            Some(CheckResult::Failed)
+        );
+        // A later real result after a retry is the attempt's own; a fault after a pass
+        // cannot happen (checks run once per attempt), but the last one decides.
+        assert_eq!(
+            CheckResult::final_of([
+                (
+                    DeterministicChecksFailed,
+                    Some(VERIFICATION_INFRASTRUCTURE_FAULT)
+                ),
+                (LiveWorkerSettled, None),
+                (DeterministicChecksPassed, None),
+            ]),
+            Some(CheckResult::Passed)
+        );
+    }
+
     #[test]
     fn check_result_is_the_final_deterministic_result_event() {
         use Event::*;
         assert_eq!(
-            CheckResult::final_of([AttemptStarted, HarnessExited, DeterministicChecksPassed]),
+            CheckResult::final_of(plain([
+                AttemptStarted,
+                HarnessExited,
+                DeterministicChecksPassed
+            ])),
             Some(CheckResult::Passed)
         );
         assert_eq!(
-            CheckResult::final_of([
+            CheckResult::final_of(plain([
                 AttemptStarted,
                 HarnessExited,
                 DeterministicChecksPassed,
                 VerifyGatePassed,
                 IntegrationOwnerMerge
-            ]),
+            ])),
             Some(CheckResult::Passed)
         );
         assert_eq!(
-            CheckResult::final_of([AttemptStarted, HarnessExited, DeterministicChecksFailed]),
+            CheckResult::final_of(plain([
+                AttemptStarted,
+                HarnessExited,
+                DeterministicChecksFailed
+            ])),
             Some(CheckResult::Failed)
         );
         // Human acceptance after a pass keeps the pass; a rejection is a review, not a check.
         assert_eq!(
-            CheckResult::final_of([DeterministicChecksPassed, ReviewRejected, RetryAuthorized]),
+            CheckResult::final_of(plain([
+                DeterministicChecksPassed,
+                ReviewRejected,
+                RetryAuthorized
+            ])),
             Some(CheckResult::Passed)
         );
         // Crash, timeout, cancellation: no result.
         assert_eq!(
-            CheckResult::final_of([AttemptStarted, HarnessCrashedOrTimeout]),
+            CheckResult::final_of(plain([AttemptStarted, HarnessCrashedOrTimeout])),
             None
         );
         assert_eq!(
-            CheckResult::final_of([AttemptStarted, HarnessCrashedOrTimeout, HarnessExited]),
+            CheckResult::final_of(plain([
+                AttemptStarted,
+                HarnessCrashedOrTimeout,
+                HarnessExited
+            ])),
             None
         );
-        assert_eq!(CheckResult::final_of([AttemptStarted, Cancel]), None);
-        assert_eq!(CheckResult::final_of([AttemptStarted, HarnessExited]), None);
+        assert_eq!(CheckResult::final_of(plain([AttemptStarted, Cancel])), None);
+        assert_eq!(
+            CheckResult::final_of(plain([AttemptStarted, HarnessExited])),
+            None
+        );
         // A late settle after a premature failure reaches checks and records a result.
         assert_eq!(
-            CheckResult::final_of([
+            CheckResult::final_of(plain([
                 AttemptStarted,
                 HarnessCrashedOrTimeout,
                 LiveWorkerSettled,
                 DeterministicChecksFailed
-            ]),
+            ])),
             Some(CheckResult::Failed)
         );
         assert_eq!(CheckResult::Passed.as_str(), "passed");

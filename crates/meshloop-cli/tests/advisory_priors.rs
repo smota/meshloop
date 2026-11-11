@@ -54,6 +54,20 @@ const TWO_MODELS: &str = r#"models = [
   { model_ref = "model-a", model_tier = "top" },
   { model_ref = "model-b", model_tier = "top" },
 ]"#;
+/// TWO_MODELS plus a planner harness. Its lightweight model fits no Tier2 node, so it
+/// plans but never routes the work.
+const TWO_MODELS_AND_PLANNER: &str = r#"models = [
+  { model_ref = "model-a", model_tier = "top" },
+  { model_ref = "model-b", model_tier = "top" },
+]
+[planner]
+harness = "planner"
+[harnesses.planner]
+executable = "{FIXTURE}"
+version_args = ["--version"]
+invoke_args_template = ["--emit-graph"]
+model_ref = "planner-model"
+model_tier = "lightweight""#;
 const ONE_MODEL: &str = r#"model_ref = "fixture-model"
 model_tier = "top""#;
 const PASSES_MODEL: &str = r#"["--model", "{model_ref}", "--prompt-file", "{prompt_file}"]"#;
@@ -70,12 +84,34 @@ impl Fixture {
         fs::create_dir_all(&repo).expect("fixture dir");
         let f = Self { base, repo };
         f.git(&["init", "--quiet"]);
+        let quoted = |p: &Path| format!("{:?}", p.display().to_string());
+        let fixture = fixture_harness()
+            .display()
+            .to_string()
+            .replace('\\', "\\\\");
+        // `{CANCEL}`: a verify command that cancels g1 while it is Verifying (#167 race).
+        let verify = verify.replace(
+            "{CANCEL}",
+            &format!(
+                "[{}, \"cancel\", \"--graph\", \"g1\", \"--config\", {}, \"--db\", {}, \"--worktree-base\", {}]",
+                quoted(Path::new(env!("CARGO_BIN_EXE_meshloop"))),
+                quoted(&f.repo.join("meshloop.toml")),
+                quoted(&f.repo.join(".meshloop").join("state.sqlite")),
+                quoted(&f.repo.join(".meshloop").join("worktrees")),
+            ),
+        );
+        let models = models.replace("{FIXTURE}", &fixture);
+        let selected = if models.contains("[harnesses.planner]") {
+            r#"["fixture", "planner"]"#
+        } else {
+            r#"["fixture"]"#
+        };
         fs::write(f.repo.join("README.md"), "seed\n").expect("seed");
         fs::write(f.repo.join(".gitignore"), "/.meshloop/\n*.json.proposal\n").expect("ignore");
         fs::write(
             f.repo.join("meshloop.toml"),
             format!(
-                r#"selected_harnesses = ["fixture"]
+                r#"selected_harnesses = {selected}
 [limits]
 max_concurrent_workers = 1
 max_retries = 2
@@ -88,10 +124,7 @@ version_args = ["--version"]
 invoke_args_template = {template}
 {models}
 "#,
-                fixture_harness()
-                    .display()
-                    .to_string()
-                    .replace('\\', "\\\\"),
+                fixture,
             ),
         )
         .expect("config");
@@ -104,6 +137,11 @@ invoke_args_template = {template}
             )
             .expect("plan");
         }
+        fs::write(
+            f.repo.join("gv.json"),
+            r#"{"graph_id":"gv","nodes":[{"id":1,"description":"work","depends_on":[],"tier":"Tier2","gate":"verify"}]}"#,
+        )
+        .expect("verify-gate plan");
         f.git(&["add", "."]);
         f.git(&[
             "-c",
@@ -253,6 +291,45 @@ fn attempt_fields_report_mode_check_result_and_model_passed() {
     assert_eq!(a[0]["model_passed"], false);
     drop(f);
 
+    // An explicit Tier2 verify gate: checks, then VerifyGatePassed, is a pass.
+    let f = Fixture::new(PASSES_MODEL, ONE_MODEL, "[]", 30);
+    let out = f.meshloop(&[
+        "run",
+        "--plan",
+        "gv.json",
+        "--accept-plan",
+        "--fixture-only",
+        "--json",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let a = f.attempts("gv");
+    // The gate accepted and the run merged: the last event is the merge, and the
+    // final deterministic-result event is VerifyGatePassed.
+    let events = f.json(&["events", "--graph", "gv", "--json"]);
+    let names: Vec<&str> = events["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter_map(|e| e["event"].as_str())
+        .collect();
+    assert!(names.contains(&"VerifyGatePassed"), "{names:?}");
+    assert_eq!(a[0]["outcome"], "IntegrationOwnerMerge", "{a:#?}");
+    assert_eq!(a[0]["check_result"], "passed");
+    drop(f);
+
+    // A cancel that lands while checks run (#167): the result's append is refused, so
+    // the attempt has no check result and the task is Cancelled.
+    let f = Fixture::new(r#"["--noop"]"#, ONE_MODEL, "{CANCEL}", 30);
+    f.run("g1");
+    let inspect = f.json(&["inspect", "--graph", "g1", "--attempts", "--json"]);
+    assert_eq!(
+        inspect["data"]["nodes"][0]["state"], "Cancelled",
+        "{inspect:#}"
+    );
+    let a = &inspect["data"]["nodes"][0]["attempts"][0];
+    assert_eq!(a["check_result"], Value::Null, "{inspect:#}");
+    drop(f);
+
     // A timeout has no check result (`no_check_result`).
     let f = Fixture::new(r#"["--hang"]"#, ONE_MODEL, "[]", 1);
     f.run("g1");
@@ -263,10 +340,18 @@ fn attempt_fields_report_mode_check_result_and_model_passed() {
 }
 
 /// The run outputs the cell and operators read, with the fixture's path removed.
-fn routed_outputs(f: &Fixture) -> (String, String, Vec<(String, String)>) {
+fn routed_outputs(f: &Fixture) -> (String, String, String, Vec<(String, String)>) {
     let normalize = |out: &Output| {
         String::from_utf8_lossy(&out.stdout).replace(&f.base.display().to_string(), "<BASE>")
     };
+    let plan = f.meshloop(&[
+        "plan",
+        "--objective",
+        "do it",
+        "--out",
+        "planned.json",
+        "--json",
+    ]);
     let review = f.meshloop(&["review-plan", "--plan", "g1.json", "--accept", "--json"]);
     let run = f.meshloop(&["run", "--plan", "g1.json", "--fixture-only", "--json"]);
     let arms = f
@@ -279,10 +364,10 @@ fn routed_outputs(f: &Fixture) -> (String, String, Vec<(String, String)>) {
             )
         })
         .collect();
-    (normalize(&review), normalize(&run), arms)
+    (normalize(&plan), normalize(&review), normalize(&run), arms)
 }
 
-/// LP test 3: without a promoted row, routing order and the review-plan and run
+/// LP test 3: without a promoted row, routing order and the plan, review-plan and run
 /// outputs are byte-identical, with no row, a revoked row, or an unpromoted proposal.
 #[test]
 fn no_promoted_row_leaves_outputs_byte_identical() {
@@ -291,12 +376,14 @@ fn no_promoted_row_leaves_outputs_byte_identical() {
         entry("model-b", "Tier2", &[true; 8], "far"),
     ]);
 
-    let baseline = Fixture::new(PASSES_MODEL, TWO_MODELS, "[]", 30);
+    let baseline = Fixture::new(PASSES_MODEL, TWO_MODELS_AND_PLANNER, "[]", 30);
     let expected = routed_outputs(&baseline);
-    assert_eq!(expected.2, [("fixture".to_string(), "model-a".to_string())]);
-    assert!(expected.1.contains("\"ok\": true"), "{}", expected.1);
+    assert_eq!(expected.3, [("fixture".to_string(), "model-a".to_string())]);
+    assert!(expected.0.contains("\"ok\": true"), "{}", expected.0);
+    assert!(expected.0.contains("planner-model"), "{}", expected.0);
+    assert!(expected.2.contains("\"ok\": true"), "{}", expected.2);
 
-    let revoked = Fixture::new(PASSES_MODEL, TWO_MODELS, "[]", 30);
+    let revoked = Fixture::new(PASSES_MODEL, TWO_MODELS_AND_PLANNER, "[]", 30);
     let path = revoked.write_proposal("p.json.proposal", &favour_b);
     let path = path.to_str().expect("utf-8 path");
     assert!(
@@ -314,7 +401,7 @@ fn no_promoted_row_leaves_outputs_byte_identical() {
     assert_eq!(routed_outputs(&revoked), expected);
     assert!(revoked.routing_rows().is_empty());
 
-    let unpromoted = Fixture::new(PASSES_MODEL, TWO_MODELS, "[]", 30);
+    let unpromoted = Fixture::new(PASSES_MODEL, TWO_MODELS_AND_PLANNER, "[]", 30);
     unpromoted.write_proposal("p.json.proposal", &favour_b);
     assert_eq!(routed_outputs(&unpromoted), expected);
     assert!(unpromoted.routing_rows().is_empty());
@@ -505,6 +592,38 @@ fn loader_cases_are_diagnostics_and_accept_refuses_file_faults() {
     let show = f.json(&["priors", "show", "--json"]);
     assert_eq!(show["data"]["row"], Value::Null);
     assert_eq!(show["data"]["diagnostics"][0]["code"], "not_promoted");
+}
+
+/// Review item 1: a refused accept never creates, migrates or touches a ledger.
+#[test]
+fn a_refused_accept_leaves_the_store_alone() {
+    let f = Fixture::new(PASSES_MODEL, ONE_MODEL, "[]", 30);
+    let bad = f.repo.join("bad.json.proposal");
+    fs::write(&bad, b"{ nope").expect("bad");
+    let bad = bad.to_str().unwrap();
+    let out = f.meshloop(&["priors", "accept", "--file", bad, "--as", "sam", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!f.db().exists(), "a refused accept created a ledger");
+    assert!(!f.repo.join(".meshloop").exists());
+
+    // An existing v8 ledger stays v8, byte for byte.
+    f.run("g1");
+    let conn = rusqlite::Connection::open(f.db()).expect("db");
+    conn.execute_batch(
+        "DROP TABLE advisory_routing; DROP TABLE advisory_promotions;
+         ALTER TABLE attempts DROP COLUMN model_passed; UPDATE schema_meta SET version=8;",
+    )
+    .expect("downgrade");
+    drop(conn);
+    let before = fs::read(f.db()).expect("db bytes");
+    let out = f.meshloop(&["priors", "accept", "--file", bad, "--as", "sam", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(before, fs::read(f.db()).expect("db bytes"));
+    let conn = rusqlite::Connection::open(f.db()).expect("db");
+    let version: i64 = conn
+        .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 8);
 }
 
 /// LP test 17 at the CLI: a bad `--as` is a usage error and nothing is written.

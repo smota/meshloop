@@ -96,6 +96,9 @@ mod tests {
     }
 
     impl HarnessCapabilities for ScriptedHarness {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             unimplemented!()
         }

@@ -321,6 +321,7 @@ fn public_store_error(error: &StoreError) -> &'static str {
         StoreError::TransitionRefused { .. } => "transition-refused",
         StoreError::Io(_) => "io",
         StoreError::Corrupt(_) => "corrupt",
+        StoreError::InvalidInput(_) => "invalid-input",
     }
 }
 

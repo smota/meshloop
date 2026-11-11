@@ -360,6 +360,10 @@ impl CliHarness {
 }
 
 impl HarnessCapabilities for CliHarness {
+    /// Every configured harness is a direct CLI subprocess.
+    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+        meshloop_domain::advisory::DispatchMode::Subprocess
+    }
     fn supports_nonblocking_collection(&self) -> bool {
         true
     }

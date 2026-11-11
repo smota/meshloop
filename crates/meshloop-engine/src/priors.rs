@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use meshloop_domain::advisory::{CheckResult, DispatchMode, PRIOR_EVIDENCE_FLOOR, PriorEntry};
 use meshloop_domain::decision::Confidence;
 use meshloop_domain::evidence::AttemptId;
-use meshloop_domain::state::Event;
+use meshloop_domain::state::{Event, TaskState};
 use meshloop_domain::task_graph::{TaskId, Tier};
 
 use crate::ports::{
@@ -103,19 +103,24 @@ struct Recorded {
     mode: DispatchMode,
     model_passed: Option<bool>,
     check_result: Option<CheckResult>,
+    task_state: Option<TaskState>,
 }
 
 /// Per-graph data read once per call.
 struct GraphView {
     tiers: HashMap<TaskId, Tier>,
-    events: HashMap<AttemptId, Vec<Event>>,
+    /// Each attempt's events with their reasons, in append order.
+    events: HashMap<AttemptId, Vec<(Event, Option<String>)>>,
+    /// Each task's state, folded as every reader folds it (`replay_tasks`).
+    states: HashMap<TaskId, TaskState>,
 }
 
 /// Resolves every reference of `entries` against `store`. A reference resolves when an
 /// attempt with its id exists in its graph and task and the graph's plan is readable.
 /// A resolved reference contradicts its entry when the recorded harness, model, task
 /// tier (unset tiers dispatch as Tier2), dispatch mode, `model_passed` or check result
-/// disagrees with the entry's key or the reference's `passed`. Read-only.
+/// disagrees with the entry's key or the reference's `passed`, or when its task is
+/// `Cancelled` (amendment rule 2: a cancelled task is not evidence). Read-only.
 pub fn resolve_provenance(
     store: &dyn RunStore,
     entries: &[PriorEntry],
@@ -151,6 +156,8 @@ pub fn resolve_provenance(
                 Some(format!("{where_} ran a task of another tier"))
             } else if recorded.mode != entry.key.mode {
                 Some(format!("{where_} was dispatched in another mode"))
+            } else if recorded.task_state == Some(TaskState::Cancelled) {
+                Some(format!("{where_} belongs to a cancelled task"))
             } else if recorded.model_passed != Some(true) {
                 Some(format!("{where_} did not record model_passed true"))
             } else if recorded.check_result != Some(expected) {
@@ -202,14 +209,21 @@ fn lookup(
     let Some(tier) = view.tiers.get(&task_id).copied() else {
         return Ok(None);
     };
-    let events = view.events.get(&attempt_id).cloned().unwrap_or_default();
+    let check_result = CheckResult::final_of(
+        view.events
+            .get(&attempt_id)
+            .into_iter()
+            .flatten()
+            .map(|(event, reason)| (*event, reason.as_deref())),
+    );
     Ok(Some(Recorded {
         harness: row.harness,
         model_ref: row.model_ref,
         tier,
-        mode: DispatchMode::of_recorded_attempt(),
+        mode: DispatchMode::of_recorded_attempt(row.dispatch),
         model_passed: row.model_passed,
-        check_result: CheckResult::final_of(events),
+        check_result,
+        task_state: view.states.get(&task_id).copied(),
     }))
 }
 
@@ -226,13 +240,25 @@ fn graph_view(store: &dyn RunStore, graph_id: &str) -> Result<Option<GraphView>,
         .iter()
         .map(|n| (n.id, n.tier.unwrap_or(Tier::Tier2)))
         .collect();
-    let mut events: HashMap<AttemptId, Vec<Event>> = HashMap::new();
-    for record in store.records_for_graph(graph_id)? {
+    let records = store.records_for_graph(graph_id)?;
+    // A ledger the fold cannot replay leaves its references unresolved.
+    let Ok(states) = crate::recovery::replay_tasks(&records) else {
+        return Ok(None);
+    };
+    let mut events: HashMap<AttemptId, Vec<(Event, Option<String>)>> = HashMap::new();
+    for record in records {
         if let Some(id) = record.attempt_id {
-            events.entry(id).or_default().push(record.event);
+            events
+                .entry(id)
+                .or_default()
+                .push((record.event, record.reason));
         }
     }
-    Ok(Some(GraphView { tiers, events }))
+    Ok(Some(GraphView {
+        tiers,
+        events,
+        states,
+    }))
 }
 
 #[cfg(test)]

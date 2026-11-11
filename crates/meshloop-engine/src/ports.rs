@@ -97,12 +97,10 @@ pub trait HarnessCapabilities: Sync {
         false
     }
 
-    /// How this harness dispatches. Every harness is a subprocess today; a native
-    /// harness (#147) must override this, and the priors oracle then gives its
-    /// candidates no prior (ADR 0038 #139 amendment, rule 3).
-    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
-        meshloop_domain::advisory::DispatchMode::Subprocess
-    }
+    /// How this harness dispatches. No default: every harness states it, so a native
+    /// harness (#147) cannot inherit `Subprocess`. The priors oracle gives a candidate
+    /// whose harness is not a subprocess no prior (ADR 0038 #139 amendment, rule 3).
+    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +144,9 @@ pub enum StoreError {
     },
     Io(String),
     Corrupt(String),
+    /// The caller passed a value the store refuses to record (e.g. a bad `--as`
+    /// identity). Nothing was written; the stored data is fine.
+    InvalidInput(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +299,9 @@ pub struct AttemptRow {
     /// Whether dispatch passed `model_ref` to the harness (#139). Written when the row is
     /// created and never changed after; `None` on rows written before #139.
     pub model_passed: Option<bool>,
+    /// The dispatch mode the row records. A placeholder until the store has a mode
+    /// column (#147); read only through `DispatchMode::of_recorded_attempt`.
+    pub dispatch: meshloop_domain::advisory::RecordedDispatch,
 }
 
 /// One worker attempt routed while advisory priors were in effect (#139). Written in the
@@ -326,6 +330,9 @@ pub struct PriorsSnapshot {
 /// Routing never re-resolves provenance; the decision made at `accept` is final.
 pub trait AdvisoryPriorsSource {
     fn snapshot(&self) -> Result<Option<PriorsSnapshot>, StoreError>;
+    /// Reports a `snapshot` fault the engine routes past without priors. Adapters
+    /// warn and record telemetry; the engine does no I/O.
+    fn report_fault(&self, fault: &StoreError);
 }
 
 /// Repository pattern (design-patterns.md): engine depends only on this trait, never on

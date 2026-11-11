@@ -958,6 +958,33 @@ fn resume_fails_verifying_when_worktree_is_missing() {
             .is_some_and(|text| text.contains("driver died during verification")),
         "reason={reason:?} out={resume_out}"
     );
+    // #139: Meshloop's own verification fault is no check result, not a failure.
+    let inspect = meshloop()
+        .current_dir(&dir)
+        .args([
+            "inspect",
+            "--graph",
+            "g-missing",
+            "--attempts",
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .args(["--db"])
+        .arg(&db_path)
+        .guarded_output()
+        .expect("inspect");
+    let inspect: serde_json::Value = serde_json::from_slice(&inspect.stdout).expect("json");
+    let attempt = &inspect["data"]["nodes"][0]["attempts"][0];
+    assert_eq!(
+        attempt["outcome"], "DeterministicChecksFailed",
+        "{inspect:#}"
+    );
+    assert_eq!(
+        attempt["check_result"],
+        serde_json::Value::Null,
+        "{inspect:#}"
+    );
     assert_eq!(attempt_count(&db_path, "g-missing"), attempts_before);
     assert_eq!(branch_list(&dir), branches_before);
     assert!(!worktree.exists());
@@ -1622,6 +1649,7 @@ fn inspect_lists_attempts_with_redacted_evidence_and_status_summarizes_run() {
                     ended_at: Some(end.into()),
                     outcome: Some(outcome.into()),
                     model_passed: None,
+                    dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
                 })
                 .unwrap();
             attempt_id
@@ -3911,6 +3939,9 @@ struct OwnedScriptedPlanner {
     stdout_only: bool,
 }
 impl meshloop_engine::ports::HarnessCapabilities for OwnedScriptedPlanner {
+    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+        meshloop_domain::advisory::DispatchMode::Subprocess
+    }
     fn probe(
         &self,
     ) -> Result<
