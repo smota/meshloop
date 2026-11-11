@@ -6,6 +6,7 @@ pub mod check;
 pub mod delivery;
 pub mod git;
 pub mod harness;
+pub mod host_git;
 pub mod jev;
 pub mod process;
 pub mod redact;

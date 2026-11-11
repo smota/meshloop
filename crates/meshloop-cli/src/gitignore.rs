@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const STORE_DIR: &str = ".meshloop";
 pub const STORE_PROBE: &str = ".meshloop/state.sqlite";
@@ -23,7 +23,7 @@ pub enum Ignored {
 
 fn git_ok(cwd: &Path, args: &[&str]) -> Option<(bool, i32)> {
     let status = meshloop_adapters::process::spawn_command(
-        Command::new("git")
+        meshloop_adapters::host_git::command("git")
             .current_dir(cwd)
             .args(args)
             .stdin(Stdio::null())
@@ -46,7 +46,7 @@ pub fn check_ignored(cwd: &Path, rel: &str) -> Ignored {
 
 fn in_work_tree(dir: &Path) -> bool {
     let out = meshloop_adapters::process::spawn_command(
-        Command::new("git")
+        meshloop_adapters::host_git::command("git")
             .current_dir(dir)
             .args(["rev-parse", "--is-inside-work-tree"])
             .stdin(Stdio::null())

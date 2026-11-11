@@ -128,6 +128,130 @@ request with new live evidence from #152. Nodecode also needs an ADR 0038 amendm
 |---|---|---|---|
 | (none proven yet) | — | — | — |
 
+## Host-side git
+
+A worker can write anything in its worktree, and an unsandboxed one anything the
+operator can. Meshloop runs git on the host in that worktree afterwards (diff, status,
+add, commit, merge, cherry-pick, reset, worktree add/remove, cleanup probes), with the
+operator's authority. Issue [#180](https://github.com/smota/meshloop/issues/180): every
+one of those git processes is built by `meshloop_adapters::host_git` (`command` for
+`std::process::Command`, `spec` for owned spawns), so git never runs a program the
+worker chose and never follows a `.git` link the worker rewrote.
+
+Neutralised for every host-side git process:
+
+- **System and global config are not read** (`GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_ATTR_NOSYSTEM=1`). Filter, diff and merge drivers
+  defined there (git-lfs, for example) therefore never run on worker-chosen content
+  selected by a worker's `.gitattributes`. A fixed allowlist of data-only keys is read
+  from the operator's system and global config once per process and passed back with
+  `-c`: `core.autocrlf`, `core.eol`, `core.safecrlf`, `core.longpaths`,
+  `core.symlinks`, `core.fscache` (short plain words only), `core.excludesFile` (a path
+  to an ignore file) and `safe.directory` (a protected-config key that git honours from
+  `-c`). Identity for Meshloop's own commits
+  stays `GIT_AUTHOR_*`/`GIT_COMMITTER_*` = `meshloop`.
+- **Hooks**: `core.hooksPath` is a path below a non-directory (`/dev/null` on Unix, the
+  Meshloop executable on Windows), so no hook (`pre-commit`, `post-checkout`,
+  `reference-transaction`, `fsmonitor-watchman`, ...) can exist.
+- **Executable config keys a repository config could set**, overridden on the command
+  line: `core.fsmonitor=false`, `core.editor=:` and `sequence.editor=:` (plus
+  `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR`), `commit.gpgSign=false`, `tag.gpgSign=false`,
+  `merge.verifySignatures=false`, `log.showSignature=false` (no `gpg.program`),
+  `protocol.allow=never`, `credential.helper=` and `GIT_NO_LAZY_FETCH=1`,
+  `GIT_TERMINAL_PROMPT=0` (no transport, so no `core.sshCommand`, proxy, `uploadpack`,
+  credential helper or askpass), `submodule.recurse=false`,
+  `diff.ignoreSubmodules=all`, `gc.auto=0` and `maintenance.auto=false`. `--no-pager`
+  on every call. Diffs in a worktree also pass `--no-ext-diff --no-textconv
+  --ignore-submodules=all`, and status passes `--ignore-submodules=all` (adapter and
+  cleanup), so git never recurses into a nested repository and runs its config.
+- **Nested repositories**: `commit_all` takes the attempt base. Before every `add -A`
+  (the first commit, every repair round and resumed verification), it checks the
+  worktree link, then walks the worktree without following symlinks or junctions: any
+  entry named `.git` in any case, or the NTFS short name `git~1`, below the top level
+  refuses the attempt. It then reads the index (`ls-files --stage`, no helper process)
+  and refuses any gitlink (mode 160000) that is not in the attempt base or whose
+  `<path>/.git` exists. Staging is `add -A -- . ':(exclude,top,literal)<gitlink>'`
+  with one exclude per gitlink in the index: gitlinks carry no content, and `add`
+  would otherwise run git inside a populated one under that repository's config.
+  After staging it reads the index again and refuses a gitlink staged in between.
+  Each of these refusals is `WorkspaceError::NestedGit { path, reason }`, a failing
+  `nested-git` evidence row naming the worktree-relative path, and a failed attempt
+  with no repair round. A git failure while reading or staging the index, or a
+  worktree walk that cannot complete, is `WorkspaceError::StagingFailed`: a failing
+  `staging` evidence row (`staging-failed`), a failed attempt, never a failed run. An
+  entry that vanishes during the walk is skipped. The refusals include a worker that
+  fills an (uninitialised) submodule directory of a repository that uses submodules.
+  A change that adds or moves a gitlink also fails the `gitlinks` check. Resumed
+  verification uses the attempt's recorded base, else the run's base revision.
+- **The worker's process tree ends before verification** (ADR 0025): when a worker
+  exits normally, Meshloop ends every process left in its tree before collecting the
+  outcome, so nothing the worker started can race host-side git. On Windows it
+  terminates the job object and observes it empty; on Unix it kills the process group
+  and polls until no member is left: `/proc/<pid>/stat` process-group fields on
+  Linux, `kill -0 -- -<pgid>` elsewhere, where only "No such process" counts as empty
+  (ADR 0025, amendment of 2026-11-11). If the tree is not observed empty
+  within 5 s the attempt fails (`worker-process-tree-survived`) and no host-side git
+  runs in its worktree.
+- **Inherited environment** that would redirect git or name a program is removed:
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, object-directory
+  variables, `GIT_CONFIG*` parameters, `GIT_ATTR_SOURCE`, `GIT_EXTERNAL_DIFF`, `GIT_SSH*`,
+  `GIT_PROXY_COMMAND`, askpass and `GIT_PAGER`.
+- **The worktree link**: before git runs in an attempt (or integrate/deliverable)
+  worktree, `<worktree>/.git` must be a regular file naming an admin dir directly under
+  `<common dir>/worktrees/`, whose `gitdir` points back at this `.git` and whose
+  `commondir` is the repository's. Otherwise git is not run: the adapter returns
+  `WorkspaceError::GitLinkModified { path, reason }`, verification records a failing
+  `git-link` evidence row and fails the attempt (`git-link-modified`), removal refuses
+  the worktree, and cleanup treats its content as unknown (blocked). A verified
+  worktree is then pinned to the canonical admin dir (`--git-dir=<admin>
+  --work-tree=.`), so git never reads the link itself. A repair round that hits a
+  refused worktree fails the attempt the same way.
+- **The prompt file** `.meshloop-prompt-<attempt>` is created with `create_new` and
+  `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Any existing entry,
+  including a dangling symlink, refuses the attempt (`prompt-file-exists`); it is never
+  written through. A worker change that touches any `.meshloop-prompt-*` path (any
+  case) fails the `reserved-paths` check, whatever `allowed_paths` says.
+
+Not neutralised, by design or for now:
+
+- **Operator global and system config is dropped**, apart from the allowlist above.
+  Global git-lfs filters, `core.attributesFile` drivers, global aliases and credential
+  helpers do not apply to Meshloop's git. An LFS repository needs the filter in its
+  repository config (`git lfs install --local`) for Meshloop's commits to store
+  pointers. Landing has the same cause: when LFS is configured only globally,
+  Meshloop's checkout and merge into the operator's checkout (`integrate --into`)
+  write the pointer text, not the object content, into the working tree; run
+  `git lfs pull` (or `git lfs install --local` beforehand). Global `safe.directory`
+  exemptions and `core.excludesFile` still apply (imported).
+- **Drivers in the repository's own config** (`filter.<x>`, `merge.<x>.driver`) still
+  run when a worker's `.gitattributes` selects them: they are the operator's programs,
+  chosen for this repository. Their names cannot be enumerated to override.
+- **A worker that can write the repository's common dir** (any unsandboxed harness can)
+  can change that repository config, `info/attributes` or the admin dir itself; such a
+  worker already runs with the operator's authority. The overrides above still stop the
+  listed executable keys; config-defined hooks of a future git (`hook.<name>.command`)
+  are not covered.
+- **Time of check**: the link and the nested-repository checks run before git, and git
+  is pinned to the checked admin dir. Processes in the worker's process group or job
+  are ended before verification (above). A process that left the group on Unix
+  (`setsid`, `daemon`) or was started outside the job is not seen and could still
+  change the worktree during that window; staging excludes every gitlink, a gitlink
+  it stages is refused by the post-`add` index check, and status/diff never recurse
+  into submodules. Native dispatch (ADR 0039) has no process tree, so for native
+  workers these checks are the only guard. In a container
+  whose PID 1 does not reap orphans, zombies keep the group "alive" and attempts fail
+  with `worker-process-tree-survived`.
+- `xtask` and test helpers run plain git on fixture repositories and are not host-side
+  product paths.
+
+Tests: `crates/meshloop-cli/tests/host_git_hardening.rs` (Unix: a `/bin/sh` worker that
+rewrites `.git`, plants hooks, sets executable repository config, selects global-config
+drivers with `.gitattributes`, commits symlinks at future prompt names, or creates a
+nested repository whose own config defines a filter; no marker file appears across
+verify, integrate and cleanup), `git::tests::a_modified_git_link_is_refused_before_git_runs`,
+`git::tests::nested_git_entries_are_found_without_following_links`,
+`harness::prompt_file_tests` and `verify::tests::prompt_file_paths_are_reserved_anywhere_in_a_change`.
+
 ## Verification runs worker-written code (#181)
 
 Whatever the harness, `verify_command` runs in the attempt worktree after the worker

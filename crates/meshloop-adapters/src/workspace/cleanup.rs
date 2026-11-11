@@ -203,11 +203,13 @@ fn contain_and_read(
 
 fn git_facts(path: &Path, checkout: &Path, retained: Option<&ObjectId>) -> CleanupObservation {
     let mut observation = CleanupObservation::default();
-    match git_ok(
+    match git_in_worktree(
         path,
+        checkout,
         &[
             "status",
             "--porcelain",
+            "--ignore-submodules=all",
             "--ignored",
             "--untracked-files=all",
             "-z",
@@ -220,7 +222,11 @@ fn git_facts(path: &Path, checkout: &Path, retained: Option<&ObjectId>) -> Clean
         }
         Err(()) => content_unknown(&mut observation),
     }
-    match git_ok(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"]) {
+    match git_in_worktree(
+        path,
+        checkout,
+        &["rev-parse", "--verify", "--end-of-options", "HEAD"],
+    ) {
         Ok(bytes) => match parse_oid(&bytes) {
             Some(commit) => {
                 observation.commit_reachable = retained.is_some_and(|retained| {
@@ -428,8 +434,22 @@ fn unbound_repository() -> LifecycleId {
     }
 }
 
+/// Git inside a candidate worktree: refused (`Err`) unless the worktree's `.git` link
+/// verifies against the checkout's common dir, then pinned to it (#180).
+fn git_in_worktree(path: &Path, checkout: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
+    let common = common_dir(checkout).ok_or(())?;
+    let admin = crate::host_git::verify_worktree_link(path, &common).map_err(|_| ())?;
+    let mut command = crate::host_git::spec("git");
+    command.arg("--no-optional-locks");
+    command.arg("-C").arg(path);
+    command.args(crate::host_git::pinned(&admin));
+    command.args(args.iter().copied());
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    super::bounded_stdout(command, Duration::from_secs(10)).map_err(|_| ())
+}
+
 fn git_ok(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
-    let mut command = crate::process::OwnedSpawnSpec::new("git");
+    let mut command = crate::host_git::spec("git");
     command.arg("--no-optional-locks");
     command.arg("-C").arg(cwd);
     command.args(args.iter().copied());
@@ -536,7 +556,7 @@ fn registered(
     scope: &InventoryScope<'_>,
     path: &Path,
 ) -> Result<bool, meshloop_engine::ports::StoreError> {
-    let mut command = crate::process::OwnedSpawnSpec::new("git");
+    let mut command = crate::host_git::spec("git");
     command
         .arg("-C")
         .arg(scope.checkout)
@@ -648,7 +668,7 @@ fn run_loop_branch(
         return None;
     }
     let commit = observation.commit.as_ref()?;
-    let head = git_ok(path, &["symbolic-ref", "--quiet", "HEAD"]).ok()?;
+    let head = git_in_worktree(path, scope.checkout, &["symbolic-ref", "--quiet", "HEAD"]).ok()?;
     let head = String::from_utf8(head).ok()?;
     let short = head
         .trim()
@@ -981,7 +1001,7 @@ fn apply_selected(
             report.status = "interrupted";
             return Ok(report);
         }
-        let mut command = crate::process::OwnedSpawnSpec::new("git");
+        let mut command = crate::host_git::spec("git");
         command
             .current_dir(scope.checkout)
             .args(["worktree", "remove"])
@@ -1017,7 +1037,7 @@ fn apply_selected(
                     (Some(base), Some(commit)) => on_base(scope.checkout, commit, base),
                     _ => false,
                 };
-                let mut command = crate::process::OwnedSpawnSpec::new("git");
+                let mut command = crate::host_git::spec("git");
                 command
                     .current_dir(scope.checkout)
                     .args(["branch", "-d"])

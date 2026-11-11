@@ -53,6 +53,22 @@ pub fn all_paths_allowed(files: &[String], allowed: &[String]) -> bool {
     allowed.is_empty() || files.iter().all(|f| path_allowed(f, allowed))
 }
 
+/// Name prefix of Meshloop's per-attempt prompt files in a worktree.
+pub const PROMPT_FILE_PREFIX: &str = ".meshloop-prompt-";
+
+/// Changed paths a worker may never deliver, whatever `allowed_paths` says: any path
+/// component naming a prompt file. A committed (symlink) prompt file could make a
+/// later attempt write through it (#180).
+pub fn reserved_paths(files: &[String]) -> Vec<&String> {
+    files
+        .iter()
+        .filter(|file| {
+            file.split(['/', '\\'])
+                .any(|part| part.to_ascii_lowercase().starts_with(PROMPT_FILE_PREFIX))
+        })
+        .collect()
+}
+
 pub fn verification_passed(rows: &[Evidence]) -> bool {
     all_deterministic_passed(rows) && satisfies(RequiredEvidence::DeterministicOnly, rows)
 }
@@ -129,12 +145,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prompt_file_paths_are_reserved_anywhere_in_a_change() {
+        let files = vec![
+            "src/lib.rs".to_string(),
+            ".meshloop-prompt-7".to_string(),
+            "nested/.meshloop-prompt-2".to_string(),
+            "docs\\.meshloop-prompt-x\\a".to_string(),
+            "meshloop-prompt-1".to_string(),
+            ".MeshLoop-Prompt-9".to_string(),
+        ];
+        assert_eq!(
+            reserved_paths(&files),
+            vec![&files[1], &files[2], &files[3], &files[5]]
+        );
+        assert!(reserved_paths(&["README.md".to_string()]).is_empty());
+    }
+
+    #[test]
     fn empty_diff_fails_unless_flagged() {
         let diff = DiffSummary {
             base: "a".into(),
             head: "a".into(),
             files: vec![],
             stat_redacted: String::new(),
+            gitlinks: vec![],
         };
         assert_eq!(git_diff_exit_code(&diff, false), 1);
         assert_eq!(git_diff_exit_code(&diff, true), 0);

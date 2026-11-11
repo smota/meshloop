@@ -81,6 +81,31 @@ impl OwnedChild {
             ))
         }
     }
+    /// After the direct child exited normally, ends every process it left in its tree
+    /// (ADR 0025) and reports whether the tree is observed empty within `timeout`.
+    /// Windows: terminates the job and observes it empty. POSIX: kills the process
+    /// group (the reaped leader's pid stays reserved while members remain) and polls
+    /// until no member is left. A process that left the group (`setsid`) is not seen.
+    pub fn end_tree_after_exit(&mut self, timeout: Duration) -> bool {
+        #[cfg(windows)]
+        {
+            self.terminate_and_observe(timeout)
+                .is_ok_and(|termination| termination.job_empty)
+        }
+        #[cfg(not(windows))]
+        {
+            let group = self.inner.id();
+            let start = std::time::Instant::now();
+            loop {
+                super::kill_process_tree(group);
+                match super::process_group_alive(group) {
+                    Some(false) => return true,
+                    _ if start.elapsed() >= timeout => return false,
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        }
+    }
     /// Legacy best-effort cleanup. Its return must never be used as a quiescence proof.
     pub fn kill_tree(&mut self) {
         #[cfg(windows)]

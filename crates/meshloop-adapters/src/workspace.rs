@@ -144,7 +144,7 @@ impl GitRepositoryIdentity {
         after_open: &dyn Fn(&Path) -> Result<(), StoreError>,
         acquire_lock: &dyn Fn(&File) -> Result<(), StoreError>,
     ) -> Result<RepositoryLease, StoreError> {
-        let mut command = OwnedSpawnSpec::new(&self.git);
+        let mut command = crate::host_git::spec(&self.git);
         command.arg("-C").arg(checkout).args([
             "rev-parse",
             "--path-format=absolute",
@@ -557,7 +557,7 @@ impl meshloop_engine::workspace::RunOwnership for RunLoopOwnershipAccess {
         }))
     }
     fn is_base_root(&self, alias: &RootAlias) -> Result<bool, StoreError> {
-        let mut command = OwnedSpawnSpec::new(&self.git);
+        let mut command = crate::host_git::spec(&self.git);
         command.arg("-C").arg(&self.checkout).args([
             "rev-parse",
             "--path-format=absolute",

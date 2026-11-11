@@ -238,6 +238,68 @@ fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
 /// On Windows, executes `taskkill /F /T /PID <pid>` to terminate child compilers,
 /// interpreters, and test runners that would otherwise become orphaned processes.
 /// On Unix, sends SIGKILL to the process group.
+/// Whether any process is left in process group `pgid`. `None` when that cannot be
+/// determined, which callers treat as not proven empty. Zombies count as members.
+/// pgid 0 and 1 are never a worker's group and are undetermined.
+#[cfg(not(windows))]
+pub fn process_group_alive(pgid: u32) -> Option<bool> {
+    if pgid <= 1 {
+        return None;
+    }
+    group_alive_native(pgid)
+}
+
+/// Linux: scans `/proc/<pid>/stat` for a process whose process-group field is `pgid`.
+#[cfg(target_os = "linux")]
+fn group_alive_native(pgid: u32) -> Option<bool> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        // A process that exits during the scan is simply gone.
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        if stat_process_group(&stat) == Some(pgid) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// The process-group field of a `/proc/<pid>/stat` line: fields after the command
+/// name, which ends at the last `)`, are `state ppid pgrp ...`.
+#[cfg(target_os = "linux")]
+fn stat_process_group(stat: &str) -> Option<u32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// Other Unix: `kill -0 -- -<pgid>`. Success is alive; only a "No such process"
+/// failure is empty; anything else is undetermined (fail closed).
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn group_alive_native(pgid: u32) -> Option<bool> {
+    use std::process::Stdio;
+    let output = Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        return Some(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("no such process").then_some(false)
+}
+
 pub fn kill_process_tree(pid: u32) {
     if pid == 0 {
         return;
@@ -275,6 +337,34 @@ pub fn kill_process_tree(pid: u32) {
 
 #[cfg(test)]
 mod tests {
+    /// #180: a group with a member is alive; once it is killed and reaped it is
+    /// empty; pgid 0 and 1 are undetermined.
+    #[cfg(not(windows))]
+    #[test]
+    fn process_group_alive_tracks_a_real_group() {
+        use std::os::unix::process::CommandExt;
+        assert_eq!(super::process_group_alive(0), None);
+        assert_eq!(super::process_group_alive(1), None);
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = child.id();
+        assert_eq!(super::process_group_alive(group), Some(true));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(super::process_group_alive(group), Some(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stat_process_group_reads_after_the_last_paren() {
+        let stat = "4242 (odd ) name) S 1 777 777 0 -1 4194560";
+        assert_eq!(super::stat_process_group(stat), Some(777));
+        assert_eq!(super::stat_process_group("garbage"), None);
+    }
+
     use super::*;
 
     #[test]

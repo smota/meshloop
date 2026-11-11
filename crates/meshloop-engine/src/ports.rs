@@ -151,10 +151,29 @@ pub enum StoreError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceError {
-    CommandFailed { stderr: String },
+    CommandFailed {
+        stderr: String,
+    },
     Io(String),
     Conflict,
     Dirty,
+    /// A worktree's `.git` link no longer points at its own admin dir (worker output
+    /// modified it). Git was not run there; `path` is that `.git` (#180).
+    GitLinkModified {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    /// An entry named `.git` below the worktree's top level (a nested repository or
+    /// link); `path` is worktree-relative. Nothing was staged (#180).
+    NestedGit {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    /// Reading or staging the worktree's index failed, or the worktree could not be
+    /// walked; nothing nested was observed. The attempt is refused (#180).
+    StagingFailed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +188,8 @@ pub struct DiffSummary {
     pub head: String,
     pub files: Vec<String>,
     pub stat_redacted: String,
+    /// Gitlink (submodule) entries new or changed in `head` against `base` (#180).
+    pub gitlinks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +229,14 @@ pub trait WorkspacePort {
     fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
     fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
     fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
-    fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+    /// Stages and commits everything in `worktree`. Refuses (`NestedGit`) a nested
+    /// `.git` entry or a gitlink not in `base`, the attempt's start point (#180).
+    fn commit_all(
+        &self,
+        worktree: &Path,
+        base: &str,
+        message: &str,
+    ) -> Result<String, WorkspaceError>;
     fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
     /// Replays the commits in `base..head` onto `worktree`'s HEAD, oldest first. An empty
     /// range is a no-op. On conflict the cherry-pick is aborted and `Conflict` returned.
