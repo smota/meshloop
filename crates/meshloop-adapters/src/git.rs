@@ -19,6 +19,11 @@ pub enum GitError {
     Dirty,
     /// The worktree's `.git` link was modified; git was not run there (#180).
     LinkModified(GitLinkError),
+    /// A `.git` entry below the worktree's top level (a nested repository or link);
+    /// `path` is worktree-relative. Nothing was staged (#180).
+    NestedGit {
+        path: PathBuf,
+    },
 }
 
 impl From<GitError> for WorkspaceError {
@@ -32,6 +37,7 @@ impl From<GitError> for WorkspaceError {
                 path: e.link,
                 reason: e.reason.to_string(),
             },
+            GitError::NestedGit { path } => WorkspaceError::NestedGit { path },
         }
     }
 }
@@ -276,8 +282,11 @@ impl GitWorktreeAdapter {
     }
 
     pub(crate) fn planner_is_dirty(&self, worktree: &Path) -> Result<bool, GitError> {
-        self.run_in(worktree, &["status", "--porcelain"])
-            .map(|porcelain| !porcelain.is_empty())
+        self.run_in(
+            worktree,
+            &["status", "--porcelain", "--ignore-submodules=all"],
+        )
+        .map(|porcelain| !porcelain.is_empty())
     }
 
     /// Fail closed before the real worktree is created. A successful probe is remembered
@@ -341,6 +350,48 @@ fn annotate_layout(error: GitError) -> GitError {
     }
 }
 
+/// The first entry named `.git` (any case, or the NTFS short name `git~1`) below the
+/// worktree's top level, worktree-relative. At the top level only the exact `.git`
+/// link is allowed. Walks without following symlinks or junctions.
+fn nested_git_entry(worktree: &Path) -> Result<Option<PathBuf>, GitError> {
+    let io = |e: std::io::Error| GitError::Io(e.to_string());
+    let mut stack = vec![(worktree.to_path_buf(), true)];
+    while let Some((dir, top)) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let name = entry.file_name();
+            let lower = name.to_string_lossy().to_ascii_lowercase();
+            let gitlike = lower == ".git" || lower == "git~1";
+            if gitlike && !(top && name == ".git") {
+                let path = entry.path();
+                let rel = path.strip_prefix(worktree).unwrap_or(&path).to_path_buf();
+                return Ok(Some(rel));
+            }
+            if top && name == ".git" {
+                continue;
+            }
+            // `DirEntry::file_type` does not follow symlinks (or junctions on Windows).
+            if entry.file_type().map_err(io)?.is_dir() {
+                stack.push((entry.path(), false));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Gitlink (mode 160000) entries of `ls-tree -r -z` output, as `(path, object)`.
+fn gitlinks(listing: &str) -> Vec<(String, String)> {
+    listing
+        .split('\0')
+        .filter_map(|record| {
+            let (meta, path) = record.split_once('\t')?;
+            let mut parts = meta.split(' ');
+            let (mode, _kind, object) = (parts.next()?, parts.next()?, parts.next()?);
+            (mode == "160000").then(|| (path.to_string(), object.to_string()))
+        })
+        .collect()
+}
+
 fn oid_ok(value: &str) -> bool {
     meshloop_domain::workspace::ObjectId::new(value).is_ok()
 }
@@ -391,6 +442,7 @@ impl WorkspacePort for GitWorktreeAdapter {
                     "diff",
                     "--no-ext-diff",
                     "--no-textconv",
+                    "--ignore-submodules=all",
                     "--name-only",
                     base,
                     "HEAD",
@@ -403,6 +455,7 @@ impl WorkspacePort for GitWorktreeAdapter {
                         "diff",
                         "--no-ext-diff",
                         "--no-textconv",
+                        "--ignore-submodules=all",
                         "--name-only",
                         base,
                     ],
@@ -421,6 +474,7 @@ impl WorkspacePort for GitWorktreeAdapter {
                     "diff",
                     "--no-ext-diff",
                     "--no-textconv",
+                    "--ignore-submodules=all",
                     "--stat",
                     base,
                     "HEAD",
@@ -429,24 +483,52 @@ impl WorkspacePort for GitWorktreeAdapter {
             .or_else(|_| {
                 self.run_in(
                     worktree,
-                    &["diff", "--no-ext-diff", "--no-textconv", "--stat", base],
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--ignore-submodules=all",
+                        "--stat",
+                        base,
+                    ],
                 )
             })
             .unwrap_or_default();
+        // New or changed gitlinks are reported separately: the diffs above ignore
+        // submodules, and the gate refuses gitlinks (#180).
+        let head_links = gitlinks(&self.run_in(worktree, &["ls-tree", "-r", "-z", "HEAD"])?);
+        let base_links = self
+            .run_in(worktree, &["ls-tree", "-r", "-z", base])
+            .map(|listing| gitlinks(&listing))
+            .unwrap_or_default();
+        let gitlinks = head_links
+            .into_iter()
+            .filter(|link| !base_links.contains(link))
+            .map(|(path, _)| path)
+            .collect();
         Ok(DiffSummary {
             base: base.into(),
             head,
             files,
             stat_redacted: crate::redact::redact(&stat),
+            gitlinks,
         })
     }
 
     fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError> {
-        self.run_in(worktree, &["status", "--porcelain"])
-            .map_err(Into::into)
+        self.run_in(
+            worktree,
+            &["status", "--porcelain", "--ignore-submodules=all"],
+        )
+        .map_err(Into::into)
     }
 
     fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError> {
+        // A nested repository would be staged as a gitlink, and later status/diff
+        // could recurse into it and run its config (#180). Refuse before staging.
+        if let Some(path) = nested_git_entry(worktree)? {
+            return Err(GitError::NestedGit { path }.into());
+        }
         self.run_in(worktree, &["add", "-A"])
             .map_err(WorkspaceError::from)?;
         let porcelain = self.status_porcelain(worktree)?;
@@ -586,6 +668,7 @@ impl WorkspacePort for GitWorktreeAdapter {
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
+                "--ignore-submodules=all",
                 "--no-color",
                 base,
                 "HEAD",
@@ -594,7 +677,14 @@ impl WorkspacePort for GitWorktreeAdapter {
         .or_else(|_| {
             self.run_in(
                 worktree,
-                &["diff", "--no-ext-diff", "--no-textconv", "--no-color", base],
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--ignore-submodules=all",
+                    "--no-color",
+                    base,
+                ],
             )
         })
         .map_err(Into::into)
@@ -774,6 +864,40 @@ mod tests {
         WorkspacePort::remove_worktree(&adapter, &sibling).unwrap();
         fs::remove_dir_all(&elsewhere).ok();
         fs::remove_dir_all(&repo).ok();
+    }
+
+    /// #180: any `.git`-named entry below the top level (any case, or `git~1`) is a
+    /// nested repository or link; symlinked directories are not followed.
+    #[test]
+    fn nested_git_entries_are_found_without_following_links() {
+        let dir = std::env::temp_dir().join(format!("meshloop-nested-{}", uuid_ish()));
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::write(dir.join(".git"), "gitdir: x\n").unwrap();
+        assert_eq!(nested_git_entry(&dir).unwrap(), None);
+        for name in [".git", ".GIT", "git~1", "GIT~1"] {
+            let path = dir.join("a/b").join(name);
+            fs::write(&path, "gitdir: elsewhere\n").unwrap();
+            assert_eq!(
+                nested_git_entry(&dir).unwrap(),
+                Some(PathBuf::from("a").join("b").join(name))
+            );
+            fs::remove_file(&path).unwrap();
+        }
+        fs::write(dir.join("GIT~1"), "x").unwrap();
+        assert_eq!(
+            nested_git_entry(&dir).unwrap(),
+            Some(PathBuf::from("GIT~1"))
+        );
+        fs::remove_file(dir.join("GIT~1")).unwrap();
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("meshloop-outside-{}", uuid_ish()));
+            fs::create_dir_all(outside.join(".git")).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("a/link")).unwrap();
+            assert_eq!(nested_git_entry(&dir).unwrap(), None);
+            fs::remove_dir_all(&outside).unwrap();
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

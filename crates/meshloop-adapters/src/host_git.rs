@@ -59,6 +59,7 @@ const OVERRIDES: &[&str] = &[
     "credential.helper=",
     // No submodule recursion; no background gc/maintenance (and its hooks).
     "submodule.recurse=false",
+    "diff.ignoreSubmodules=all",
     "gc.auto=0",
     "maintenance.auto=false",
 ];
@@ -66,24 +67,48 @@ const OVERRIDES: &[&str] = &[
 /// Data-only keys imported from the operator's system and global config, which the
 /// hardened environment otherwise drops. None of them names a program.
 const IMPORTED_KEYS: &str =
-    r"^(core\.(autocrlf|eol|safecrlf|longpaths|symlinks|fscache)|safe\.directory)$";
+    r"^(core\.(autocrlf|eol|safecrlf|longpaths|symlinks|fscache|excludesfile)|safe\.directory)$";
 
 /// `core.hooksPath` for hooks that cannot exist: a path below a non-directory.
 fn null_hooks_path() -> OsString {
     #[cfg(windows)]
     {
         // `<meshloop.exe>\<hook>` cannot exist while the executable is a regular file.
-        // `NUL\<hook>` is avoided: Win32 may read it as a relative directory.
-        if let Ok(exe) = std::env::current_exe() {
-            let text = exe.to_string_lossy().into_owned();
-            let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_string();
-            return OsString::from(text);
+        // A bare `NUL\<hook>` is avoided: Win32 may read it as a relative directory.
+        const FALLBACK: &str = r"C:\Windows\System32\NUL";
+        match std::env::current_exe().map(plain_path) {
+            Ok(exe) if exe.is_absolute() => exe.into_os_string(),
+            _ => OsString::from(FALLBACK),
         }
-        OsString::from(r"C:\Windows\System32\NUL")
     }
     #[cfg(not(windows))]
     {
         OsString::from("/dev/null")
+    }
+}
+
+/// Git for Windows does not take verbatim paths: `\\?\UNC\server\share` becomes
+/// `\\server\share` and `\\?\C:\x` becomes `C:\x`. Unchanged elsewhere.
+fn plain_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
+        if let Some(rest) = wide.strip_prefix(unc.as_slice()) {
+            let mut out: Vec<u16> = r"\\".encode_utf16().collect();
+            out.extend_from_slice(rest);
+            return PathBuf::from(OsString::from_wide(&out));
+        }
+        if let Some(rest) = wide.strip_prefix(verbatim.as_slice()) {
+            return PathBuf::from(OsString::from_wide(rest));
+        }
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        path
     }
 }
 
@@ -156,7 +181,8 @@ fn parse_settings(bytes: &[u8]) -> Vec<(String, String)> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
             let allowed = match key.as_str() {
-                "safe.directory" => true,
+                // Paths: data only (an ignore file and directory exemptions).
+                "safe.directory" | "core.excludesfile" => true,
                 "core.autocrlf" | "core.eol" | "core.safecrlf" | "core.longpaths"
                 | "core.symlinks" | "core.fscache" => plain_word,
                 _ => false,
@@ -240,8 +266,9 @@ const MAX_LINK_BYTES: u64 = 4096;
 
 /// Checks, without running git, that `worktree/.git` is a regular file naming an
 /// admin dir directly under `<common>/worktrees/`, whose `gitdir` file points back at
-/// this `.git` and whose `commondir` is `common`. Returns the admin dir as written in
-/// the link (absolute), for [`pinned`]. Never follows anything the checks reject.
+/// this `.git` and whose `commondir` is `common`. Returns the canonical admin dir
+/// (never the worker-written text), for [`pinned`]. Never follows anything the
+/// checks reject.
 pub fn verify_worktree_link(worktree: &Path, common: &Path) -> Result<PathBuf, GitLinkError> {
     let link = worktree.join(".git");
     let refuse = |reason| GitLinkError {
@@ -279,7 +306,7 @@ pub fn verify_worktree_link(worktree: &Path, common: &Path) -> Result<PathBuf, G
     if canonical(&named_common, "commondir missing")? != common_canon {
         return Err(refuse("admin dir names another repository"));
     }
-    Ok(admin)
+    Ok(plain_path(admin_canon))
 }
 
 fn absolute_from(base: &Path, path: &Path) -> PathBuf {
@@ -307,12 +334,16 @@ mod tests {
 
     #[test]
     fn imported_settings_are_allowlisted_data_only() {
-        let raw = b"core.autocrlf\ntrue\0core.fsmonitor\n/bin/evil\0safe.directory\n/srv/repo one\0core.eol\nlf; touch x\0filter.lfs.clean\ngit-lfs clean\0";
+        let raw = b"core.autocrlf\ntrue\0core.fsmonitor\n/bin/evil\0safe.directory\n/srv/repo one\0core.eol\nlf; touch x\0filter.lfs.clean\ngit-lfs clean\0core.excludesfile\n~/.gitignore_global\0";
         assert_eq!(
             parse_settings(raw),
             vec![
                 ("core.autocrlf".to_string(), "true".to_string()),
                 ("safe.directory".to_string(), "/srv/repo one".to_string()),
+                (
+                    "core.excludesfile".to_string(),
+                    "~/.gitignore_global".to_string()
+                ),
             ]
         );
     }

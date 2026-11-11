@@ -146,8 +146,9 @@ Neutralised for every host-side git process:
   selected by a worker's `.gitattributes`. A fixed allowlist of data-only keys is read
   from the operator's system and global config once per process and passed back with
   `-c`: `core.autocrlf`, `core.eol`, `core.safecrlf`, `core.longpaths`,
-  `core.symlinks`, `core.fscache` (short plain words only) and `safe.directory` (a
-  protected-config key that git honours from `-c`). Identity for Meshloop's own commits
+  `core.symlinks`, `core.fscache` (short plain words only), `core.excludesFile` (a path
+  to an ignore file) and `safe.directory` (a protected-config key that git honours from
+  `-c`). Identity for Meshloop's own commits
   stays `GIT_AUTHOR_*`/`GIT_COMMITTER_*` = `meshloop`.
 - **Hooks**: `core.hooksPath` is a path below a non-directory (`/dev/null` on Unix, the
   Meshloop executable on Windows), so no hook (`pre-commit`, `post-checkout`,
@@ -158,10 +159,19 @@ Neutralised for every host-side git process:
   `merge.verifySignatures=false`, `log.showSignature=false` (no `gpg.program`),
   `protocol.allow=never`, `credential.helper=` and `GIT_NO_LAZY_FETCH=1`,
   `GIT_TERMINAL_PROMPT=0` (no transport, so no `core.sshCommand`, proxy, `uploadpack`,
-  credential helper or askpass), `submodule.recurse=false`, `gc.auto=0` and
-  `maintenance.auto=false`. `--no-pager` on every call. Diffs also pass
-  `--no-ext-diff --no-textconv` (no `diff.external`, `diff.<driver>.command` or
-  textconv).
+  credential helper or askpass), `submodule.recurse=false`,
+  `diff.ignoreSubmodules=all`, `gc.auto=0` and `maintenance.auto=false`. `--no-pager`
+  on every call. Diffs in a worktree also pass `--no-ext-diff --no-textconv
+  --ignore-submodules=all`, and status passes `--ignore-submodules=all` (adapter and
+  cleanup), so git never recurses into a nested repository and runs its config.
+- **Nested repositories**: before every `add -A` (the first commit and every repair
+  round), the worktree is walked without following symlinks or junctions. Any entry
+  named `.git` in any case, or the NTFS short name `git~1`, below the top level refuses
+  the attempt: `WorkspaceError::NestedGit { path }`, a failing `nested-git` evidence
+  row with the worktree-relative path, and nothing is staged. This includes a worker
+  that fills an (uninitialised) submodule directory of a repository that uses
+  submodules. A change that adds or moves a gitlink (mode 160000) fails the `gitlinks`
+  check.
 - **Inherited environment** that would redirect git or name a program is removed:
   `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, object-directory
   variables, `GIT_CONFIG*` parameters, `GIT_ATTR_SOURCE`, `GIT_EXTERNAL_DIFF`, `GIT_SSH*`,
@@ -173,13 +183,14 @@ Neutralised for every host-side git process:
   `WorkspaceError::GitLinkModified { path, reason }`, verification records a failing
   `git-link` evidence row and fails the attempt (`git-link-modified`), removal refuses
   the worktree, and cleanup treats its content as unknown (blocked). A verified
-  worktree is then pinned (`--git-dir=<admin> --work-tree=.`), so git never reads the
-  link itself.
+  worktree is then pinned to the canonical admin dir (`--git-dir=<admin>
+  --work-tree=.`), so git never reads the link itself. A repair round that hits a
+  refused worktree fails the attempt the same way.
 - **The prompt file** `.meshloop-prompt-<attempt>` is created with `create_new` and
   `O_NOFOLLOW` (`FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Any existing entry,
   including a dangling symlink, refuses the attempt (`prompt-file-exists`); it is never
-  written through. A worker change that touches any `.meshloop-prompt-*` path fails the
-  `reserved-paths` check, whatever `allowed_paths` says.
+  written through. A worker change that touches any `.meshloop-prompt-*` path (any
+  case) fails the `reserved-paths` check, whatever `allowed_paths` says.
 
 Not neutralised, by design or for now:
 
@@ -187,7 +198,11 @@ Not neutralised, by design or for now:
   Global git-lfs filters, `core.attributesFile` drivers, global aliases and credential
   helpers do not apply to Meshloop's git. An LFS repository needs the filter in its
   repository config (`git lfs install --local`) for Meshloop's commits to store
-  pointers. A global `safe.directory` exemption still applies (imported).
+  pointers. Landing has the same cause: when LFS is configured only globally,
+  Meshloop's checkout and merge into the operator's checkout (`integrate --into`)
+  write the pointer text, not the object content, into the working tree; run
+  `git lfs pull` (or `git lfs install --local` beforehand). Global `safe.directory`
+  exemptions and `core.excludesFile` still apply (imported).
 - **Drivers in the repository's own config** (`filter.<x>`, `merge.<x>.driver`) still
   run when a worker's `.gitattributes` selects them: they are the operator's programs,
   chosen for this repository. Their names cannot be enumerated to override.
@@ -205,8 +220,10 @@ Not neutralised, by design or for now:
 
 Tests: `crates/meshloop-cli/tests/host_git_hardening.rs` (Unix: a `/bin/sh` worker that
 rewrites `.git`, plants hooks, sets executable repository config, selects global-config
-drivers with `.gitattributes`, or commits symlinks at future prompt names; no marker
-file appears across verify, integrate and cleanup), `git::tests::a_modified_git_link_is_refused_before_git_runs`,
+drivers with `.gitattributes`, commits symlinks at future prompt names, or creates a
+nested repository whose own config defines a filter; no marker file appears across
+verify, integrate and cleanup), `git::tests::a_modified_git_link_is_refused_before_git_runs`,
+`git::tests::nested_git_entries_are_found_without_following_links`,
 `harness::prompt_file_tests` and `verify::tests::prompt_file_paths_are_reserved_anywhere_in_a_change`.
 
 ## Nodecode worker (#138)

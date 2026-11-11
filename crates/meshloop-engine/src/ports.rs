@@ -163,6 +163,11 @@ pub enum WorkspaceError {
         path: std::path::PathBuf,
         reason: String,
     },
+    /// An entry named `.git` below the worktree's top level (a nested repository or
+    /// link); `path` is worktree-relative. Nothing was staged (#180).
+    NestedGit {
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +182,8 @@ pub struct DiffSummary {
     pub head: String,
     pub files: Vec<String>,
     pub stat_redacted: String,
+    /// Gitlink (submodule) entries new or changed in `head` against `base` (#180).
+    pub gitlinks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

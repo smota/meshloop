@@ -64,7 +64,7 @@ pub fn reserved_paths(files: &[String]) -> Vec<&String> {
         .iter()
         .filter(|file| {
             file.split(['/', '\\'])
-                .any(|part| part.starts_with(PROMPT_FILE_PREFIX))
+                .any(|part| part.to_ascii_lowercase().starts_with(PROMPT_FILE_PREFIX))
         })
         .collect()
 }
@@ -152,10 +152,11 @@ mod tests {
             "nested/.meshloop-prompt-2".to_string(),
             "docs\\.meshloop-prompt-x\\a".to_string(),
             "meshloop-prompt-1".to_string(),
+            ".MeshLoop-Prompt-9".to_string(),
         ];
         assert_eq!(
             reserved_paths(&files),
-            vec![&files[1], &files[2], &files[3]]
+            vec![&files[1], &files[2], &files[3], &files[5]]
         );
         assert!(reserved_paths(&["README.md".to_string()]).is_empty());
     }
@@ -167,6 +168,7 @@ mod tests {
             head: "a".into(),
             files: vec![],
             stat_redacted: String::new(),
+            gitlinks: vec![],
         };
         assert_eq!(git_diff_exit_code(&diff, false), 1);
         assert_eq!(git_diff_exit_code(&diff, true), 0);

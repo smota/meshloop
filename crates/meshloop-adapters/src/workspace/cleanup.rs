@@ -209,6 +209,7 @@ fn git_facts(path: &Path, checkout: &Path, retained: Option<&ObjectId>) -> Clean
         &[
             "status",
             "--porcelain",
+            "--ignore-submodules=all",
             "--ignored",
             "--untracked-files=all",
             "-z",

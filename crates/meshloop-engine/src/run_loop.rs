@@ -1894,6 +1894,15 @@ impl<'a> RunLoop<'a> {
                 output_redacted: format!("changed {:?}", diff.files),
             }));
         }
+        if !diff.gitlinks.is_empty() {
+            rows.push(Evidence::Deterministic(DeterministicEvidence {
+                candidate: candidate_ref.clone(),
+                tool: "gitlinks".into(),
+                tool_version: "n/a".into(),
+                exit_code: 1,
+                output_redacted: format!("new gitlink (submodule) entries: {:?}", diff.gitlinks),
+            }));
+        }
         let reserved = reserved_paths(&diff.files);
         if !reserved.is_empty() {
             rows.push(Evidence::Deterministic(DeterministicEvidence {
@@ -1973,6 +1982,10 @@ impl<'a> RunLoop<'a> {
         let _ = self.workspace.remove_file(wt, prompt);
         let revision = match self.workspace.commit_all(wt, commit_message) {
             Ok(rev) => rev,
+            // A refused worktree fails the attempt with its reason (#180).
+            Err(e) if worktree_refusal(&e).is_some() => {
+                return Err(OrchestratorError::Workspace(e));
+            }
             Err(_) => return Ok(None),
         };
         let (rows, lattice, diag) =
@@ -2245,11 +2258,10 @@ impl<'a> RunLoop<'a> {
         );
         let mut current_revision = match commit {
             Ok(revision) => revision,
-            // The worker modified its worktree's `.git` link: git was not run there,
-            // and the attempt fails with that reason (#180).
-            Err(WorkspaceError::GitLinkModified { reason, .. }) => {
-                return self
-                    .fail_modified_git_link(graph_id, node, attempt_id, tier, candidate, &reason);
+            // The worker modified its worktree's `.git` link or left a nested `.git`:
+            // git was not run there, and the attempt fails with that reason (#180).
+            Err(e) if worktree_refusal(&e).is_some() => {
+                return self.fail_refused_worktree(graph_id, node, attempt_id, tier, candidate, &e);
             }
             Err(e) => return Err(e.into()),
         };
@@ -2336,7 +2348,7 @@ impl<'a> RunLoop<'a> {
                             }
                             MicroRepairFollow::Abort => break,
                             MicroRepairFollow::Heavy => {
-                                match self.dispatch_repair_round(
+                                let round = self.dispatch_repair_round(
                                     node,
                                     attempt_id,
                                     wt,
@@ -2346,7 +2358,16 @@ impl<'a> RunLoop<'a> {
                                     &commit_msg,
                                     &current_diag,
                                     &negative_constraint,
-                                )? {
+                                );
+                                if let Err(OrchestratorError::Workspace(e)) = &round
+                                    && worktree_refusal(e).is_some()
+                                {
+                                    let e = e.clone();
+                                    return self.fail_refused_worktree(
+                                        graph_id, node, attempt_id, tier, candidate, &e,
+                                    );
+                                }
+                                match round? {
                                     Some(tick) => {
                                         rows = tick.rows;
                                         current_diag = tick.diag;
@@ -2406,7 +2427,7 @@ impl<'a> RunLoop<'a> {
                             }
                             MicroRepairFollow::Abort => break,
                             MicroRepairFollow::Heavy => {
-                                match self.dispatch_repair_round(
+                                let round = self.dispatch_repair_round(
                                     node,
                                     attempt_id,
                                     wt,
@@ -2416,7 +2437,16 @@ impl<'a> RunLoop<'a> {
                                     &commit_msg,
                                     &current_diag,
                                     &negative_constraint,
-                                )? {
+                                );
+                                if let Err(OrchestratorError::Workspace(e)) = &round
+                                    && worktree_refusal(e).is_some()
+                                {
+                                    let e = e.clone();
+                                    return self.fail_refused_worktree(
+                                        graph_id, node, attempt_id, tier, candidate, &e,
+                                    );
+                                }
+                                match round? {
                                     Some(tick) => {
                                         rows = tick.rows;
                                         current_diag = tick.diag;
@@ -2468,17 +2498,21 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    /// Records the refused `.git` link as failing deterministic evidence and fails the
-    /// attempt (`git-link-modified`). The evidence names the worktree-relative `.git`.
-    fn fail_modified_git_link(
+    /// Records a refused worktree ([`worktree_refusal`]) as failing deterministic
+    /// evidence and fails the attempt with its reason. Evidence names only
+    /// worktree-relative paths.
+    fn fail_refused_worktree(
         &mut self,
         graph_id: &str,
         node: &meshloop_domain::task_graph::TaskNode,
         attempt_id: AttemptId,
         tier: Tier,
         candidate: &Candidate,
-        reason: &str,
+        error: &WorkspaceError,
     ) -> Result<Tick, OrchestratorError> {
+        let Some((tool, failure, output)) = worktree_refusal(error) else {
+            return Err(OrchestratorError::Workspace(error.clone()));
+        };
         self.store
             .record(Evidence::Deterministic(DeterministicEvidence {
                 candidate: CandidateRef {
@@ -2486,19 +2520,17 @@ impl<'a> RunLoop<'a> {
                     attempt_id,
                     revision: String::new(),
                 },
-                tool: "git-link".into(),
+                tool: tool.into(),
                 tool_version: "n/a".into(),
                 exit_code: 1,
-                output_redacted: format!(
-                    "refused: the worktree's .git link was modified ({reason}); git was not run"
-                ),
+                output_redacted: output,
             }))?;
         let rec = self.append_deterministic_result(
             graph_id,
             node,
             attempt_id,
             false,
-            Some("git-link-modified".into()),
+            Some(failure.into()),
         )?;
         let key = FeedbackKey {
             harness: candidate.harness.clone(),
@@ -3658,6 +3690,27 @@ fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
         output_redacted: SKIPPED_VERIFY_SUMMARY.into(),
         candidate: candidate.clone(),
     })
+}
+
+/// Workspace errors that mean worker output made the worktree unsafe for host-side
+/// git (#180): `(evidence tool, failure reason, redacted evidence output)`.
+fn worktree_refusal(error: &WorkspaceError) -> Option<(&'static str, &'static str, String)> {
+    match error {
+        WorkspaceError::GitLinkModified { reason, .. } => Some((
+            "git-link",
+            "git-link-modified",
+            format!("refused: the worktree's .git link was modified ({reason}); git was not run"),
+        )),
+        WorkspaceError::NestedGit { path } => Some((
+            "nested-git",
+            "nested-git",
+            format!(
+                "refused: {} is a nested git entry; nothing was staged",
+                path.display()
+            ),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -5692,6 +5745,7 @@ mod tests {
                 head: "rev".into(),
                 files: self.files.clone(),
                 stat_redacted: "stat".into(),
+                gitlinks: vec![],
             })
         }
         fn worktree_exists(&self, _path: &Path) -> bool {

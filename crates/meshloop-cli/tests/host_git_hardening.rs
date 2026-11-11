@@ -350,3 +350,27 @@ fn symlink_at_a_future_prompt_file_name_is_refused() {
     assert!(evidence.contains("reserved-paths"), "{evidence}");
     assert_eq!(fs::read(&victim).unwrap(), b"operator bytes\n");
 }
+
+/// (vi) The worker creates a nested repository whose own config defines a filter its
+/// own `.gitattributes` selects, and leaves a file dirty in it. Host-side status/diff
+/// recursing into it would run the filter. The attempt is refused instead.
+#[test]
+fn nested_repository_in_the_worktree_is_refused() {
+    let fixture = Fixture::new(
+        "nested",
+        r#"mkdir sub
+cd sub
+git init -q
+git config user.name w
+git config user.email w@example.invalid
+git config filter.marker.clean "$TRIGGER"
+printf '* filter=marker\n' > .gitattributes
+echo one > f
+GIT_CONFIG_GLOBAL=/dev/null git -c filter.marker.clean=cat add .gitattributes f
+GIT_CONFIG_GLOBAL=/dev/null git -c filter.marker.clean=cat commit -q -m nested
+echo two > f
+cd .."#,
+    );
+    let evidence = fixture.refused();
+    assert!(evidence.contains("nested-git"), "{evidence}");
+}
