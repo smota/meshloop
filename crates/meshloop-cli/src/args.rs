@@ -920,6 +920,7 @@ pub fn help_text() -> &'static str {
      \x20 meshloop workspace apply --cleanup --digest <64 lowercase hex> [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 meshloop workspace adopt|maintain [--apply --digest <64 lowercase hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 --cleanup is valid only with preview or apply; apply requires --cleanup and a digest and never accepts --apply; --apply with a digest is valid only with adopt or maintain; --graph is valid only with apply --cleanup.\n\
+     \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files.\n\
      \x20 meshloop priors show [--json] | priors check --file <path> [--json]   (read-only)\n\
      \x20 meshloop priors accept --file <path> --as <identity> | priors revoke --as <identity> [--json]\n\
      \x20 meshloop roles [--json]\n\
