@@ -192,6 +192,7 @@ fn seed(store: &mut SqliteStore, repo: &Path, worktree: &Path) {
             started_at: None,
             ended_at: None,
             outcome: None,
+            model_passed: None,
         })
         .unwrap();
 }

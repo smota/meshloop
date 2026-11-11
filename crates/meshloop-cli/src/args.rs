@@ -164,6 +164,35 @@ pub enum Command {
         db: Option<PathBuf>,
         worktree_base: Option<PathBuf>,
     },
+    /// Advisory routing priors (#139): `accept --file F --as ID`, `revoke --as ID`,
+    /// and the read-only `show` and `check --file F`.
+    Priors {
+        action: PriorsAction,
+        file: Option<PathBuf>,
+        identity: Option<String>,
+        config: Option<PathBuf>,
+        db: Option<PathBuf>,
+    },
+}
+
+/// `meshloop priors <action>` (#139). Only `accept` and `revoke` write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorsAction {
+    Accept,
+    Revoke,
+    Show,
+    Check,
+}
+
+impl PriorsAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Revoke => "revoke",
+            Self::Show => "show",
+            Self::Check => "check",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +382,12 @@ fn verb_flags(verb: &str) -> Option<&'static [(bool, &'static str)]> {
             (true, "--config"),
             (true, "--db"),
             (true, "--worktree-base"),
+        ],
+        "priors" => &[
+            (true, "--file"),
+            (true, "--as"),
+            (true, "--config"),
+            (true, "--db"),
         ],
         "workspace" => &[
             (false, "--cleanup"),
@@ -803,6 +838,7 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
                 worktree_base: flag_value(rest, "--worktree-base").map(PathBuf::from),
             })
         }
+        Some(v) if v == "priors" => parse_priors(&args[1..]),
         Some(v)
             if matches!(
                 v.as_str(),
@@ -817,12 +853,56 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn parse_priors(rest: &[String]) -> Result<Command, String> {
+    let names = positionals("priors", rest);
+    let action = match names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["accept"] => PriorsAction::Accept,
+        ["revoke"] => PriorsAction::Revoke,
+        ["show"] => PriorsAction::Show,
+        ["check"] => PriorsAction::Check,
+        _ => return Err("meshloop:priors requires accept, revoke, show, or check".into()),
+    };
+    let verb = action.as_str();
+    let file = flag_value(rest, "--file").map(PathBuf::from);
+    let identity = flag_value(rest, "--as");
+    let wants_file = matches!(action, PriorsAction::Accept | PriorsAction::Check);
+    let wants_identity = matches!(action, PriorsAction::Accept | PriorsAction::Revoke);
+    if wants_file && file.is_none() {
+        return Err(format!("meshloop:priors {verb} requires --file <path>"));
+    }
+    if !wants_file && has_flag(rest, "--file") {
+        return Err(format!("meshloop:priors {verb} does not take --file"));
+    }
+    if wants_identity {
+        // Required and never defaulted (ADR 0038 #139 amendment, rule 7).
+        let id = identity
+            .as_deref()
+            .ok_or_else(|| format!("meshloop:priors {verb} requires --as <identity>"))?;
+        meshloop_domain::advisory::check_identity(id)
+            .map_err(|fault| format!("meshloop:priors {verb}: {}", fault.message()))?;
+    } else if has_flag(rest, "--as") {
+        return Err(format!("meshloop:priors {verb} does not take --as"));
+    }
+    Ok(Command::Priors {
+        action,
+        file,
+        identity,
+        config: flag_value(rest, "--config").map(PathBuf::from),
+        db: flag_value(rest, "--db").map(PathBuf::from),
+    })
+}
+
 pub fn help_text() -> &'static str {
     "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
-     \x20 meshloop:watch | meshloop:events | meshloop:workspace\n\
+     \x20 meshloop:watch | meshloop:events | meshloop:workspace | meshloop:priors\n\
      CLI verbs (binary already namespaces): meshloop plan|run|status|... or meshloop meshloop:plan\n\
      Slash: /meshloop:plan   MCP tools: meshloop_plan\n\
      Usage:\n\
@@ -837,6 +917,8 @@ pub fn help_text() -> &'static str {
      \x20 meshloop events [--graph <id>] [--after <event id>] [--limit <n, default 1000>] [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
      \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
+     \x20 meshloop priors show [--json] | priors check --file <path> [--json]   (read-only)\n\
+     \x20 meshloop priors accept --file <path> --as <identity> | priors revoke --as <identity> [--json]\n\
      \x20 meshloop roles [--json]\n\
      \x20 meshloop doctor [--config <path>] [--db <path>] [--json]\n\
      \x20 meshloop orchestrate --task <id> --model-a <ref> --model-b <ref> [--json]\n\
@@ -955,6 +1037,10 @@ mod tests {
         "workspace adopt --config c --db d --worktree-base w",
         "workspace adopt --apply --digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --config c --db d --worktree-base w",
         "workspace maintain --config c --db d --worktree-base w",
+        "priors show --config c --db d",
+        "priors check --file f --config c --db d",
+        "priors accept --file f --as me --config c --db d",
+        "priors revoke --as me --config c --db d",
         "mcp",
         "roles",
     ];
@@ -1004,6 +1090,56 @@ mod tests {
         assert!(parse(&argv("status --graph --not-a-flag")).is_ok());
         // The skipped value does not shield the token after it.
         assert!(parse(&argv("status --graph g --bogus")).is_err());
+    }
+
+    /// LP test 17: `--as` is required for the two writing verbs and each bad form is
+    /// rejected before anything is read or written.
+    #[test]
+    fn priors_as_validation_rejects_each_bad_form() {
+        let parse_as = |id: &str| {
+            parse(&[
+                "priors".to_string(),
+                "revoke".into(),
+                "--as".into(),
+                id.to_string(),
+            ])
+        };
+        assert!(parse_as("sam").is_ok());
+        for (bad, why) in [
+            ("", "must not be empty"),
+            ("-sam", "must not start with '-'"),
+            ("--json", "must not start with '-'"),
+            ("sam\nroot", "control characters"),
+            ("sam\u{7f}", "control characters"),
+        ] {
+            let err = parse_as(bad).expect_err(bad);
+            assert!(err.contains(why), "{bad:?}: {err}");
+        }
+        let long = "a".repeat(129);
+        assert!(parse_as(&long).unwrap_err().contains("128 bytes"));
+        assert!(parse_as(&"a".repeat(128)).is_ok());
+        for line in [
+            "priors revoke",
+            "priors accept --file f",
+            "priors accept --as me",
+            "priors check",
+            "priors show --as me",
+            "priors check --file f --as me",
+            "priors revoke --as me --file f",
+            "priors",
+            "priors promote --as me",
+        ] {
+            assert!(parse(&argv(line)).is_err(), "{line}");
+        }
+        assert!(matches!(
+            parse(&argv("priors accept --file f --as me"))
+                .unwrap()
+                .command,
+            Command::Priors {
+                action: PriorsAction::Accept,
+                ..
+            }
+        ));
     }
 
     #[test]

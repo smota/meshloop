@@ -503,6 +503,55 @@ pub(super) fn validate8(conn: &Connection) -> Result<(), StoreError> {
     }
     Ok(())
 }
+/// Schema v9 (#139, ADR 0038 amendment 2026-11-10): the append-only advisory priors
+/// promotion ledger, the per-attempt advisory routing record, and the write-once
+/// `attempts.model_passed` column. Additive: existing rows are untouched and older
+/// attempt rows read `model_passed` as NULL.
+pub(super) const ADVISORY_SCHEMA: &str = "
+CREATE TABLE advisory_promotions (
+    seq INTEGER PRIMARY KEY,
+    action TEXT NOT NULL CHECK(action IN ('accept','revoke')),
+    priors_sha256 TEXT CHECK(priors_sha256 IS NULL OR length(priors_sha256)=64),
+    bytes BLOB CHECK(bytes IS NULL OR length(bytes)<=1048576),
+    identity TEXT NOT NULL CHECK(length(identity) BETWEEN 1 AND 128),
+    recorded_at TEXT NOT NULL,
+    source_path TEXT,
+    resolved_refs INTEGER NOT NULL CHECK(resolved_refs>=0),
+    unresolved_refs INTEGER NOT NULL CHECK(unresolved_refs>=0),
+    ignored_json TEXT NOT NULL,
+    CHECK((action='accept' AND bytes IS NOT NULL AND priors_sha256 IS NOT NULL) OR (action='revoke' AND bytes IS NULL))
+);
+CREATE TRIGGER advisory_promotions_no_update BEFORE UPDATE ON advisory_promotions BEGIN SELECT RAISE(ABORT,'advisory_promotions is append-only'); END;
+CREATE TRIGGER advisory_promotions_no_delete BEFORE DELETE ON advisory_promotions BEGIN SELECT RAISE(ABORT,'advisory_promotions is append-only'); END;
+CREATE TABLE advisory_routing (
+    attempt_id INTEGER PRIMARY KEY REFERENCES attempts(attempt_id),
+    priors_sha256 TEXT NOT NULL,
+    changed_top BOOLEAN NOT NULL CHECK(changed_top IN (0,1))
+);
+ALTER TABLE attempts ADD COLUMN model_passed BOOLEAN CHECK(model_passed IS NULL OR model_passed IN (0,1));
+";
+pub(super) fn validate9(conn: &Connection) -> Result<(), StoreError> {
+    validate8(conn)?;
+    let canonical = Connection::open_in_memory().map_err(err)?;
+    canonical.execute_batch(BASE_SCHEMA).map_err(err)?;
+    canonical.execute_batch(ADVISORY_SCHEMA).map_err(err)?;
+    for table in ["advisory_promotions", "advisory_routing"] {
+        if owned_objects(conn, table)? != owned_objects(&canonical, table)? {
+            return Err(err("noncanonical v9 schema"));
+        }
+    }
+    columns(conn, "attempts", &["model_passed"])
+}
+fn migrate_v8_to_v9(conn: &Connection) -> Result<(), StoreError> {
+    validate8(conn)?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(err)?;
+    tx.execute_batch(ADVISORY_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=9", [])
+        .map_err(err)?;
+    validate9(&tx)?;
+    tx.commit().map_err(err)
+}
 fn migrate_v7_to_v8(conn: &Connection) -> Result<(), StoreError> {
     validate7(conn)?;
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
@@ -511,7 +560,8 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<(), StoreError> {
     tx.execute("UPDATE schema_meta SET version=8", [])
         .map_err(err)?;
     validate8(&tx)?;
-    tx.commit().map_err(err)
+    tx.commit().map_err(err)?;
+    migrate_v8_to_v9(conn)
 }
 fn migrate_v6_to_v7(conn: &Connection) -> Result<(), StoreError> {
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
@@ -528,8 +578,11 @@ pub(super) fn migrate_with_fault(
     fail_after_ddl: bool,
 ) -> Result<(), StoreError> {
     let version = schema_version(conn)?;
+    if version == Some(9) {
+        return validate9(conn);
+    }
     if version == Some(8) {
-        return validate8(conn);
+        return migrate_v8_to_v9(conn);
     }
     if version == Some(7) {
         return migrate_v7_to_v8(conn);
@@ -566,5 +619,9 @@ CREATE TABLE workspace_run_bindings(graph_id TEXT PRIMARY KEY);")
     tx.execute("UPDATE schema_meta SET version=8", [])
         .map_err(err)?;
     validate8(&tx)?;
+    tx.execute_batch(ADVISORY_SCHEMA).map_err(err)?;
+    tx.execute("UPDATE schema_meta SET version=9", [])
+        .map_err(err)?;
+    validate9(&tx)?;
     tx.commit().map_err(err)
 }

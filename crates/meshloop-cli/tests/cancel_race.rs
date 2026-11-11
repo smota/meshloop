@@ -461,6 +461,7 @@ mod stale_cancel {
                 started_at: Some("1".into()),
                 ended_at: None,
                 outcome: None,
+                model_passed: None,
             })
             .unwrap();
 

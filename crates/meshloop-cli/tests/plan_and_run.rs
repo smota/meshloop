@@ -1621,6 +1621,7 @@ fn inspect_lists_attempts_with_redacted_evidence_and_status_summarizes_run() {
                     started_at: Some(start.into()),
                     ended_at: Some(end.into()),
                     outcome: Some(outcome.into()),
+                    model_passed: None,
                 })
                 .unwrap();
             attempt_id

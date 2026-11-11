@@ -11,6 +11,7 @@ pub mod orchestrator;
 pub mod origin;
 pub mod planner;
 pub mod ports;
+pub mod priors;
 pub mod recovery;
 pub mod router;
 pub mod run_loop;

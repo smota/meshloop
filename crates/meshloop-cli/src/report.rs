@@ -161,6 +161,10 @@ pub fn attempt_json(a: &AttemptView) -> serde_json::Value {
         "duration_s": a.duration_s,
         "outcome": a.outcome,
         "base_revision": a.base_revision,
+        // Read-only attempt fields for the advisory priors fold (#139).
+        "dispatch_mode": a.dispatch_mode.as_str(),
+        "check_result": a.check_result.map(|c| c.as_str()),
+        "model_passed": a.model_passed,
         "evidence": a.evidence.iter().map(|e| serde_json::json!({
             "kind": e.kind,
             "tool": e.tool,
@@ -227,7 +231,7 @@ pub fn format_attempt(a: &AttemptView) -> String {
 
 pub fn banner() -> String {
     "Meshloop: agent-session control plane (native Windows). Binary is the engine; skills/MCP are the UX.\n\
-     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, workspace, mcp, bundle.\n\
+     Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, workspace, priors, mcp, bundle.\n\
      Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
      Live workers are direct CLI subprocesses in Git worktrees. --fixture-only is the CI subprocess double.\n"
         .into()
@@ -253,6 +257,7 @@ mod tests {
             pane_id: None,
             live: live.map(str::to_string),
             deliverable: None,
+            tier: Tier::Tier2,
         }
     }
 

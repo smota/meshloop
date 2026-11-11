@@ -70,6 +70,11 @@ impl RoutingSignal for TierEfficiencySignal {
 
 pub struct HistoricalSuccessSignal;
 
+/// The arm an oracle is queried with: `harness\nmodel_ref\nTierN`.
+pub fn oracle_arm(harness: &str, model_ref: &str, tier: TierKey) -> String {
+    format!("{harness}\n{model_ref}\n{tier:?}")
+}
+
 /// Local mean, optionally shrunk toward an oracle prior by at most 0.25.
 /// Pulls are real feedback counts. A missing oracle, a declined charge, or a
 /// predict error returns the local mean and never fails selection.
@@ -101,7 +106,7 @@ impl RoutingSignal for HistoricalSuccessSignal {
         {
             return SignalScore(mu_local);
         }
-        let arm = format!("{}\n{}\n{tier:?}", candidate.harness, candidate.model_ref);
+        let arm = oracle_arm(&candidate.harness, &candidate.model_ref, tier);
         match oracle.predict(&OracleQuery { arm, pulls: n }) {
             Ok(outcome) => SignalScore(fused_historical_mean(
                 mu_local,
@@ -880,6 +885,237 @@ mod tests {
             SignalScore(0.75)
         );
         assert_eq!(ledger.remaining(), 0);
+    }
+
+    fn priors_oracle(entries: &[(&str, &str, Tier, u32, u32)]) -> crate::priors::PriorsOracle {
+        use meshloop_domain::advisory::{AttemptRef, DispatchMode, PriorEntry, PriorKey};
+        let entries: Vec<PriorEntry> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, (h, m, tier, n, s))| PriorEntry {
+                index,
+                key: PriorKey {
+                    harness: (*h).into(),
+                    model_ref: (*m).into(),
+                    tier: *tier,
+                    mode: DispatchMode::Subprocess,
+                },
+                attempts: *n,
+                successes: *s,
+                provenance: (0..*n)
+                    .map(|i| AttemptRef {
+                        graph_id: "g".into(),
+                        task_id: 1,
+                        attempt_id: u64::from(i),
+                        passed: i < *s,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let dispatch = entries_harnesses(&entries);
+        crate::priors::PriorsOracle::new(
+            &crate::ports::PriorsSnapshot {
+                sequence: 1,
+                priors_sha256: "0".repeat(64),
+                entries,
+            },
+            &dispatch,
+        )
+    }
+
+    fn entries_harnesses(
+        entries: &[meshloop_domain::advisory::PriorEntry],
+    ) -> HashMap<String, meshloop_domain::advisory::DispatchMode> {
+        entries
+            .iter()
+            .map(|e| {
+                (
+                    e.key.harness.clone(),
+                    meshloop_domain::advisory::DispatchMode::Subprocess,
+                )
+            })
+            .collect()
+    }
+
+    /// LP test 2: for any π and n, the fused mean stays within 0.25 of the local mean.
+    #[test]
+    fn fused_mean_never_moves_more_than_the_bound() {
+        for n in 0u64..=40 {
+            for s in 0..=n {
+                let mu_local = if n == 0 { 0.5 } else { s as f64 / n as f64 };
+                for step in 0..=100 {
+                    let pi = f64::from(step) / 100.0;
+                    let fused = fused_historical_mean(mu_local, s as f64, n, pi);
+                    assert!(
+                        (fused - mu_local).abs() <= 0.25 + 1e-12,
+                        "n={n} s={s} pi={pi} fused={fused}"
+                    );
+                    assert!((0.0..=1.0).contains(&fused));
+                }
+            }
+        }
+    }
+
+    /// LP test 2, "no doubling": with priors on, a candidate's whole routing score moves
+    /// by at most 0.25, because only the historical-success signal reads the oracle and
+    /// it clips once.
+    #[test]
+    fn priors_move_the_total_score_by_at_most_the_bound() {
+        let router = Router::default();
+        for (n, s) in [(0u32, 0u32), (1, 0), (3, 3), (10, 2), (40, 39)] {
+            let mut feedback = crate::ports::InMemoryFeedbackStore::default();
+            let key = FeedbackKey {
+                harness: "codex".into(),
+                model_ref: "m".into(),
+                tier: TierKey::Tier2,
+            };
+            for i in 0..n {
+                feedback.record_outcome(&key, i < s).unwrap();
+            }
+            for (pn, ps) in [(5u32, 0u32), (5, 5), (4096, 4096), (4096, 0), (20, 10)] {
+                let oracle = priors_oracle(&[("codex", "m", Tier::Tier2, pn, ps)]);
+                let headroom = HashMap::new();
+                let off = ctx(Tier::Tier2, &headroom, &feedback);
+                let mut on = ctx(Tier::Tier2, &headroom, &feedback);
+                on.oracle = Some(&oracle);
+                let total = |c: &RoutingContext| -> f64 {
+                    router
+                        .signals
+                        .iter()
+                        .map(|sig| sig.score(&codex(), c).0)
+                        .sum()
+                };
+                let moved = (total(&on) - total(&off)).abs();
+                assert!(
+                    moved <= 0.25 + 1e-12,
+                    "n={n} s={s} prior={ps}/{pn} moved {moved}"
+                );
+            }
+        }
+    }
+
+    /// LP test 1: priors never add or remove a candidate, whatever they say, including
+    /// priors for candidates the filters remove and for arms nobody configured.
+    #[test]
+    fn priors_never_change_the_candidate_set() {
+        let configured = vec![
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "top".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "mid".into(),
+                model_tier: ModelCapabilityTier::MidTier,
+            },
+            Candidate {
+                harness: "cooled".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "unprobed".into(),
+                model_ref: "m".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        profiles.insert("cooled".into(), profile(true, true));
+        let mut quotas = HashMap::new();
+        let mut q = QuotaState::default();
+        q.on_capacity_exhausted(SystemTime::now(), std::time::Duration::from_secs(3600));
+        quotas.insert("cooled".into(), q);
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let headroom = HashMap::new();
+        let now = SystemTime::now();
+        for tier in [Tier::Tier1, Tier::Tier2, Tier::Tier3] {
+            let off: std::collections::BTreeSet<_> = Router::default()
+                .select(
+                    &configured,
+                    &profiles,
+                    &quotas,
+                    now,
+                    &ctx(tier, &headroom, &feedback),
+                )
+                .into_iter()
+                .map(|c| (c.harness.clone(), c.model_ref.clone()))
+                .collect();
+            for (pn, ps) in [(5u32, 0u32), (5, 5), (4096, 4096)] {
+                let oracle = priors_oracle(&[
+                    ("codex", "top", tier, pn, ps),
+                    ("codex", "mid", tier, pn, pn - ps),
+                    ("cooled", "m", tier, pn, ps),
+                    ("unprobed", "m", tier, pn, ps),
+                    ("ghost", "m", tier, pn, ps),
+                ]);
+                let mut routing = ctx(tier, &headroom, &feedback);
+                routing.oracle = Some(&oracle);
+                let on: std::collections::BTreeSet<_> = Router::default()
+                    .select(&configured, &profiles, &quotas, now, &routing)
+                    .into_iter()
+                    .map(|c| (c.harness.clone(), c.model_ref.clone()))
+                    .collect();
+                assert_eq!(on, off, "tier {tier:?} prior {ps}/{pn}");
+                assert!(on.iter().all(|(h, _)| h == "codex"));
+            }
+        }
+    }
+
+    /// A strong prior reorders two otherwise equal fresh arms, within the bound.
+    #[test]
+    fn a_prior_reorders_equal_fresh_arms() {
+        let configured = vec![
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "weak".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+            Candidate {
+                harness: "codex".into(),
+                model_ref: "strong".into(),
+                model_tier: ModelCapabilityTier::TopTier,
+            },
+        ];
+        let mut profiles = HashMap::new();
+        profiles.insert("codex".into(), profile(true, true));
+        let feedback = crate::ports::InMemoryFeedbackStore::default();
+        let headroom = HashMap::new();
+        let off = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &ctx(Tier::Tier2, &headroom, &feedback),
+        );
+        assert_eq!(off[0].model_ref, "weak");
+        let oracle = priors_oracle(&[
+            ("codex", "weak", Tier::Tier2, 8, 1),
+            ("codex", "strong", Tier::Tier2, 8, 8),
+        ]);
+        let mut routing = ctx(Tier::Tier2, &headroom, &feedback);
+        routing.oracle = Some(&oracle);
+        let on = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &routing,
+        );
+        assert_eq!(on[0].model_ref, "strong");
+        // A prior keyed on another task tier does not apply.
+        let other_tier = priors_oracle(&[("codex", "strong", Tier::Tier3, 8, 8)]);
+        let mut routing = ctx(Tier::Tier2, &headroom, &feedback);
+        routing.oracle = Some(&other_tier);
+        let on = Router::default().select(
+            &configured,
+            &profiles,
+            &HashMap::new(),
+            SystemTime::now(),
+            &routing,
+        );
+        assert_eq!(on[0].model_ref, "weak");
     }
 
     #[test]

@@ -762,8 +762,12 @@ fn apply_selected(
             Connection::open_with_flags(scope.ledger, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(cleanup_error)?;
         match super::schema::schema_version(&conn)? {
-            Some(8) => {
-                super::schema::validate8(&conn)?;
+            Some(version @ (8 | 9)) => {
+                if version == 9 {
+                    super::schema::validate9(&conn)?;
+                } else {
+                    super::schema::validate8(&conn)?;
+                }
                 let mut stmt = conn.prepare("SELECT candidate_key,CASE WHEN MAX(step='blocked') THEN 'blocked' WHEN MAX(step='completed') THEN 'completed' ELSE 'intent' END,expected_before_token FROM cleanup_journal WHERE repo_id=?1 AND digest=?2 GROUP BY candidate_key,expected_before_token ORDER BY candidate_key").map_err(cleanup_error)?;
                 journal = stmt
                     .query_map(params![observed.repository_id.as_str(), digest], |r| {

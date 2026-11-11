@@ -386,16 +386,27 @@ impl SqliteStore {
         conn.pragma_update(None, "query_only", true)
             .map_err(error)?;
 
-        match super::schema::schema_version(&conn)? {
-            Some(7) => super::schema::validate7(&conn)?,
-            Some(8) => super::schema::validate8(&conn)?,
+        let advisory_schema = match super::schema::schema_version(&conn)? {
+            Some(7) => {
+                super::schema::validate7(&conn)?;
+                false
+            }
+            Some(8) => {
+                super::schema::validate8(&conn)?;
+                false
+            }
+            Some(9) => {
+                super::schema::validate9(&conn)?;
+                true
+            }
             Some(1 | 2 | 4 | 5 | 6) => return Err(StoreError::SchemaUpgradeRequired),
             _ => return Err(refused()),
-        }
+        };
         verify_handle(&handle, path)?;
         Ok(Some(Self {
             conn,
             read_only: true,
+            advisory_schema,
             database_handle: Some(handle),
             database_identity: Some(identity),
             session_spend: meshloop_engine::ports::SessionSpendLedger::new(0, 1),
@@ -1417,6 +1428,7 @@ impl RuntimeLedger for SqliteStore {
             task_id: r.task_id,
             harness: r.harness.clone(),
             model_ref: r.model_ref.clone(),
+            model_passed: None,
             location: PortableLocation {
                 root_alias: artifact.root_alias,
                 relative_path: artifact.relative_path,
@@ -1510,6 +1522,7 @@ impl RuntimeLedger for SqliteStore {
                         task_id: row.task_id,
                         harness: row.harness,
                         model_ref: row.model_ref,
+                        model_passed: row.model_passed,
                         location: PortableLocation {
                             root_alias: RootAlias::new(m.1).map_err(error)?,
                             relative_path: RelativePath::new(m.2).map_err(error)?,

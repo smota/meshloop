@@ -347,9 +347,25 @@ impl CliHarness {
     }
 }
 
+impl CliHarness {
+    /// Whether a dispatch substitutes `{model_ref}` into its arguments: rendering the
+    /// template with two different refs gives different arguments. Exact for the
+    /// renderer, including tokens it leaves literal.
+    pub fn template_passes_model_ref(template: &[String]) -> bool {
+        let render = |model_ref: &str| {
+            render_invoke_args(template, PromptVia::File, Path::new(""), model_ref, "")
+        };
+        render("a") != render("b")
+    }
+}
+
 impl HarnessCapabilities for CliHarness {
     fn supports_nonblocking_collection(&self) -> bool {
         true
+    }
+
+    fn passes_model_ref(&self) -> bool {
+        Self::template_passes_model_ref(&self.config.invoke_args_template)
     }
 
     fn cancel_owned(&self, handle: &HarnessHandle, timeout: Duration) -> Result<(), HarnessError> {
@@ -722,6 +738,37 @@ impl HarnessCapabilities for CliHarness {
 mod capture_tests {
     use super::*;
     use crate::process::TestCommandExt;
+
+    /// #139: `model_passed` is true exactly when a dispatch substitutes `{model_ref}`.
+    #[test]
+    fn model_ref_is_passed_only_when_the_template_substitutes_it() {
+        let passes = |args: &[&str]| {
+            CliHarness::template_passes_model_ref(
+                &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert!(passes(&["exec", "--model", "{model_ref}", "-"]));
+        assert!(passes(&["--model={model_ref}"]));
+        assert!(!passes(&["--prompt-file", "{prompt_file}"]));
+        assert!(!passes(&[]));
+        // Tokens the renderer leaves literal do not pass the model.
+        assert!(!passes(&["{model_ref"]));
+        assert!(!passes(&["{x{model_ref}"]));
+        assert!(!passes(&["{model}"]));
+        let harness = CliHarness::new(CliHarnessConfig {
+            name: "test".into(),
+            executable: PathBuf::from("missing-fixture"),
+            version_args: vec![],
+            probe_timeout: Duration::from_secs(1),
+            invoke_args_template: vec!["-m".into(), "{model_ref}".into()],
+            prompt_via: PromptVia::Stdin,
+        });
+        assert!(harness.passes_model_ref());
+        assert_eq!(
+            harness.dispatch_mode(),
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        );
+    }
     #[test]
     fn inflight_owned_cancel_releases_registry_and_never_resurrects_removed_token() {
         let harness = CliHarness::new(CliHarnessConfig {

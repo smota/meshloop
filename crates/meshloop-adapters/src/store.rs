@@ -15,6 +15,13 @@ use meshloop_engine::ports::{
     RoutingFeedbackStore, RunRow, RunStore, SessionSpendLedger, StoreError, TransitionRecord,
 };
 
+/// Both attempt upserts. `model_passed` is write-once: the first non-NULL value stays.
+const UPSERT_ATTEMPT: &str = "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome, model_passed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(attempt_id) DO UPDATE SET
+                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, pane_id=?9, started_at=?10, ended_at=?11, outcome=?12,
+                    model_passed=COALESCE(attempts.model_passed, excluded.model_passed)";
+
 pub struct SqliteStore {
     pub(crate) conn: Connection,
     pub(crate) read_only: bool,
@@ -22,6 +29,9 @@ pub struct SqliteStore {
     pub(crate) database_identity: Option<meshloop_domain::workspace::NativeIdentity>,
     /// In-process oracle budget. Not loaded or written by schema SQL.
     pub(crate) session_spend: SessionSpendLedger,
+    /// Schema v9 or later: `attempts.model_passed` and the advisory tables exist (#139).
+    /// A read-only store of v7 or v8 is read without them.
+    pub(crate) advisory_schema: bool,
     pub(crate) telemetry: crate::telemetry::Transitions,
 }
 
@@ -37,6 +47,7 @@ impl SqliteStore {
             database_handle: None,
             database_identity: None,
             session_spend: SessionSpendLedger::new(0, 1),
+            advisory_schema: true,
             telemetry: crate::telemetry::Transitions::default(),
         })
     }
@@ -66,6 +77,7 @@ impl SqliteStore {
             database_handle: Some(database_handle),
             database_identity: Some(database_identity),
             session_spend: SessionSpendLedger::new(0, 1),
+            advisory_schema: true,
             telemetry: crate::telemetry::Transitions::default(),
         })
     }
@@ -94,23 +106,23 @@ impl SqliteStore {
 
         if let Some(row) = attempt {
             tx.execute(
-                "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(attempt_id) DO UPDATE SET
-                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, pane_id=?9, started_at=?10, ended_at=?11, outcome=?12",
+                UPSERT_ATTEMPT,
                 params![
                     row.attempt_id.0,
                     row.graph_id,
                     row.task_id.0,
                     row.harness,
                     row.model_ref,
-                    row.worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    row.worktree_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
                     row.pid.map(|p| p as i64),
                     row.image_name,
                     row.pane_id,
                     row.started_at,
                     row.ended_at,
                     row.outcome,
+                    row.model_passed,
                 ],
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
@@ -597,6 +609,60 @@ impl RunStore for SqliteStore {
         Some(&self.session_spend)
     }
 
+    fn advisory_priors(&self) -> Option<&dyn meshloop_engine::ports::AdvisoryPriorsSource> {
+        Some(self)
+    }
+
+    fn save_attempt_routed(
+        &mut self,
+        row: &AttemptRow,
+        routing: Option<&meshloop_engine::ports::AdvisoryRouting>,
+    ) -> Result<(), StoreError> {
+        let Some(routing) = routing else {
+            return self.save_attempt(row);
+        };
+        self.reject_bound_graph(&row.graph_id)?;
+        self.reject_legacy_attempt(row.attempt_id)?;
+        if routing.attempt_id != row.attempt_id {
+            return Err(StoreError::Corrupt(
+                "advisory routing names another attempt".into(),
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        tx.execute(
+            UPSERT_ATTEMPT,
+            params![
+                row.attempt_id.0,
+                row.graph_id,
+                row.task_id.0,
+                row.harness,
+                row.model_ref,
+                row.worktree_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                row.pid.map(|p| p as i64),
+                row.image_name,
+                row.pane_id,
+                row.started_at,
+                row.ended_at,
+                row.outcome,
+                row.model_passed,
+            ],
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+        // Write-once: the routing decision made at dispatch is never rewritten.
+        tx.execute(
+            "INSERT INTO advisory_routing (attempt_id, priors_sha256, changed_top) VALUES (?1, ?2, ?3)
+             ON CONFLICT(attempt_id) DO NOTHING",
+            params![routing.attempt_id.0, routing.priors_sha256, routing.changed_top],
+        )
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+        tx.commit().map_err(|e| StoreError::Io(e.to_string()))
+    }
+
     fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError> {
         self.reject_bound_graph(&row.graph_id)?;
         let plan_state = match row.plan_state {
@@ -763,23 +829,23 @@ impl RunStore for SqliteStore {
         self.reject_legacy_attempt(row.attempt_id)?;
         self.conn
             .execute(
-                "INSERT INTO attempts (attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(attempt_id) DO UPDATE SET
-                    harness=?4, model_ref=?5, worktree_path=?6, pid=?7, image_name=?8, pane_id=?9, started_at=?10, ended_at=?11, outcome=?12",
+                UPSERT_ATTEMPT,
                 params![
                     row.attempt_id.0,
                     row.graph_id,
                     row.task_id.0,
                     row.harness,
                     row.model_ref,
-                    row.worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    row.worktree_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
                     row.pid.map(|p| p as i64),
                     row.image_name,
                     row.pane_id,
                     row.started_at,
                     row.ended_at,
                     row.outcome,
+                    row.model_passed,
                 ],
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
@@ -787,28 +853,32 @@ impl RunStore for SqliteStore {
     }
 
     fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError> {
+        // A read-only v7/v8 store has no `model_passed` column: its rows read NULL.
+        let sql = if self.advisory_schema {
+            "SELECT attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome, model_passed
+                 FROM attempts WHERE attempt_id = ?1"
+        } else {
+            "SELECT attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome, NULL
+                 FROM attempts WHERE attempt_id = ?1"
+        };
         self.conn
-            .query_row(
-                "SELECT attempt_id, graph_id, task_id, harness, model_ref, worktree_path, pid, image_name, pane_id, started_at, ended_at, outcome
-                 FROM attempts WHERE attempt_id = ?1",
-                params![attempt_id.0],
-                |r| {
-                    Ok(AttemptRow {
-                        attempt_id: AttemptId(r.get(0)?),
-                        graph_id: r.get(1)?,
-                        task_id: TaskId(r.get(2)?),
-                        harness: r.get(3)?,
-                        model_ref: r.get(4)?,
-                        worktree_path: r.get::<_, Option<String>>(5)?.map(PathBuf::from),
-                        pid: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),
-                        image_name: r.get(7)?,
-                        pane_id: r.get(8)?,
-                        started_at: r.get(9)?,
-                        ended_at: r.get(10)?,
-                        outcome: r.get(11)?,
-                    })
-                },
-            )
+            .query_row(sql, params![attempt_id.0], |r| {
+                Ok(AttemptRow {
+                    attempt_id: AttemptId(r.get(0)?),
+                    graph_id: r.get(1)?,
+                    task_id: TaskId(r.get(2)?),
+                    harness: r.get(3)?,
+                    model_ref: r.get(4)?,
+                    worktree_path: r.get::<_, Option<String>>(5)?.map(PathBuf::from),
+                    pid: r.get::<_, Option<i64>>(6)?.map(|p| p as u32),
+                    image_name: r.get(7)?,
+                    pane_id: r.get(8)?,
+                    started_at: r.get(9)?,
+                    ended_at: r.get(10)?,
+                    outcome: r.get(11)?,
+                    model_passed: r.get(12)?,
+                })
+            })
             .optional()
             .map_err(|e| StoreError::Io(e.to_string()))
     }
@@ -886,6 +956,13 @@ impl RunStore for SqliteStore {
             .map_err(|e| StoreError::Io(e.to_string()))?;
         self.conn
             .execute("DELETE FROM events WHERE graph_id = ?1", params![graph_id])
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        // The routing records of the attempts being deleted go with them (#139).
+        self.conn
+            .execute(
+                "DELETE FROM advisory_routing WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE graph_id = ?1)",
+                params![graph_id],
+            )
             .map_err(|e| StoreError::Io(e.to_string()))?;
         self.conn
             .execute(
@@ -1077,6 +1154,7 @@ mod tests {
             started_at: None,
             ended_at: None,
             outcome: None,
+            model_passed: None,
         };
         store.save_attempt(&row).unwrap();
         store
@@ -1084,6 +1162,145 @@ mod tests {
             .unwrap();
         let loaded = store.load_attempt(AttemptId(1)).unwrap().unwrap();
         assert_eq!(loaded.pane_id.as_deref(), Some("w3:p2"));
+    }
+
+    fn attempt_row(id: u32, model_passed: Option<bool>) -> AttemptRow {
+        AttemptRow {
+            attempt_id: AttemptId(id),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: Some("codex".into()),
+            model_ref: Some("gpt".into()),
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: Some("1".into()),
+            ended_at: None,
+            outcome: Some("base:abc".into()),
+            model_passed,
+        }
+    }
+
+    /// #139: `model_passed` is written when the row is created and kept by both upserts.
+    #[test]
+    fn model_passed_is_write_once_in_both_attempt_upserts() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.save_attempt(&attempt_row(1, Some(true))).unwrap();
+        let mut later = attempt_row(1, Some(false));
+        later.ended_at = Some("2".into());
+        store.save_attempt(&later).unwrap();
+        let loaded = store.load_attempt(AttemptId(1)).unwrap().unwrap();
+        assert_eq!(loaded.model_passed, Some(true));
+        assert_eq!(loaded.ended_at.as_deref(), Some("2"));
+        // A row re-saved without the value keeps it too.
+        store.save_attempt(&attempt_row(1, None)).unwrap();
+        assert_eq!(
+            store
+                .load_attempt(AttemptId(1))
+                .unwrap()
+                .unwrap()
+                .model_passed,
+            Some(true)
+        );
+
+        store.save_attempt(&attempt_row(2, Some(false))).unwrap();
+        store
+            .record_transition_and_attempt(
+                TransitionRecord {
+                    graph_id: "g".into(),
+                    task_id: TaskId(1),
+                    attempt_id: Some(AttemptId(2)),
+                    from: TaskState::Ready,
+                    to: TaskState::Running,
+                    event: Event::AttemptStarted,
+                    reason: None,
+                    executor: "test".into(),
+                    occurred_at: "1".into(),
+                },
+                Some(&attempt_row(2, Some(true))),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_attempt(AttemptId(2))
+                .unwrap()
+                .unwrap()
+                .model_passed,
+            Some(false)
+        );
+        // A row first written without the value (pre-#139 shape) may gain it once.
+        store.save_attempt(&attempt_row(3, None)).unwrap();
+        store.save_attempt(&attempt_row(3, Some(true))).unwrap();
+        assert_eq!(
+            store
+                .load_attempt(AttemptId(3))
+                .unwrap()
+                .unwrap()
+                .model_passed,
+            Some(true)
+        );
+    }
+
+    /// #139: the routing row is written with the attempt row, once, and leaves with it.
+    #[test]
+    fn advisory_routing_is_written_with_its_attempt_and_reset_with_it() {
+        use meshloop_engine::ports::AdvisoryRouting;
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store
+            .save_run(&RunRow {
+                graph_id: "g".into(),
+                plan_state: PlanState::PlanAccepted,
+                run_base: "abc".into(),
+                integrate_ref: "meshloop/g/integrate".into(),
+                plan_json: "{}".into(),
+                plan_id: "x".into(),
+                created_at: "0".into(),
+                review_note: None,
+            })
+            .unwrap();
+        let routing = AdvisoryRouting {
+            attempt_id: AttemptId(1),
+            priors_sha256: "a".repeat(64),
+            changed_top: true,
+        };
+        store
+            .save_attempt_routed(&attempt_row(1, Some(true)), Some(&routing))
+            .unwrap();
+        // A second save never rewrites the decision.
+        let again = AdvisoryRouting {
+            changed_top: false,
+            ..routing.clone()
+        };
+        store
+            .save_attempt_routed(&attempt_row(1, Some(true)), Some(&again))
+            .unwrap();
+        assert_eq!(
+            store.advisory_routing(AttemptId(1)).unwrap(),
+            Some(("a".repeat(64), true))
+        );
+        store
+            .save_attempt_routed(&attempt_row(2, Some(true)), None)
+            .unwrap();
+        assert_eq!(store.advisory_routing(AttemptId(2)).unwrap(), None);
+        assert_eq!(
+            store.advisory_routing_counts(&"a".repeat(64)).unwrap(),
+            (1, 1)
+        );
+        // A routing row naming another attempt is refused, and nothing is written.
+        let wrong = AdvisoryRouting {
+            attempt_id: AttemptId(9),
+            ..routing
+        };
+        assert!(
+            store
+                .save_attempt_routed(&attempt_row(3, Some(true)), Some(&wrong))
+                .is_err()
+        );
+        assert!(store.load_attempt(AttemptId(3)).unwrap().is_none());
+        store.reset_graph_execution("g").unwrap();
+        assert_eq!(store.advisory_routing(AttemptId(1)).unwrap(), None);
+        assert!(store.attempts_for_graph("g").unwrap().is_empty());
     }
 
     #[test]
@@ -1156,6 +1373,7 @@ mod tests {
                 started_at: None,
                 ended_at: None,
                 outcome: None,
+                model_passed: None,
             })
             .unwrap();
         store
@@ -1370,6 +1588,7 @@ mod tests {
             started_at: Some("100".into()),
             ended_at: None,
             outcome: None,
+            model_passed: None,
         };
 
         store
@@ -1607,6 +1826,7 @@ mod tests {
             started_at: None,
             ended_at: None,
             outcome: None,
+            model_passed: None,
         };
         let refused = store.record_transition_and_attempt(
             rec(
