@@ -342,7 +342,13 @@ fn attempt_fields_report_mode_check_result_and_model_passed() {
 /// The run outputs the cell and operators read, with the fixture's path removed.
 fn routed_outputs(f: &Fixture) -> (String, String, String, Vec<(String, String)>) {
     let normalize = |out: &Output| {
-        String::from_utf8_lossy(&out.stdout).replace(&f.base.display().to_string(), "<BASE>")
+        // Paths appear raw in text and JSON-escaped (`\\` on Windows) in JSON output.
+        let base = f.base.display().to_string();
+        let escaped = serde_json::to_string(&base).expect("path is valid JSON");
+        let escaped = escaped.trim_matches('"');
+        String::from_utf8_lossy(&out.stdout)
+            .replace(escaped, "<BASE>")
+            .replace(&base, "<BASE>")
     };
     let plan = f.meshloop(&[
         "plan",

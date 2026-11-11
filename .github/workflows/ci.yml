@@ -63,18 +63,18 @@ jobs:
           toolchain: 1.98.0
       - name: Build meshloop and the fixture harness
         run: cargo build --locked -p meshloop-cli -p meshloop-adapters --bins
-      # install.sh and the executable are checked against the digests recorded in
-      # cells/nodecode-meshloop/test/nodecode-$NODECODE_VERSION.sha256 before either runs.
-      # The installer itself checks the tarball against the release's published sha256.
-      # nodecode.ai serves install.sh unversioned: a new one fails here until its digest
-      # is recorded.
+      # The installer is the MIT install.sh shipped inside the pinned release, vendored in
+      # cells/nodecode-meshloop/test/vendor/ (nodecode.ai serves install.sh unversioned, so a
+      # downloaded copy changes with every release). It and the executable are checked
+      # against cells/nodecode-meshloop/test/nodecode-$NODECODE_VERSION.sha256 before either
+      # runs; the installer checks the tarball against the release's published sha256.
       - name: Install the pinned nodecode release on a throwaway HOME
         run: |
           sums="$GITHUB_WORKSPACE/cells/nodecode-meshloop/test/nodecode-$NODECODE_VERSION.sha256"
           home="$RUNNER_TEMP/nodecode-install"
           mkdir -p "$home" "$RUNNER_TEMP/nodecode-installer"
           cd "$RUNNER_TEMP/nodecode-installer"
-          curl -fsSL https://nodecode.ai/install.sh -o install.sh
+          cp "$GITHUB_WORKSPACE/cells/nodecode-meshloop/test/vendor/nodecode-install-$NODECODE_VERSION.sh" install.sh
           grep '  install.sh$' "$sums" | sha256sum -c -
           env -i HOME="$home" PATH=/usr/bin:/bin LANG=C.UTF-8 NODECODE_VERSION="$NODECODE_VERSION" \
             sh ./install.sh --no-modify-path

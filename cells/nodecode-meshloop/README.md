@@ -566,8 +566,10 @@ list. To read a new field, add it to `contract.json` first.
   `xtask check` runs it.
 
 - **Optional CI:** the `nodecode-cell` job in `.github/workflows/ci.yml` installs a pinned
-  nodecode release on a throwaway `HOME` and runs the load test. It checks `install.sh`
-  and the installed executable against
+  nodecode release on a throwaway `HOME` and runs the load test. It uses the MIT
+  `install.sh` shipped inside that release, vendored at
+  [`test/vendor/nodecode-install-98dd6dc80.sh`](test/vendor/nodecode-install-98dd6dc80.sh)
+  (nodecode.ai serves `install.sh` unversioned), and checks it and the installed executable against
   [`test/nodecode-98dd6dc80.sha256`](test/nodecode-98dd6dc80.sha256) before running
   either. It is `continue-on-error`,
   and neither `xtask` nor `cargo test` calls it.
