@@ -264,6 +264,15 @@ check under `adapters/sandbox/meshloop-verify-sandbox`: worktree the only writab
 no credential, no network unless `--allow-network`. How to enable it, toolchain paths and
 what is and is not contained: [Contained verification](nodecode-containment.md#contained-verification).
 `meshloop doctor` warns when a harness runs under containment but verification does not.
+A check is bounded after it exits or times out, on the host and behind a runner (#186):
+meshloop ends its whole owned process tree and waits at most a short fixed grace for its
+output, so a background process holding the check's output cannot stall verification; a
+pipe still held after that grace fails the check (`check-output-abandoned`), never a pass.
+Consequences: a daemon the check starts in its own process group is killed when the check
+exits; one that detaches with `setsid` passes only if it also closes the inherited stdout
+and stderr. On Unix, zombies count as group members, so in a container whose PID 1 does
+not reap orphans (e.g. docker without `--init`) checks can fail with
+`check-process-tree-survived`; run with a reaping init.
 
 ## Nodecode worker (#138)
 
