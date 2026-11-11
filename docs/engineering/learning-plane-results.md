@@ -203,7 +203,9 @@ gates in
   baseline's.
 
 The Rust fold matches the real cell's proposal for the same fixture byte for byte, apart
-from `generated_at` and `generator`
+from `generated_at` and `generator`. Both compared datasets contain no excluded attempts, so
+the exclusion branches are proven equivalent only by each side's own unit tests, not
+against each other
 ([`offline/cell-fold.json`](../../benches/learning-plane/offline/cell-fold.json)). The
 offline arm checks this on every run. A unit test, `priors_fold::tests`, checks the same
 for the live warm-up's recorded fold input
@@ -217,7 +219,9 @@ every run, because `generated_at` changes.
 Computed by `xtask bench-learning --compare --baseline baseline-lp-4-2026-11-10.json
 --measured priors-on-lp-4-2026-11-11.json`. A learning effect counts only when it is
 traceable to the promoted file, meaning `advisory_routing.changed_top` is true on the
-affected attempts.
+affected attempts. GO 3a is evaluated per task (a task's first dispatch differs in at least
+2 of 3 repetitions), which is stricter than a per-tier reading of #144; both rules can only
+turn a GO into a NO-GO, and neither changes this verdict (0 attempts changed).
 
 | Condition (final #144) | Observed | Holds |
 |---|---|---|

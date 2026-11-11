@@ -377,6 +377,7 @@ mod tests {
         let cell = std::fs::read_to_string(dir.join("priors-lp-4-warmup.json")).unwrap();
         let ours = to_json(&fold(&runs).unwrap(), "x", ("x", "x"));
         assert_eq!(comparable(&cell), comparable(&ours));
+        assert!(cell.ends_with("}\n") && ours.ends_with("}\n"));
     }
 
     #[test]

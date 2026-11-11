@@ -3,6 +3,8 @@
 //! (`benches/learning-plane/thresholds-lp-4.json`), condition by condition, and states
 //! the verdict the numbers give: GO, NO-GO, or INCONCLUSIVE, which counts as NO-GO.
 //! It reads two results files and dispatches nothing.
+//! GO 3 additionally requires `changed_top` traceability, and GO 3a is evaluated per task;
+//! both are stricter than the #144 text and can only turn a GO into a NO-GO.
 
 use std::collections::BTreeMap;
 use std::fs;
