@@ -75,8 +75,8 @@ operator's files and credentials, the operator's own nodecode organism and its h
   The sandbox has only `/usr` tools on its `PATH` (no `~/.cargo`, no mise shims) and no
   credential unless one is passed.
 - **Network: not contained** (architect decision for #138; follow-up
-  [#182](https://github.com/smota/meshloop/issues/182)). This departs from ADR 0038's
-  "the network it needs": the worker shares the host network namespace, because the
+  [#182](https://github.com/smota/meshloop/issues/182)). This departs from issue #138's
+  "the network it needs" (accepted by the coordinator under delegated owner authority): the worker shares the host network namespace, because the
   model API needs it and bubblewrap has no egress filter (no `pasta` or `slirp4netns` is
   installed here). Consequences an operator must accept:
   - The worker reaches any host the operator can, and can exfiltrate what it can read:
@@ -108,8 +108,8 @@ operator's files and credentials, the operator's own nodecode organism and its h
 - **Kernel attack surface.** No seccomp filter is installed. The sandbox relies on
   unprivileged user namespaces and the kernel's enforcement of mounts and namespaces.
 - **Output content beyond the exact key.** Whatever the worker prints is stored as
-  evidence. The driver scrubs only the exact value of the bound key; meshloop has no
-  general secret redaction for harness output ([#183](https://github.com/smota/meshloop/issues/183)).
+  evidence. The driver scrubs only the exact value of the bound key; meshloop's own pattern
+  redaction of harness output misses common provider key formats ([#183](https://github.com/smota/meshloop/issues/183)).
   A key the model splits, encodes or writes into a file of the worktree is not caught,
   and neither is any other secret the worker can read.
 - **The prompt file path** ([#180](https://github.com/smota/meshloop/issues/180)).
