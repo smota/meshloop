@@ -12,35 +12,24 @@
 //!
 //! # Linear runtime
 //!
-//! The cursor `i` only moves forward, and every rule reads forward from it:
+//! Linearity is structural, not argued per rule. The cursor only moves forward,
+//! and every forward scan goes through [`Reader::run`], which memoises the last
+//! scan of each kind: a scan that starts inside the previous scan of its kind
+//! returns that scan's end without reading. The re-reads that made earlier
+//! versions quadratic (one rule per word starting inside one long run, whether
+//! it hit or missed) cost O(1) each. The answers are those of plain scans, so the
+//! output does not depend on the memo. Scans of values and
+//! header tails stop at an earlier replacement (`[REDACTED`), so a value is judged
+//! on what precedes it and a second pass leaves it alone.
 //!
-//! - A *hit* replaces what the rule read and moves `i` past it, so those bytes are
-//!   never read again.
-//! - A *miss* moves `i` only to the end of the word, so the bytes the rule read
-//!   after it are read again as later words. Each rule's read after a word is
-//!   bounded so that these reads overlap at most a constant number of times:
-//!   - Secret-named keys read one blank run, one separator (`=` or `:`), and one
-//!     value. An unquoted value stops at the next `=` or `:` (plus `=` padding), so
-//!     in `token=$token=$…` each key reads only up to the next separator, and every
-//!     byte is in at most two such reads. A quoted value stops at the next quote,
-//!     backslash or newline, and no other key's quoted read can start inside it
-//!     (it holds no quote). A `--flag VALUE` value is an unquoted value.
-//!   - `Bearer` reads one blank run and the token run after it. A later `Bearer`
-//!     with a blank after it cannot start inside that token run (token runs hold
-//!     no blanks), so these reads are disjoint.
-//!   - `Authorization` reads blanks, `:`, blanks, an optional quote and one token
-//!     run (no `:` inside); a later `Authorization` inside that run is the run
-//!     itself, and its read starts after it.
-//!   - A scheme word as a key's value (`auth: Bearer x`) adds one blank run and
-//!     one token run, with the same disjointness as `Bearer`.
-//! - The PEM search for `-----END` runs at most once without a match and is then
-//!   skipped; a match is a hit. The `scheme://userinfo@` scan stops at the next `/`,
-//!   so consecutive scans read disjoint bytes, and it is capped in length.
-//! - Rules that peek at the next word (JWT segments) read at most one extra word.
-//!
-//! A second pass over the output reads each maximal base64 run once (see
-//! [`scrub_b64_runs`]). Each byte is therefore read a constant number of times.
-//! There is no backtracking and no retry from inside a word.
+//! The remaining work is a fixed number of passes over each word and over each
+//! value or token a scan returned, the PEM `-----END` search (a hit, or a miss
+//! that is never repeated), and one pass over the output for base64 runs
+//! ([`scrub_b64_runs`]). `Reader` counts all of it; a test bounds the count by
+//! `INSPECT_PER_BYTE` (8) times the input length over the adversarial shapes and
+//! random concatenations of every probe fragment.
+
+use std::cell::Cell;
 
 /// Replacement text. Its brackets are not word bytes, so a second pass sees the
 /// bare word `REDACTED`, which matches no rule (idempotency).
@@ -154,23 +143,160 @@ const HEX_MIN_BITS: f64 = 3.0;
 /// `commit_sha` and `priors_sha256` evidence fields.
 const HEX_DIGEST_LENS: &[usize] = &[32, 40, 56, 64, 96, 128];
 
+/// What a scan accepts. Each kind is a fixed predicate on the byte at an index
+/// (with a constant look-ahead for the `[REDACTED` marker), so a scan's result
+/// depends only on the input and its start.
+#[derive(Clone, Copy)]
+enum Kind {
+    Word,
+    Blank,
+    Token,
+    /// Unquoted value body: value bytes except `=` and `:`, up to a marker.
+    ValueBody,
+    Equals,
+    Line,
+    CsiParam,
+    CsiInter,
+    Userinfo,
+    PemBody,
+    Dashes,
+    HookPath,
+    B64Body,
+    /// Quoted value: up to a quote, backslash, newline or marker.
+    Quoted,
+    /// `Authorization` value up to the end of the line or a marker, and also up
+    /// to `"` or `'` when the header is quoted.
+    AuthTail,
+    AuthTailDq,
+    AuthTailSq,
+}
+
+const KINDS: usize = 17;
+
+/// Reader over the input that every rule scans through.
+///
+/// Linearity is structural. Each scan kind remembers its last scan
+/// `start..end`: every byte in it was accepted and the byte at `end` was not.
+/// A later scan of the same kind that starts inside that range has the same
+/// answer, `end`, and costs O(1). Scans start at or after the cursor's word,
+/// which only moves forward, so a fresh scan of a kind rarely overlaps the last
+/// one; `inspected` makes that checkable. The answers are exactly those of an
+/// unmemoised scan, so outputs (and idempotency) do not depend on the memo.
+///
+/// `inspected` counts bytes read by scans plus the other linear passes over
+/// scanned text (word rules, value checks, searches); tests bound it by a
+/// constant times the input length.
+struct Reader<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    memo: [Cell<(usize, usize)>; KINDS],
+    inspected: Cell<usize>,
+}
+
+impl<'a> Reader<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            bytes: text.as_bytes(),
+            memo: std::array::from_fn(|_| Cell::new((usize::MAX, 0))),
+            inspected: Cell::new(0),
+        }
+    }
+
+    /// Records a linear pass over `n` bytes.
+    fn note(&self, n: usize) {
+        self.inspected.set(self.inspected.get() + n);
+    }
+
+    fn mark_at(&self, i: usize) -> bool {
+        self.bytes[i..].starts_with(MARK_PREFIX.as_bytes())
+    }
+
+    fn accepts(&self, kind: Kind, i: usize) -> bool {
+        let b = self.bytes[i];
+        match kind {
+            Kind::Word => is_word_byte(b),
+            Kind::Blank => is_blank(b),
+            Kind::Token => is_token_byte(b),
+            Kind::ValueBody => is_value_byte(b) && b != b'=' && b != b':' && !self.mark_at(i),
+            Kind::Equals => b == b'=',
+            Kind::Line => b != b'\n' && b != b'\r',
+            Kind::CsiParam => (0x30..=0x3f).contains(&b),
+            Kind::CsiInter => (0x20..=0x2f).contains(&b),
+            Kind::Userinfo => {
+                b.is_ascii_graphic()
+                    && !matches!(
+                        b,
+                        b'/' | b'@' | b'?' | b'#' | b'"' | b'\'' | b'<' | b'>' | b'`'
+                    )
+            }
+            Kind::PemBody => is_pem_body_byte(b),
+            Kind::Dashes => b == b'-',
+            Kind::HookPath => is_word_byte(b) || b == b'/',
+            Kind::B64Body => is_b64_body_byte(b),
+            Kind::Quoted => !is_quote(b) && b != b'\\' && b != b'\n' && !self.mark_at(i),
+            Kind::AuthTail => b != b'\n' && b != b'\r' && !self.mark_at(i),
+            Kind::AuthTailDq => b != b'\n' && b != b'\r' && b != b'"' && !self.mark_at(i),
+            Kind::AuthTailSq => b != b'\n' && b != b'\r' && b != b'\'' && !self.mark_at(i),
+        }
+    }
+
+    /// End of the run of `kind` bytes from `from`.
+    fn run(&self, kind: Kind, from: usize) -> usize {
+        let memo = &self.memo[kind as usize];
+        let (start, end) = memo.get();
+        if start <= from && from <= end {
+            self.note(1);
+            return end;
+        }
+        let mut i = from;
+        while i < self.bytes.len() && self.accepts(kind, i) {
+            i += 1;
+        }
+        self.note(i - from + 1);
+        memo.set((from, i));
+        i
+    }
+
+    fn line_end(&self, from: usize) -> usize {
+        self.run(Kind::Line, from)
+    }
+
+    /// `text[from..].find(pat)`, counted.
+    fn find(&self, from: usize, to: usize, pat: &str) -> Option<usize> {
+        let found = self.text[from..to].find(pat).map(|at| from + at);
+        self.note(found.map_or(to, |at| at + pat.len()) - from);
+        found
+    }
+}
+
+/// Start of an earlier replacement. Scans of values stop here, so a value is
+/// judged on what precedes it and a second pass leaves it alone.
+const MARK_PREFIX: &str = "[REDACTED";
+
 pub(super) fn scrub(input: &str) -> String {
-    let bytes = input.as_bytes();
+    scrub_counting(input).0
+}
+
+/// [`scrub`] plus the number of bytes inspected (both passes).
+pub(super) fn scrub_counting(input: &str) -> (String, usize) {
+    let r = Reader::new(input);
+    let bytes = r.bytes;
     let mut out = String::with_capacity(input.len());
     let mut no_pem_end = false;
     let mut i = 0;
     while i < bytes.len() {
         if !is_word_byte(bytes[i]) {
-            if let Some(stop) = ansi_csi_end(bytes, i) {
+            if let Some(stop) = ansi_csi_end(&r, i) {
                 out.push_str(&input[i..stop]);
                 i = stop;
                 continue;
             }
-            if let Some((pw_start, pw_end)) = url_password(input, i) {
+            if let Some((pw_start, pw_end)) = url_password(&r, i) {
                 // The username can itself be a token (`https://ghp_…:x@host`):
                 // its words get the key-shape rules, then the password is replaced.
                 out.push_str("://");
-                push_words_scrubbed(&mut out, &input[i + 3..pw_start - 1]);
+                push_words_scrubbed(&r, &mut out, i + 3, pw_start - 1);
                 out.push(':');
                 out.push_str(MARK);
                 i = pw_end;
@@ -185,19 +311,21 @@ pub(super) fn scrub(input: &str) -> String {
             i += ch.len_utf8();
             continue;
         }
-        let end = run_end(bytes, i, is_word_byte);
+        let end = r.run(Kind::Word, i);
         let word = &input[i..end];
-        if let Some(stop) = pem_block_end(input, i, end, &mut no_pem_end) {
+        // The word rules below are a fixed number of passes over the word.
+        r.note(word.len());
+        if let Some(stop) = pem_block_end(&r, i, end, &mut no_pem_end) {
             out.push_str(MARK);
             i = stop;
             continue;
         }
-        if let Some(stop) = jwt_end(bytes, i, end) {
+        if let Some(stop) = jwt_end(&r, i, end) {
             out.push_str(MARK);
             i = stop;
             continue;
         }
-        if let Some((secret_start, stop)) = slack_hook(input, i) {
+        if let Some((secret_start, stop)) = slack_hook(&r, i) {
             out.push_str(&input[i..secret_start]);
             out.push_str(MARK);
             i = stop;
@@ -210,7 +338,7 @@ pub(super) fn scrub(input: &str) -> String {
             continue;
         }
         let opener = i.checked_sub(1).map(|p| bytes[p]).filter(|b| is_quote(*b));
-        if let Some((value_start, value_end)) = context_value(input, end, word, opener) {
+        if let Some((value_start, value_end)) = context_value(&r, end, word, opener) {
             out.push_str(&input[i..value_start]);
             out.push_str(MARK);
             i = value_end;
@@ -219,20 +347,21 @@ pub(super) fn scrub(input: &str) -> String {
         out.push_str(word);
         i = end;
     }
-    scrub_b64_runs(&out)
+    let (out, second) = scrub_b64_runs(&out);
+    (out, r.inspected.get() + second)
 }
 
-/// Copies ASCII `text`, replacing each word with a key shape.
-fn push_words_scrubbed(out: &mut String, text: &str) {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let end = if is_word_byte(bytes[i]) {
-            run_end(bytes, i, is_word_byte)
+/// Copies the ASCII range `from..to`, replacing each word with a key shape.
+fn push_words_scrubbed(r: &Reader<'_>, out: &mut String, from: usize, to: usize) {
+    let mut i = from;
+    while i < to {
+        let end = if is_word_byte(r.bytes[i]) {
+            r.run(Kind::Word, i).min(to)
         } else {
             i + 1
         };
-        let piece = &text[i..end];
+        let piece = &r.text[i..end];
+        r.note(piece.len());
         out.push_str(if is_secret_word(piece) { MARK } else { piece });
         i = end;
     }
@@ -245,18 +374,21 @@ fn push_words_scrubbed(out: &mut String, text: &str) {
 /// depend on whether a key inside the run had been redacted, and a second
 /// `redact` could then change it. Runs are maximal on both sides, so replacing
 /// one does not change its neighbours and the pass is idempotent.
-fn scrub_b64_runs(text: &str) -> String {
-    let bytes = text.as_bytes();
+fn scrub_b64_runs(text: &str) -> (String, usize) {
+    let r = Reader::new(text);
+    let bytes = r.bytes;
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     let mut i = 0;
     while i < bytes.len() {
         if !is_b64_body_byte(bytes[i]) {
+            r.note(1);
             i += 1;
             continue;
         }
-        let body = run_end(bytes, i, is_b64_body_byte);
-        let run = run_end(bytes, body, |b| b == b'=');
+        let body = r.run(Kind::B64Body, i);
+        let run = r.run(Kind::Equals, body);
+        r.note(run - i);
         if is_secret_b64_run(&text[i..run]) {
             out.push_str(&text[copied..i]);
             out.push_str(MARK);
@@ -265,7 +397,7 @@ fn scrub_b64_runs(text: &str) -> String {
         i = run;
     }
     out.push_str(&text[copied..]);
-    out
+    (out, r.inspected.get())
 }
 
 fn is_b64_body_byte(b: u8) -> bool {
@@ -300,25 +432,15 @@ fn is_blank(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
-fn run_end(bytes: &[u8], from: usize, pred: impl Fn(u8) -> bool) -> usize {
-    bytes[from..]
-        .iter()
-        .position(|b| !pred(*b))
-        .map_or(bytes.len(), |n| from + n)
-}
-
-fn line_end(bytes: &[u8], from: usize) -> usize {
-    run_end(bytes, from, |b| b != b'\n' && b != b'\r')
-}
-
 /// End of an ANSI CSI sequence `ESC [ params(0x30-0x3F)* intermediates(0x20-0x2F)*
 /// final(0x40-0x7E)` starting at `i`.
-fn ansi_csi_end(bytes: &[u8], i: usize) -> Option<usize> {
+fn ansi_csi_end(r: &Reader<'_>, i: usize) -> Option<usize> {
+    let bytes = r.bytes;
     if bytes[i] != 0x1b || bytes.get(i + 1) != Some(&b'[') {
         return None;
     }
-    let params = run_end(bytes, i + 2, |b| (0x30..=0x3f).contains(&b));
-    let inter = run_end(bytes, params, |b| (0x20..=0x2f).contains(&b));
+    let params = r.run(Kind::CsiParam, i + 2);
+    let inter = r.run(Kind::CsiInter, params);
     bytes
         .get(inter)
         .filter(|b| (0x40..=0x7e).contains(*b))
@@ -326,26 +448,19 @@ fn ansi_csi_end(bytes: &[u8], i: usize) -> Option<usize> {
 }
 
 /// `scheme://user:password@host`: the password range, when `i` is at `://`.
-fn url_password(input: &str, i: usize) -> Option<(usize, usize)> {
+fn url_password(r: &Reader<'_>, i: usize) -> Option<(usize, usize)> {
+    let input = r.text;
     if !input[i..].starts_with("://") {
         return None;
     }
-    let bytes = input.as_bytes();
+    let bytes = r.bytes;
     let from = i + 3;
-    let limit = (from + URL_USERINFO_MAX).min(bytes.len());
-    let stop = run_end(&bytes[..limit], from, |b| {
-        b.is_ascii_graphic()
-            && !matches!(
-                b,
-                b'/' | b'@' | b'?' | b'#' | b'"' | b'\'' | b'<' | b'>' | b'`'
-            )
-    });
-    if stop >= limit || bytes[stop] != b'@' {
+    let stop = r.run(Kind::Userinfo, from);
+    if stop - from >= URL_USERINFO_MAX || bytes.get(stop) != Some(&b'@') {
         return None;
     }
     // A userinfo holding an earlier replacement is left alone (idempotency).
-    // This miss is bounded: the scan stopped at the next `/`, and the next
-    // `://` scan starts after that `/`, so these reads never overlap.
+    r.note(2 * (stop - from));
     if has_mark(&input[from..stop]) {
         return None;
     }
@@ -357,25 +472,30 @@ fn url_password(input: &str, i: usize) -> Option<(usize, usize)> {
 /// `-----BEGIN …` through the matching `-----END …-----`. With no END after it,
 /// the BEGIN line and the base64 body lines that follow (`[A-Za-z0-9+/=]`, with
 /// literal `\n` allowed). `no_end` records a failed search so it runs once.
-fn pem_block_end(input: &str, start: usize, word_end: usize, no_end: &mut bool) -> Option<usize> {
-    let word = &input[start..word_end];
+fn pem_block_end(
+    r: &Reader<'_>,
+    start: usize,
+    word_end: usize,
+    no_end: &mut bool,
+) -> Option<usize> {
+    let word = &r.text[start..word_end];
     let label = word.trim_start_matches('-');
     if word.len() - label.len() < 5 || !label.starts_with("BEGIN") {
         return None;
     }
-    let bytes = input.as_bytes();
+    let bytes = r.bytes;
     if !*no_end {
-        if let Some(off) = input[word_end..].find("-----END") {
-            let after_end = word_end + off + "-----END".len();
-            let eol = line_end(bytes, after_end);
-            return Some(match input[after_end..eol].find("-----") {
-                Some(close) => run_end(bytes, after_end + close, |b| b == b'-'),
+        if let Some(at) = r.find(word_end, bytes.len(), "-----END") {
+            let after_end = at + "-----END".len();
+            let eol = r.line_end(after_end);
+            return Some(match r.find(after_end, eol, "-----") {
+                Some(close) => r.run(Kind::Dashes, close),
                 None => eol,
             });
         }
         *no_end = true;
     }
-    let mut stop = line_end(bytes, word_end);
+    let mut stop = r.line_end(word_end);
     // Body lines are full width except the last; a short line ends the block.
     let mut prev_full = true;
     while prev_full {
@@ -387,8 +507,8 @@ fn pem_block_end(input: &str, start: usize, word_end: usize, no_end: &mut bool) 
             break;
         }
         next += 1;
-        let body = run_end(bytes, next, is_pem_body_byte);
-        if body == next || body != line_end(bytes, next) {
+        let body = r.run(Kind::PemBody, next);
+        if body == next || body != r.line_end(next) {
             break;
         }
         prev_full = body - next >= PEM_FULL_LINE;
@@ -402,8 +522,9 @@ fn is_pem_body_byte(b: u8) -> bool {
 }
 
 /// `eyJ….eyJ…[.…]`: a JWT's header, payload and signature as one secret.
-fn jwt_end(bytes: &[u8], start: usize, word_end: usize) -> Option<usize> {
+fn jwt_end(r: &Reader<'_>, start: usize, word_end: usize) -> Option<usize> {
     const MIN_SEGMENT: usize = 4;
+    let bytes = r.bytes;
     if word_end - start < MIN_SEGMENT
         || !bytes[start..].starts_with(b"eyJ")
         || bytes.get(word_end) != Some(&b'.')
@@ -414,22 +535,22 @@ fn jwt_end(bytes: &[u8], start: usize, word_end: usize) -> Option<usize> {
     if !bytes[payload..].starts_with(b"eyJ") {
         return None;
     }
-    let payload_end = run_end(bytes, payload, is_word_byte);
+    let payload_end = r.run(Kind::Word, payload);
     if payload_end - payload < MIN_SEGMENT {
         return None;
     }
     if bytes.get(payload_end) == Some(&b'.') {
-        return Some(run_end(bytes, payload_end + 1, is_word_byte));
+        return Some(r.run(Kind::Word, payload_end + 1));
     }
     Some(payload_end)
 }
 
 /// `hooks.slack.com/services/T…/B…/…`: keeps the host and replaces the path.
-fn slack_hook(input: &str, start: usize) -> Option<(usize, usize)> {
-    let rest = &input[start..];
+fn slack_hook(r: &Reader<'_>, start: usize) -> Option<(usize, usize)> {
+    let rest = &r.text[start..];
     let prefix = SLACK_HOOK_PREFIXES.iter().find(|p| rest.starts_with(**p))?;
     let secret = start + prefix.len();
-    let end = run_end(input.as_bytes(), secret, |b| is_word_byte(b) || b == b'/');
+    let end = r.run(Kind::HookPath, secret);
     (end > secret).then_some((secret, end))
 }
 
@@ -445,17 +566,17 @@ fn is_secret_b64_run(run: &str) -> bool {
 /// depends only on the bytes after the word, never on earlier text, so a second
 /// pass over the output decides the same (idempotency).
 fn context_value(
-    input: &str,
+    r: &Reader<'_>,
     word_end: usize,
     word: &str,
     opener: Option<u8>,
 ) -> Option<(usize, usize)> {
     let result = if word.eq_ignore_ascii_case("bearer") {
-        bearer_token(input, word_end)
+        bearer_token(r, word_end)
     } else if ends_with_ignore_case(word, "authorization") {
-        authorization_value(input, word_end, opener)
+        authorization_value(r, word_end, opener)
     } else if is_secret_key_name(word) {
-        assigned_value(input, word, word_end)
+        assigned_value(r, word, word_end)
     } else {
         return None;
     };
@@ -464,29 +585,21 @@ fn context_value(
 
 /// Holds an earlier replacement: a second pass must not rescan around it.
 fn has_mark(range: &str) -> bool {
-    range.contains("[REDACTED")
-}
-
-/// `end`, or the start of the first earlier replacement inside `start..end`.
-/// A value is cut there and judged on what comes before, so the rule still
-/// moves the cursor past what it read (no re-reads) and stays idempotent.
-fn before_mark(input: &str, start: usize, end: usize) -> usize {
-    input[start..end]
-        .find("[REDACTED")
-        .map_or(end, |at| start + at)
+    range.contains(MARK_PREFIX)
 }
 
 /// `Err` carries how far the rule read.
 type Value = Result<(usize, usize), usize>;
 
-fn bearer_token(input: &str, word_end: usize) -> Value {
-    let bytes = input.as_bytes();
-    let start = run_end(bytes, word_end, is_blank);
+fn bearer_token(r: &Reader<'_>, word_end: usize) -> Value {
+    let start = r.run(Kind::Blank, word_end);
     if start == word_end {
         return Err(start);
     }
-    let end = run_end(bytes, start, is_token_byte);
-    if is_credential_like(&input[start..end]) {
+    let end = r.run(Kind::Token, start);
+    let token = &r.text[start..end];
+    r.note(token.len());
+    if is_credential_like(token) {
         Ok((start, end))
     } else {
         Err(end)
@@ -494,21 +607,21 @@ fn bearer_token(input: &str, word_end: usize) -> Value {
 }
 
 /// `Authorization: <scheme> <credentials>` (also `Proxy-Authorization`, JSON keys).
-/// Redacts to the closing quote or the end of the line, when the value starts
-/// with a scheme word or a credential.
-fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Value {
-    let bytes = input.as_bytes();
+/// Redacts to the closing quote, the end of the line or an earlier replacement,
+/// when the value starts with a scheme word or a credential.
+fn authorization_value(r: &Reader<'_>, word_end: usize, opener: Option<u8>) -> Value {
+    let (input, bytes) = (r.text, r.bytes);
     let mut j = word_end;
     if let Some(q) = opener
         && bytes.get(j) == Some(&q)
     {
         j += 1;
     }
-    j = run_end(bytes, j, is_blank);
+    j = r.run(Kind::Blank, j);
     if bytes.get(j) != Some(&b':') {
         return Err(j);
     }
-    let mut start = run_end(bytes, j + 1, is_blank);
+    let mut start = r.run(Kind::Blank, j + 1);
     let mut close = opener;
     if let Some(&q) = bytes.get(start)
         && is_quote(q)
@@ -519,21 +632,20 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Valu
     if input[start..].starts_with(MARK) || input[start..].starts_with(PEM_BEGIN) {
         return Err(start);
     }
-    let first_end = run_end(bytes, start, is_token_byte);
+    let first_end = r.run(Kind::Token, start);
     let first = &input[start..first_end];
+    r.note(first.len());
     let is_scheme = AUTH_SCHEMES.iter().any(|s| first.eq_ignore_ascii_case(s));
     if !is_scheme && !is_strong_value(first) {
         return Err(first_end);
     }
-    let mut end = run_end(bytes, start, |b| {
-        b != b'\n' && b != b'\r' && Some(b) != close
-    });
-    while end > start && is_blank(bytes[end - 1]) {
-        end -= 1;
-    }
-    // An earlier replacement on the line ends the value: one forward search,
-    // and the header before it is still redacted.
-    let mut end = before_mark(input, start, end);
+    let tail = match close {
+        Some(b'"') => Kind::AuthTailDq,
+        Some(b'\'') => Kind::AuthTailSq,
+        _ => Kind::AuthTail,
+    };
+    // Stops at an earlier replacement, so the cursor passes every byte read.
+    let mut end = r.run(tail, start);
     while end > start && is_blank(bytes[end - 1]) {
         end -= 1;
     }
@@ -546,8 +658,8 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Valu
 
 /// The value after a secret-named key: `KEY=v`, `"key": "v"`, `key: v`,
 /// `key = 'v'`, `--api-key v`.
-fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
-    let bytes = input.as_bytes();
+fn assigned_value(r: &Reader<'_>, word: &str, word_end: usize) -> Value {
+    let (input, bytes) = (r.text, r.bytes);
     // `--api-key VALUE`: a flag takes its value after one blank.
     if word.starts_with('-')
         && bytes.get(word_end).copied().is_some_and(is_blank)
@@ -556,9 +668,10 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
         && is_value_byte(first)
     {
         let v = word_end + 1;
-        let end = before_mark(input, v, value_end(bytes, v));
+        let end = value_end(r, v);
         let value = &input[v..end];
-        if let Some(hit) = scheme_credential(input, v, end) {
+        r.note(value.len());
+        if let Some(hit) = scheme_credential(r, v, end) {
             return hit;
         }
         let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
@@ -568,7 +681,7 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
     // Closing quote of a JSON or YAML key, possibly escaped (`\"key\":`).
     let key_quoted = skip_quote(bytes, &mut j).is_some();
     let tight = !key_quoted && bytes.get(j) == Some(&b'=');
-    j = run_end(bytes, j, is_blank);
+    j = r.run(Kind::Blank, j);
     let Some(&sep) = bytes.get(j) else {
         return Err(j);
     };
@@ -580,7 +693,7 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
     if bytes.get(j) == Some(&sep) {
         return Err(j);
     }
-    let start = run_end(bytes, j, is_blank);
+    let start = r.run(Kind::Blank, j);
     let tight = tight && start == j;
     let mut v = start;
     let quoted = skip_quote(bytes, &mut v).is_some();
@@ -589,15 +702,15 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
         return Err(v);
     }
     if quoted {
-        let end = run_end(bytes, v, |b| !is_quote(b) && b != b'\\' && b != b'\n');
-        let end = before_mark(input, v, end);
+        let end = r.run(Kind::Quoted, v);
         let value = &input[v..end];
         let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
         return if ok { Ok((v, end)) } else { Err(end) };
     }
-    let end = before_mark(input, v, value_end(bytes, v));
+    let end = value_end(r, v);
     let value = &input[v..end];
-    if let Some(hit) = scheme_credential(input, v, end) {
+    r.note(value.len());
+    if let Some(hit) = scheme_credential(r, v, end) {
         return hit;
     }
     let ok = is_literal_value(value)
@@ -611,18 +724,18 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
 
 /// `auth: Bearer <token>`, `password: Basic <b64>`: a scheme word as the value
 /// means the next token is the credential.
-fn scheme_credential(input: &str, v: usize, end: usize) -> Option<Value> {
-    let value = &input[v..end];
+fn scheme_credential(r: &Reader<'_>, v: usize, end: usize) -> Option<Value> {
+    let value = &r.text[v..end];
     if !AUTH_SCHEMES.iter().any(|s| value.eq_ignore_ascii_case(s)) {
         return None;
     }
-    let bytes = input.as_bytes();
-    let start = run_end(bytes, end, is_blank);
+    let start = r.run(Kind::Blank, end);
     if start == end {
         return None;
     }
-    let token_end = run_end(bytes, start, is_token_byte);
-    let token = &input[start..token_end];
+    let token_end = r.run(Kind::Token, start);
+    let token = &r.text[start..token_end];
+    r.note(token.len());
     // Token bytes exclude `[`, so a token never holds a replacement.
     Some(if is_credential_like(token) {
         Ok((start, token_end))
@@ -631,12 +744,11 @@ fn scheme_credential(input: &str, v: usize, end: usize) -> Option<Value> {
     })
 }
 
-/// End of an unquoted value: value bytes up to the next `=` or `:`, plus trailing
-/// `=` padding. Stopping at `=` and `:` keeps each value read inside one
-/// `key=value` pair, which bounds the work (see the module docs).
-fn value_end(bytes: &[u8], v: usize) -> usize {
-    let body = run_end(bytes, v, |b| is_value_byte(b) && b != b'=' && b != b':');
-    run_end(bytes, body, |b| b == b'=')
+/// End of an unquoted value: value bytes up to the next `=`, `:` or earlier
+/// replacement, plus trailing `=` padding.
+fn value_end(r: &Reader<'_>, v: usize) -> usize {
+    let body = r.run(Kind::ValueBody, v);
+    r.run(Kind::Equals, body)
 }
 
 /// Advances past `"`, `'`, `\"` or `\'`, returning the quote.

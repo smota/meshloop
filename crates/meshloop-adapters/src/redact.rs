@@ -16,7 +16,7 @@ const DIAGNOSTIC_NEEDLES: &[&str] = &[
     "error:", "error[", "warning:", "warning[", "-->", "FAILED", "panicked",
 ];
 
-/// Scrubs secret shapes (see [`secrets`]), then caps the length.
+/// Scrubs secret shapes (see the `secrets` module), then caps the length.
 pub fn redact(input: &str) -> String {
     // Secrets are removed on the full string, before any bytes are dropped.
     let out = secrets::scrub(input);

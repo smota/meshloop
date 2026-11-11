@@ -334,9 +334,8 @@ fn split_key_head_is_redacted_tail_only_when_high_entropy() {
     assert_eq!(out, format!("[REDACTED]\n{tail}"), "documented gap");
 }
 
-#[test]
-fn redaction_is_idempotent_on_generated_inputs() {
-    let fragments: Vec<String> = provider_keys()
+fn generated_fragments() -> Vec<String> {
+    provider_keys()
         .into_iter()
         .map(|(_, k)| k)
         .chain(
@@ -387,7 +386,12 @@ fn redaction_is_idempotent_on_generated_inputs() {
             format!("ghp_{}:x@", fake(93, ALNUM, 36)),
             fake(94, ALNUM, 20),
         ])
-        .collect();
+        .collect()
+}
+
+#[test]
+fn redaction_is_idempotent_on_generated_inputs() {
+    let fragments = generated_fragments();
     let mut rng = Rng(0x5EED_1830_0000_0001);
     for _ in 0..2_000 {
         let n = 1 + rng.below(12);
@@ -400,11 +404,11 @@ fn redaction_is_idempotent_on_generated_inputs() {
     }
 }
 
-#[test]
-fn scrubbing_is_linear_on_adversarial_input() {
-    // Shapes that would make a backtracking or rescanning matcher quadratic. The
-    // key-named runs (`token=$…`) once re-read the value run at every key word.
-    let inputs = [
+/// Shapes that would make a backtracking or rescanning matcher quadratic. The
+/// key-named runs (`token=$…`) once re-read the value run at every key word;
+/// header lines with an earlier replacement once re-read to the end of the line.
+fn adversarial_inputs() -> Vec<String> {
+    vec![
         "sk-".repeat(200_000),
         "a-".repeat(300_000),
         "KEY ".repeat(150_000),
@@ -431,7 +435,17 @@ fn scrubbing_is_linear_on_adversarial_input() {
         ),
         format!("{}[REDACTED]", "token: Bearer ".repeat(150_000)),
         format!("{}[REDACTED]", "api_key=\"abcdefgh ".repeat(110_000)),
-    ];
+        // A replacement after every header on one line.
+        "Authorization: basic [REDACTED]".repeat(70_000),
+        "Authorization: basic x [REDACTED] ".repeat(60_000),
+        "Authorization: Bearer [REDACTED] x ".repeat(60_000),
+        "Proxy-Authorization: digest a[REDACTED]".repeat(55_000),
+    ]
+}
+
+#[test]
+fn scrubbing_is_linear_on_adversarial_input() {
+    let inputs = adversarial_inputs();
     for input in &inputs {
         let start = std::time::Instant::now();
         let _ = redact(input);
@@ -758,4 +772,64 @@ fn an_earlier_replacement_ends_a_header_value_but_does_not_disable_it() {
         "api_key=\"[REDACTED][REDACTED]\""
     );
     assert_eq!(redact("KEY=ab[REDACTED]"), "KEY=ab[REDACTED]");
+}
+
+/// Inspected bytes (every scan, search and per-word or per-value pass) never
+/// exceed this many per input byte.
+const INSPECT_PER_BYTE: usize = 8;
+
+fn inspected_ratio(input: &str) -> f64 {
+    let (_, inspected) = super::secrets::scrub_counting(input);
+    assert!(
+        inspected <= INSPECT_PER_BYTE * input.len().max(1),
+        "{inspected} bytes inspected for {} input bytes: {:?}…",
+        input.len(),
+        input.chars().take(40).collect::<String>()
+    );
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = inspected as f64 / input.len().max(1) as f64;
+    ratio
+}
+
+#[test]
+fn inspected_bytes_are_linear_in_the_input() {
+    let mut max = 0.0f64;
+    for input in adversarial_inputs() {
+        max = max.max(inspected_ratio(&input));
+    }
+    // Random concatenations of every fragment used by the idempotency test and
+    // the review probes, long enough that the constant terms do not dominate.
+    let mut fragments = generated_fragments();
+    fragments.extend(
+        [
+            "Authorization: basic [REDACTED]",
+            "basic x [REDACTED] ",
+            "Bearer [REDACTED] x ",
+            "Proxy-Authorization: digest a[REDACTED]",
+            "token=$",
+            "KEY=%",
+            "token:$",
+            "api_key=\"$",
+            "--token $",
+            "://a:b@",
+            "a://u:p@h/",
+            "eyJa.eyJa.",
+            "hooks.slack.com/services/a",
+            "aB3+",
+            "\u{1b}[1;2;3m",
+            "-----BEGIN X\n",
+            "\\n",
+            "\r\n",
+        ]
+        .map(str::to_string),
+    );
+    let mut rng = Rng(0x1183_0000_5EED_0005);
+    for _ in 0..300 {
+        let n = 200 + rng.below(2_000);
+        let input: String = (0..n)
+            .map(|_| fragments[rng.below(fragments.len())].as_str())
+            .collect();
+        max = max.max(inspected_ratio(&input));
+    }
+    eprintln!("max inspected/input ratio: {max:.2} (bound {INSPECT_PER_BYTE})");
 }
