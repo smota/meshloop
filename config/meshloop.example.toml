@@ -118,3 +118,22 @@ executable = "agy"
 # Live dispatch was not run.
 model_ref = "agy"
 model_tier = "mid"
+
+# Nodecode worker (#138). Commented out: it is operator configuration that needs
+# containment set up first (ADR 0038). Read docs/engineering/nodecode-containment.md and
+# run adapters/nodecode/containment-test.sh before enabling it. `executable` is the
+# bubblewrap wrapper, never nodecode itself. nodecode 0.1.14's shell refuses to run
+# without a terminal, so the wrapper drives one turn through `nodecode rpc`.
+# `model_ref` is PROVIDER/MODEL[:EFFORT]; the provider is required and must be the one
+# whose key file is bound. Live dispatch was run on 2026-11-11 (see that page).
+# [harnesses.nodecode]
+# kind = "nodecode"
+# executable = "/path/to/meshloop/adapters/nodecode/meshloop-nodecode-sandbox"
+# version_args = ["--nodecode", "/home/me/.local/share/meshloop/nodecode/<release>/nodecode", "--version"]
+# invoke_args_template = [
+#   "--nodecode", "/home/me/.local/share/meshloop/nodecode/<release>/nodecode",
+#   "--credential-provider", "<provider>",
+#   "--credential-file", "/home/me/.config/meshloop/nodecode-<provider>.key",
+#   "--model", "{model_ref}", "--prompt-file", "{prompt_file}",
+# ]
+# models = [{ model_ref = "<provider>/<model-id>", model_tier = "mid" }]
