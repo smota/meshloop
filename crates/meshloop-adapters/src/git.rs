@@ -1496,7 +1496,8 @@ mod tests {
         #[cfg(windows)]
         {
             // A junction is a directory reparse point: removed, never followed.
-            for junction in [wt.join("target/escape"), wt.join("link")] {
+            // Native separators: `mklink` reads a `/` inside the path as a switch.
+            for junction in [wt.join("target").join("escape"), wt.join("link")] {
                 let made = StdCommand::new("cmd")
                     .arg("/C")
                     .arg("mklink")
