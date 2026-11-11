@@ -1116,35 +1116,51 @@ fn publish_dry(root: &Path) -> ExitCode {
             eprintln!("publish-dry: {e}");
             return ExitCode::FAILURE;
         }
-        println!("Running cargo package -p {name} --locked --allow-dirty");
-        let output = Command::new("cargo")
-            .args(["package", "-p", name, "--locked", "--allow-dirty"])
-            .current_dir(root)
-            .output();
-        let Ok(output) = output else {
-            eprintln!("publish-dry: cannot run cargo");
-            return ExitCode::FAILURE;
-        };
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        print!("{text}");
-        if output.status.success() {
-            continue;
-        }
-        if text.contains("no matching package named `meshloop-") {
-            println!(
-                "publish-dry: {name} packaging waits for its meshloop-* dependency on crates.io (first upload is domain → engine → adapters → cli)"
-            );
-            continue;
-        }
-        eprintln!("publish-dry: cargo package -p {name} failed");
+    }
+    if let Err(e) = assert_publish_workflow_matches(root) {
+        eprintln!("publish-dry: {e}");
         return ExitCode::FAILURE;
     }
-    println!("publish-dry: manifests ready; packaged what the index currently allows");
-    ExitCode::SUCCESS
+    // One workspace-wide package call: cargo resolves inter-crate dependencies
+    // through a local overlay in dependency order, so this passes even when
+    // crates.io holds only an older version of the meshloop-* crates.
+    let mut args = vec!["package", "--locked", "--allow-dirty"];
+    for name in PUBLISH_CRATES {
+        args.extend(["-p", name]);
+    }
+    println!("Running cargo {}", args.join(" "));
+    match Command::new("cargo").args(&args).current_dir(root).status() {
+        Ok(s) if s.success() => {
+            println!("publish-dry: all {} crates packaged", PUBLISH_CRATES.len());
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            eprintln!("publish-dry: cargo package failed");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("publish-dry: cannot run cargo: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The publish workflow lists the crates to upload; it must match `PUBLISH_CRATES`
+/// (same members, same dependency order).
+fn assert_publish_workflow_matches(root: &Path) -> Result<(), String> {
+    let path = root.join(".github/workflows/publish.yml");
+    let text = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let line = text
+        .lines()
+        .find(|l| l.contains("$crates = @("))
+        .ok_or("publish.yml has no `$crates = @(...)` list")?;
+    let listed: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+    if listed != PUBLISH_CRATES {
+        return Err(format!(
+            "publish.yml crate list {listed:?} differs from PUBLISH_CRATES {PUBLISH_CRATES:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn assert_publish_manifest(root: &Path, name: &str) -> Result<(), String> {
