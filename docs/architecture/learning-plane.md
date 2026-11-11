@@ -82,6 +82,70 @@ lists them. How the decisions in ADR 0038 were built:
   dispatched when the operator's template passes it (a `models` list and
   `--model {model_ref}`); otherwise it is the entry's label.
 
+## Board projection (#137)
+
+The cell projects meshloop run events onto a nodecode Board. The projection is optional
+(`meshloop.board`, off by default) and one-way. The [cell's README](../../cells/nodecode-meshloop/README.md#the-board-projection)
+has the operator detail. These are the decisions:
+
+- **Source.** The CLI gained one read-only verb under ADR 0034, `meshloop events [--graph G]
+  [--after SEQ] --json`. It returns the graph's run-table events in log order with `seq`,
+  the events table's own `event_id`, plus task, attempt, states, event name and the
+  attempt's worktree. It never returns a reason, note or worker output. `watch` was not
+  enough: it diffs polled status, so it misses transitions between polls and has no stable
+  id. A restart that hides a generation's earlier rows (#142) cannot move a cursor kept on
+  `event_id`. The verb folds the rows status folds with `replay_tasks`, as status does:
+  all visible rows of an unbound graph, only the active generation's of a bound graph. It
+  returns `nodes` (folded states) and `latest` (each task's newest counted row). Every
+  other row is marked `superseded` and never posted by the cell: an earlier generation's
+  row after a restart, or a pre-#167 stale row after `Cancel`. `--limit` (default 1000) pages in SQL with `more`. `max_seq` and
+  `ledger_id` (from the graph id and its run row's `created_at`) reveal a replaced
+  ledger. The cell contract has an `events` case, and the read-only suites cover the
+  verb on absent, empty, live-WAL, closed-WAL and pre-v6 ledgers.
+- **Trigger.** There is no daemon (ADR 0022) and no timer, thread or hook point. Syncs run
+  only inside an operator-typed `/meshloop board-sync [GRAPH]`, and, with
+  `board_after_commands` (on by default), after `/meshloop run`, `resume`, `accept`,
+  `cancel` and `status`. Eval verbs never post, and nothing projects worker output. A
+  detached driver's transitions reach the board at the next such command.
+- **Board name.** `meshloop-` plus 12 hex digits of the SHA-256 of the repository root's
+  real path, so the name is deterministic per repository and within the Board's 40
+  characters. Every post names its graph. Only an explicit `/meshloop board-sync` joins the
+  typing session (`board:join`) and says so. The cursor file records joined sessions.
+  Syncs after commands post (`board:post`) only for a recorded session that is still on
+  that board, read from the Board cell's join and leave facts. Otherwise they post nothing
+  and say how to join. The Board cell is an
+  optional peer, found by name at run time, not a load dependency.
+- **Template.** One line made of meshloop's own words: `meshloop G event SEQ: node #T TO
+  (from FROM, EVENT); evidence PATH|none`, and `meshloop G plan N: STATE` when the plan
+  state changes. Every field is checked or escaped (`@` becomes `%40`), a worktree outside
+  the repository shows as `outside-repo/` and its last two components, and the post is
+  clipped to `board.post_chars` with the path shortened first and the mention never cut.
+- **Cursor.** For each repository and graph, the last posted `seq` and plan state are kept
+  in a file of the cell's own, `<nodecode home>/meshloop/board/<store>/<board>.cursor`,
+  never in meshloop's store, with the ledger id and a `pending` marker written before each
+  post. The `seq` in the text makes every post distinct for the Board's 60-second
+  same-words guard, and that guard's refusal counts as "already posted". A post left in
+  flight by a crash is posted again at the next sync without its mention: at least once,
+  never a second wake. A cursor kept on another ledger resets that graph, with a note.
+- **Wakes.** Per the architect decision on #137, posts mention no one by default. With
+  `wake_on_gates` on, a post about a gate (`AwaitingPlanReview`, `AwaitingReview`,
+  `Blocked`, `Failed`) that is still the node's current state ends with
+  `@<supervisor_session>`, with no instruction. Whether that wakes the session is the
+  Board's decision (idle, on the board, `board.hops`).
+- **One-way.** The cell calls only `board:join` and `board:post`. It has no `:round` hook
+  and reads no post. The pure test checks this in the sources, and the load test shows
+  that posts saying `accept` change nothing in the event log or the store.
+- **Workers.** `board_workers` is a reserved setting (off). #138 is not built, so nothing
+  joins a worker.
+
+Verified with the load test on `0.1.13+98dd6dc80`: 125 of 125 checks, of which 44 are the
+Board's. With the setting on and a supervising session on the board, each gate post
+answered `woke s-MESHLOOPSUPER`, and the session's timeline showed a turn whose input was
+the Board's fixed wake line. The throwaway home had no model configured, so each woken turn
+failed at once ("no model is chosen yet") with no model call. That shows delivery at zero
+cost. No turn with a real model was run for #137, so how a woken model behaves is still
+only the spike's observation.
+
 ## Platform
 
 The cell and nodecode workers run on Linux and on WSL2 with all state, worktrees and the

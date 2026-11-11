@@ -271,6 +271,23 @@ fn dispatch(inv: Invocation) -> ExitCode {
                 )
             }
         }
+        Command::Events {
+            graph,
+            after,
+            limit,
+            config,
+            db,
+        } => cmd_events(
+            EventsRequest {
+                graph,
+                after,
+                limit,
+            },
+            config,
+            db,
+            inv.json,
+            inv.origin,
+        ),
         Command::Watch {
             graph,
             session_id,
@@ -2127,6 +2144,258 @@ fn watch_exit(s: &meshloop_engine::run_loop::RunStatus) -> Option<(&'static str,
         return Some(("blocked", blocked));
     }
     None
+}
+
+/// What `meshloop events` was asked for.
+struct EventsRequest {
+    graph: Option<String>,
+    after: i64,
+    limit: i64,
+}
+
+/// One snapshot of what `meshloop events` reads.
+struct EventsRead {
+    run: meshloop_engine::ports::RunRow,
+    all: Vec<(i64, meshloop_engine::ports::TransitionRecord)>,
+    window: Vec<(i64, meshloop_engine::ports::TransitionRecord)>,
+    more: bool,
+    max_seq: i64,
+    worktrees: HashMap<u32, String>,
+    /// For a bound graph, the event ids its readers fold: the active generation's.
+    /// `None` for an unbound graph, whose visible rows are all folded.
+    counted: Option<std::collections::HashSet<i64>>,
+}
+
+/// `meshloop events`: a graph's run-table events in append order with their stable
+/// `event_id` as `seq`, after `--after`, at most `--limit` (#137). Read-only under ADR
+/// 0034: the same read-only composition as status, inspect and watch, SELECTs in one
+/// read snapshot, no writes. Each event is a pointer (task, attempt, states, event
+/// name, time, the attempt's worktree as meshloop recorded it), never a reason, note
+/// or worker output, so a projection such as the nodecode cell's Board can keep a
+/// cursor on `seq` and post each one once. The whole log is folded as every reader
+/// folds it (`replay_tasks`) over the rows status folds (every visible row of an
+/// unbound graph; only the active generation's of a bound one): `nodes` is each
+/// task's folded state, `latest` the seq of its newest counted row, and a row not
+/// counted (another generation's, or a pre-#167 stale chain after `Cancel` the fold
+/// skips) is marked `superseded`. `max_seq` and
+/// `ledger_id` let a cursor see that the ledger was replaced.
+fn cmd_events(
+    request: EventsRequest,
+    config: Option<PathBuf>,
+    db: Option<PathBuf>,
+    json: bool,
+    origin: meshloop_engine::origin::Origin,
+) -> ExitCode {
+    use meshloop_engine::workspace::RuntimeLedger;
+    const COMMAND: &str = "meshloop:events";
+    let EventsRequest {
+        graph,
+        after,
+        limit,
+    } = request;
+    let (cfg, _) = match load_cfg(config) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let composed = match compose::compose_read_only(compose::ComposeRequest {
+        config: &cfg,
+        repo_root: repo_root(),
+        db_path: db.as_deref(),
+        worktree_base: None,
+        origin: origin.clone(),
+        fixture_only: false,
+    }) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let message = graph.as_deref().map_or_else(
+                || "graph not found: no managed runs".to_string(),
+                |id| format!("graph '{id}' not found: no managed runs"),
+            );
+            return read_error(COMMAND, origin, json, message);
+        }
+        Err(e) => return read_error(COMMAND, origin, json, e),
+    };
+    let store = &composed.store;
+    let read = || -> Result<Option<EventsRead>, String> {
+        let run = match graph.as_deref() {
+            Some(id) => store.load_run(id),
+            None => store.latest_run(),
+        }
+        .map_err(|e| format!("{e:?}"))?;
+        let Some(run) = run else {
+            return Ok(None);
+        };
+        let all = store
+            .event_log(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?;
+        let (window, more) = store
+            .event_window(&run.graph_id, after, limit)
+            .map_err(|e| format!("{e:?}"))?;
+        let max_seq = store.max_event_id().map_err(|e| format!("{e:?}"))?;
+        // A bound graph's status folds only its active generation's scoped events
+        // (workspace/read.rs); a restart's earlier generations are history, not
+        // transitions of the run status shows.
+        let graph_id = meshloop_domain::workspace::GraphId::new(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?;
+        let counted = match store.run_binding(&graph_id).map_err(|e| format!("{e:?}"))? {
+            None => None,
+            Some(binding) => {
+                let active = binding.active_generation.map(|g| g.as_str().to_string());
+                Some(
+                    store
+                        .event_generations(&run.graph_id)
+                        .map_err(|e| format!("{e:?}"))?
+                        .into_iter()
+                        .filter(|(_, generation)| active.is_some() && *generation == active)
+                        .map(|(seq, _)| seq)
+                        .collect(),
+                )
+            }
+        };
+        let worktrees = store
+            .attempts_for_graph(&run.graph_id)
+            .map_err(|e| format!("{e:?}"))?
+            .into_iter()
+            .filter_map(|a| {
+                a.worktree_path
+                    .map(|p| (a.attempt_id.0, p.display().to_string()))
+            })
+            .collect();
+        Ok(Some(EventsRead {
+            run,
+            all,
+            window,
+            more,
+            max_seq,
+            worktrees,
+            counted,
+        }))
+    };
+    let mut result = None;
+    if let Err(e) = store.with_read_snapshot(&mut || result = Some(read())) {
+        return read_error(COMMAND, origin, json, format!("{e:?}"));
+    }
+    let read = match result {
+        Some(Ok(Some(read))) => read,
+        Some(Ok(None)) => {
+            let message = graph.as_deref().map_or_else(
+                || "graph not found: no runs".to_string(),
+                |id| format!("graph '{id}' not found"),
+            );
+            return read_error(COMMAND, origin, json, message);
+        }
+        Some(Err(e)) => return read_error(COMMAND, origin, json, e),
+        None => return read_error(COMMAND, origin, json, "read snapshot did not run"),
+    };
+    // The rows status folds: every visible row of an unbound graph, the active
+    // generation's of a bound one. Every other row, and every row the fold skips, is
+    // `superseded`: shown, never a transition of the run status shows.
+    let folded_rows: Vec<&(i64, meshloop_engine::ports::TransitionRecord)> = read
+        .all
+        .iter()
+        .filter(|(seq, _)| read.counted.as_ref().is_none_or(|c| c.contains(seq)))
+        .collect();
+    let records: Vec<_> = folded_rows.iter().map(|(_, r)| r.clone()).collect();
+    let (folded, skipped) = match meshloop_engine::recovery::replay_tasks_marked(&records) {
+        Ok(v) => v,
+        Err(e) => return read_error(COMMAND, origin, json, format!("{e:?}")),
+    };
+    let transitions: Vec<(i64, u32)> = folded_rows
+        .iter()
+        .zip(&skipped)
+        .filter(|(_, skip)| !**skip)
+        .map(|((seq, r), _)| (*seq, r.task_id.0))
+        .collect();
+    let counted: std::collections::HashSet<i64> = transitions.iter().map(|(s, _)| *s).collect();
+    let superseded: std::collections::HashSet<i64> = read
+        .all
+        .iter()
+        .map(|(seq, _)| *seq)
+        .filter(|seq| !counted.contains(seq))
+        .collect();
+    let mut nodes: Vec<_> = folded.into_iter().collect();
+    nodes.sort_by_key(|(task, _)| task.0);
+    let last_seq = read.window.last().map_or(after, |(seq, _)| *seq);
+    let ledger_id = meshloop_domain::digest::sha256_hex(
+        format!(
+            "meshloop-ledger\0{}\0{}",
+            read.run.graph_id, read.run.created_at
+        )
+        .as_bytes(),
+    )[..16]
+        .to_string();
+    if json {
+        let rows: Vec<serde_json::Value> = read
+            .window
+            .iter()
+            .map(|(seq, e)| {
+                serde_json::json!({
+                    "seq": seq,
+                    "task": e.task_id.0,
+                    "attempt": e.attempt_id.map(|a| a.0),
+                    "from": format!("{:?}", e.from),
+                    "to": format!("{:?}", e.to),
+                    "event": format!("{:?}", e.event),
+                    "occurred_at": e.occurred_at,
+                    "superseded": superseded.contains(seq),
+                    "evidence_path": e.attempt_id.and_then(|a| read.worktrees.get(&a.0)),
+                })
+            })
+            .collect();
+        let nodes: serde_json::Map<String, serde_json::Value> = nodes
+            .iter()
+            .map(|(task, state)| (task.0.to_string(), format!("{state:?}").into()))
+            .collect();
+        // Each task's newest row the fold counted, over the whole log, so a reader of
+        // one page can tell whether an event is still its node's current state.
+        let mut latest = serde_json::Map::new();
+        for (seq, task) in &transitions {
+            latest.insert(task.to_string(), (*seq).into());
+        }
+        println!(
+            "{}",
+            json_out::ok(
+                COMMAND,
+                origin,
+                serde_json::json!({
+                    "graph_id": read.run.graph_id,
+                    "plan_state": format!("{:?}", read.run.plan_state),
+                    "ledger_id": ledger_id,
+                    "after": after,
+                    "limit": limit,
+                    "last_seq": last_seq,
+                    "max_seq": read.max_seq,
+                    "more": read.more,
+                    "nodes": nodes,
+                    "latest": latest,
+                    "events": rows,
+                })
+            )
+        );
+    } else {
+        println!(
+            "graph {} (plan {:?}): {} event(s) after {after}{}",
+            read.run.graph_id,
+            read.run.plan_state,
+            read.window.len(),
+            if read.more { ", more follow" } else { "" }
+        );
+        for (seq, e) in &read.window {
+            println!(
+                "  {seq} #{} {:?} -> {:?} ({:?}){}",
+                e.task_id.0,
+                e.from,
+                e.to,
+                e.event,
+                if superseded.contains(seq) {
+                    " superseded"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// Reads the store only (never owns workers), so it also works on `run --detach`.

@@ -437,6 +437,70 @@ fn mutate(store: &mut SqliteStore, lease: &dyn RepositoryFence) {
         .unwrap();
 }
 
+/// #137 review: `meshloop events` on a restarted bound graph folds what status folds,
+/// the active generation's scoped events; the earlier generation's rows are shown as
+/// `superseded`, never folded (they used to fail as Failed + AttemptStarted).
+#[test]
+fn events_fold_only_the_active_generation_as_status_does() {
+    let f = Fixture::new("events-generations");
+    let (mut store, lease) = setup(&f);
+    let old = attempt(&mut store, &lease, "old-attempt");
+    append(
+        &mut store,
+        &lease,
+        Some(old.attempt_id),
+        TaskState::Ready,
+        Event::AttemptStarted,
+    );
+    append(
+        &mut store,
+        &lease,
+        Some(old.attempt_id),
+        TaskState::Running,
+        Event::HarnessCrashedOrTimeout,
+    );
+    activate(&mut store, &lease, 2);
+    let current = attempt(&mut store, &lease, "current-attempt");
+    append(
+        &mut store,
+        &lease,
+        Some(current.attempt_id),
+        TaskState::Ready,
+        Event::AttemptStarted,
+    );
+    drop(lease);
+    drop(store);
+    let before = snapshot(&f.base);
+    let status = f.read(&["status", "--graph", "bound-run"], 0);
+    let events = f.read(&["events", "--graph", "bound-run"], 0);
+    assert_eq!(snapshot(&f.base), before, "events wrote nothing");
+    let data = &events["data"];
+    for node in status["data"]["nodes"].as_array().unwrap() {
+        assert_eq!(
+            data["nodes"][node["id"].to_string()],
+            node["state"],
+            "{events:#}"
+        );
+    }
+    assert_eq!(data["nodes"]["1"], "Running", "{events:#}");
+    let rows = data["events"].as_array().unwrap();
+    let flags: Vec<(&str, bool)> = rows
+        .iter()
+        .map(|e| {
+            (
+                e["to"].as_str().unwrap(),
+                e["superseded"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        vec![("Running", true), ("Failed", true), ("Running", false)],
+        "{events:#}"
+    );
+    assert_eq!(data["latest"]["1"], rows[2]["seq"], "{events:#}");
+}
+
 #[test]
 fn public_reads_select_active_generation_attempts_evidence_and_portable_locations() {
     let f = Fixture::new("generations");

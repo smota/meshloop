@@ -16,6 +16,10 @@
 ;;;; command and passes it as --as: there is no default and no setting for it.
 ;;;; integrate lands only with --accept-integrate typed, after the person has had
 ;;;; the integrate worktree pointed out to them.
+;;;;
+;;;; /meshloop board-sync and the sync after run, resume, accept, cancel and
+;;;; status are board.lisp's: they post to a nodecode Board, write nothing to
+;;;; meshloop, and do nothing while meshloop.board is off (the default).
 
 (in-package #:nodecode-meshloop)
 
@@ -488,7 +492,7 @@ one is a refusal asking which; none falls back to the newest run."
                             :placeholder "meshloop-plan.json" :verb "read"))))
 
 (defparameter +usage+
-  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as <your-name>, run, resume, cancel, accept --task N --as <your-name>, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto")
+  "meshloop: /meshloop doctor | status [GRAPH] | inspect [GRAPH] | report [GRAPH] | review-plan [--plan FILE] read; plan, review-plan --accept|--decline|--adjust --as <your-name>, run, resume, cancel, accept --task N --as <your-name>, integrate --graph G --into BRANCH --accept-integrate write, when meshloop.write_commands is on (off by default); hook-check FORM tests the :tool veto; board-sync [GRAPH] projects runs onto the repository's nodecode board, when meshloop.board is on (off by default)")
 
 (defun after-first-word (text)
   "TEXT past its first word and the blanks after it, as typed."
@@ -498,31 +502,38 @@ one is a refusal asking which; none falls back to the newest run."
 
 (defun run-slash (args session-id)
   "/meshloop VERB ...: the operator's command. Typed alone, the panel.
-=> the answer's text."
+=> the answer's text. With meshloop.board and board_after_commands on, run,
+resume, accept, cancel and status then project onto the repository's board
+(board.lisp); with meshloop.board off (the default) nothing more runs."
   (let* ((words (nlk:split-words (or args "")))
          (verb (string-downcase (or (first words) "")))
          (rest (format nil "~{~a~^ ~}" (rest words))))
-    (cond ((null words) (values +usage+ (panel)))
-          ((string= verb "doctor") (doctor-of session-id rest))
-          ((string= verb "status") (view-of "status" session-id rest))
-          ((string= verb "inspect") (view-of "inspect" session-id rest))
-          ((string= verb "report") (report-of session-id rest))
-          ((string= verb "hook-check") (hook-check-of (after-first-word args)))
-          ((string= verb "plan") (plan-of session-id rest))
-          ((string= verb "review-plan") (review-plan-of session-id rest))
-          ((string= verb "run") (run-plan-of session-id rest))
-          ((string= verb "resume") (resume-of session-id rest))
-          ((string= verb "cancel") (cancel-of session-id rest))
-          ((string= verb "accept") (accept-of session-id rest))
-          ((string= verb "integrate") (integrate-of session-id rest))
-          (t (format nil "meshloop: ~s is no verb here; ~a" (nlk:one-line verb :cap 40)
-                     (subseq +usage+ (length "meshloop: ")))))))
+    (if (null words)
+        (values +usage+ (panel))
+        (after-command
+         verb (rest words)
+         (cond ((string= verb "doctor") (doctor-of session-id rest))
+               ((string= verb "status") (view-of "status" session-id rest))
+               ((string= verb "inspect") (view-of "inspect" session-id rest))
+               ((string= verb "report") (report-of session-id rest))
+               ((string= verb "hook-check") (hook-check-of (after-first-word args)))
+               ((string= verb "board-sync") (board-sync-of session-id rest))
+               ((string= verb "plan") (plan-of session-id rest))
+               ((string= verb "review-plan") (review-plan-of session-id rest))
+               ((string= verb "run") (run-plan-of session-id rest))
+               ((string= verb "resume") (resume-of session-id rest))
+               ((string= verb "cancel") (cancel-of session-id rest))
+               ((string= verb "accept") (accept-of session-id rest))
+               ((string= verb "integrate") (integrate-of session-id rest))
+               (t (format nil "meshloop: ~s is no verb here; ~a" (nlk:one-line verb :cap 40)
+                          (subseq +usage+ (length "meshloop: ")))))
+         session-id))))
 
 ;;; --- the declaration --------------------------------------------------------------
 
 (nle:define-cell meshloop
   (:section ("meshloop")
-    (:guide "meshloop runs through `meshloop VERB --json' in the session's repository. binary is a meshloop built from the checkout. write_commands lets the slash commands that write run; it is off by default")
+    (:guide "meshloop runs through `meshloop VERB --json' in the session's repository. binary is a meshloop built from the checkout. write_commands lets the slash commands that write run; it is off by default. board projects run events onto the repository's nodecode board, one-way; it is off by default, and wake_on_gates, also off, lets a gate post wake supervisor_session")
     ("binary" :string :default "meshloop"
               :doc "the meshloop executable: the absolute path of target/debug/meshloop built from the checkout, or a name found on PATH")
     ("timeout_seconds" :integer :default 60 :min 1
@@ -530,7 +541,17 @@ one is a refusal asking which; none falls back to the newest run."
     ("plan_timeout_seconds" :integer :default 600 :min 1
                             :doc "how long plan and review-plan --adjust, which run the planner in the foreground, may run")
     ("write_commands" :boolean :default nil
-                      :doc "let /meshloop plan, review-plan with a decision, run, resume, cancel, accept and integrate run; off, each refuses"))
+                      :doc "let /meshloop plan, review-plan with a decision, run, resume, cancel, accept and integrate run; off, each refuses")
+    ("board" :boolean :default nil
+             :doc "project meshloop run events as pointer posts onto this repository's nodecode board (needs the nodecode-board cell); one-way, nothing on the board acts on meshloop")
+    ("board_after_commands" :boolean :default t
+                            :doc "with board on, sync the board after /meshloop run, resume, accept, cancel and status, not only on /meshloop board-sync")
+    ("wake_on_gates" :boolean :default nil
+                     :doc "with board on, a post for a gate (AwaitingPlanReview, AwaitingReview, Blocked, Failed) mentions supervisor_session, which wakes it when idle: a model turn with full host authority")
+    ("supervisor_session" :string :default ""
+                          :doc "the session id a gate post mentions when wake_on_gates is on, for example s-ABC123; empty mentions nobody")
+    ("board_workers" :boolean :default nil
+                     :doc "reserved for nodecode-harness workers joining the board (#138, not built): no worker joins while it is off, nor while it is on"))
   (:help :meshloop "meshloop:doctor, status, inspect, report read meshloop runs; /meshloop drives them when write_commands is on" +primer+)
   (:command "meshloop" 'run-slash
             :description "Meshloop runs in this folder: read them, and drive them when write_commands is on")
