@@ -172,3 +172,250 @@ fn watch_failed_run_exits_nonzero_and_json_names_the_change() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Kills every recorded driver and attempt process when a test ends, even on panic.
+struct Reaper {
+    db: PathBuf,
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let Ok(conn) = rusqlite::Connection::open(&self.db) else {
+            return;
+        };
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
+        for sql in [
+            "SELECT pid FROM run_driver_liveness",
+            "SELECT pid FROM attempts WHERE pid IS NOT NULL",
+        ] {
+            let Ok(mut stmt) = conn.prepare(sql) else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map([], |row| row.get::<_, i64>(0)) else {
+                continue;
+            };
+            for pid in rows.filter_map(Result::ok).filter(|pid| *pid > 0) {
+                meshloop_adapters::process::kill_process_tree(pid as u32);
+            }
+        }
+    }
+}
+
+fn gated_config(dir: &Path, gate: &Path) -> PathBuf {
+    let path = dir.join("meshloop.toml");
+    let esc = |s: &str| s.replace('\\', "\\\\");
+    let contents = format!(
+        r#"
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 2
+max_retries = 1
+task_timeout_seconds = 150
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "{}"
+version_args = ["--version"]
+invoke_args_template = ["--gated-prompt-file", "{{prompt_file}}", "{}"]
+model_ref = "fixture-model"
+model_tier = "top"
+"#,
+        esc(&fixture_path()),
+        esc(&gate.to_string_lossy()),
+    );
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+/// Runs `cmd`, killing it if it outlives `limit`, so a stalled `watch` fails the
+/// test instead of hanging the suite.
+fn bounded_output(cmd: &mut Command, limit: std::time::Duration) -> (std::process::Output, bool) {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = meshloop_adapters::process::spawn_command(cmd).expect("spawn");
+    let deadline = std::time::Instant::now() + limit;
+    let mut killed = false;
+    while child.try_wait().expect("try_wait").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            killed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    (child.wait_with_output().expect("watch output"), killed)
+}
+
+fn watch_cmd(dir: &Path, config: &Path, db: &Path, graph: &str) -> Command {
+    let mut cmd = meshloop(dir);
+    cmd.args([
+        "watch",
+        "--graph",
+        graph,
+        "--json",
+        "--interval",
+        "1",
+        "--config",
+    ])
+    .arg(config)
+    .arg("--db")
+    .arg(db);
+    cmd
+}
+
+/// #195: a `watch` started after `accept`, while the detached driver is still
+/// working on node 2, must report node 2's AwaitingReview and exit, including
+/// after the driver exits. Before the fix the watch process dropped its SQLite
+/// WAL lock while opening the ledger, the exiting driver unlinked the WAL under
+/// it, and the watch read that orphaned snapshot until killed.
+#[test]
+fn watch_started_after_accept_reports_the_next_review_after_the_driver_exits() {
+    let dir = temp_repo("after-accept");
+    let gate = dir.join("gate-open");
+    let config = gated_config(&dir, &gate);
+    let db = dir.join("state.sqlite");
+    let _reaper = Reaper { db: db.clone() };
+    let plan = dir.join("plan.json");
+    fs::write(
+        &plan,
+        r#"{"graph_id":"gaccept","nodes":[{"id":1,"description":"fast first","depends_on":[],"tier":null},{"id":2,"description":"GATED second","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    let run = meshloop(&dir)
+        .args(["run", "--plan"])
+        .arg(&plan)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--detach",
+            "--json",
+            "--config",
+        ])
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .arg("--worktree-base")
+        .arg(dir.join("worktrees"))
+        .output()
+        .expect("run --detach");
+    assert!(run.status.success(), "{run:?}");
+
+    let limit = std::time::Duration::from_secs(90);
+    let (first, killed) = bounded_output(&mut watch_cmd(&dir, &config, &db, "gaccept"), limit);
+    assert!(!killed, "first watch stalled: {first:?}");
+    let lines = ndjson(&first);
+    let exit = lines.last().expect("exit line");
+    assert_eq!(exit["exit"], "awaiting_review", "{lines:?}");
+    assert_eq!(exit["nodes"], serde_json::json!([1]), "{lines:?}");
+
+    let accept = meshloop(&dir)
+        .args([
+            "accept", "--task", "1", "--as", "tester", "--graph", "gaccept",
+        ])
+        .arg("--config")
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .output()
+        .expect("accept");
+    assert!(accept.status.success(), "{accept:?}");
+
+    // Open the gate only after the second watch has opened the ledger and seen
+    // node 2 still Running, so node 2's review and the driver's exit both land
+    // while it is watching.
+    let opener = {
+        let (dir, config, db, gate) = (dir.clone(), config.clone(), db.clone(), gate.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let status = meshloop(&dir)
+                .args(["status", "--graph", "gaccept", "--json", "--config"])
+                .arg(&config)
+                .arg("--db")
+                .arg(&db)
+                .output()
+                .expect("status");
+            fs::write(&gate, "open").unwrap();
+            status
+        })
+    };
+    let (second, killed) = bounded_output(&mut watch_cmd(&dir, &config, &db, "gaccept"), limit);
+    let status = opener.join().expect("gate opener");
+    let lines = ndjson(&second);
+    assert!(
+        !killed,
+        "second watch stalled after node 2 left Running: {lines:?}\nstatus: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let running = lines
+        .iter()
+        .any(|l| l["node"] == 2 && l["to"] == "Running" && l["from"].is_null());
+    assert!(
+        running,
+        "second watch must start while node 2 runs: {lines:?}"
+    );
+    let exit = lines.last().expect("exit line");
+    assert_eq!(exit["exit"], "awaiting_review", "{lines:?}");
+    assert_eq!(exit["nodes"], serde_json::json!([2]), "{lines:?}");
+    assert_eq!(second.status.code(), Some(0), "{second:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A detached driver that is gone while a node still needs it leaves nothing to
+/// wait for: `watch` exits with `driver_gone` instead of blocking forever.
+#[test]
+fn watch_exits_when_the_detached_driver_is_gone_and_no_node_can_progress() {
+    let dir = temp_repo("driver-gone");
+    let gate = dir.join("gate-never");
+    let config = gated_config(&dir, &gate);
+    let db = dir.join("state.sqlite");
+    let _reaper = Reaper { db: db.clone() };
+    let plan = dir.join("plan.json");
+    fs::write(
+        &plan,
+        r#"{"graph_id":"ggone","nodes":[{"id":1,"description":"never runs","depends_on":[],"tier":null}]}"#,
+    )
+    .unwrap();
+    let run = meshloop(&dir)
+        .env("MESHLOOP_DRIVER_PANIC", "1")
+        .args(["run", "--plan"])
+        .arg(&plan)
+        .args([
+            "--accept-plan",
+            "--fixture-only",
+            "--detach",
+            "--json",
+            "--config",
+        ])
+        .arg(&config)
+        .arg("--db")
+        .arg(&db)
+        .arg("--worktree-base")
+        .arg(dir.join("worktrees"))
+        .output()
+        .expect("run --detach");
+    assert!(run.status.success(), "{run:?}");
+
+    let (out, killed) = bounded_output(
+        &mut watch_cmd(&dir, &config, &db, "ggone"),
+        std::time::Duration::from_secs(60),
+    );
+    let lines = ndjson(&out);
+    assert!(!killed, "watch never noticed the gone driver: {lines:?}");
+    let exit = lines.last().expect("exit line");
+    assert_eq!(exit["exit"], "driver_gone", "{lines:?}");
+    assert_eq!(exit["nodes"], serde_json::json!([1]), "{lines:?}");
+    let driver = exit["driver"].as_str().unwrap_or("");
+    assert!(
+        driver == "lost" || driver.starts_with("exited("),
+        "{lines:?}"
+    );
+    assert!(exit["driver_log"].as_str().is_some(), "{lines:?}");
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

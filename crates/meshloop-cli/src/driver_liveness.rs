@@ -116,12 +116,25 @@ pub fn driver_label(
 }
 
 fn needs_driver(status: &RunStatus) -> bool {
-    status.nodes.iter().any(|node| {
-        !matches!(
-            node.state,
-            TaskState::Integrated | TaskState::Failed | TaskState::Cancelled | TaskState::Blocked
-        )
-    })
+    !needing_driver(status).is_empty()
+}
+
+/// Nodes a driver still has to move: every node not Integrated, Failed, Cancelled or Blocked.
+pub fn needing_driver(status: &RunStatus) -> Vec<u32> {
+    status
+        .nodes
+        .iter()
+        .filter(|node| {
+            !matches!(
+                node.state,
+                TaskState::Integrated
+                    | TaskState::Failed
+                    | TaskState::Cancelled
+                    | TaskState::Blocked
+            )
+        })
+        .map(|node| node.task_id.0)
+        .collect()
 }
 
 fn mesh_dir(repo_root: &Path, db: Option<&Path>) -> PathBuf {

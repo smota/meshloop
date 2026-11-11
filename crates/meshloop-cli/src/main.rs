@@ -2207,7 +2207,40 @@ fn cmd_inspect(
 fn watch_status_code(reason: &str) -> u8 {
     match reason {
         "failed" | "cancelled" | "blocked" => 1,
+        "driver_gone" => 4,
         _ => 0,
+    }
+}
+
+/// How long a detached driver must stay gone before `watch` gives up on it. A
+/// `resume --detach` returns before its new driver registers, so the previous
+/// driver's exited row can briefly describe a run that is about to move again.
+const WATCH_DRIVER_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(2 * meshloop_engine::run_loop::DRIVER_HEARTBEAT.as_secs());
+
+/// Tracks whether a run's detached driver has exited or been lost while a node
+/// still needs it (#195). Nothing moves such a run until `meshloop resume`, so
+/// `watch` exits `driver_gone` once that holds for [`WATCH_DRIVER_GRACE`]. A run
+/// with no driver row (a foreground `run`) is never reported gone.
+#[derive(Default)]
+struct WatchDriverGone {
+    since: Option<std::time::Instant>,
+}
+
+impl WatchDriverGone {
+    fn observe(
+        &mut self,
+        saga: &RunLoop<'_>,
+        status: &RunStatus,
+    ) -> Option<driver_liveness::DriverReport> {
+        let report = driver_liveness::observe(saga.store, saga.processes, status)
+            .filter(|report| report.suggest_resume);
+        let Some(report) = report else {
+            self.since = None;
+            return None;
+        };
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        (since.elapsed() >= WATCH_DRIVER_GRACE).then_some(report)
     }
 }
 
@@ -2558,6 +2591,7 @@ fn cmd_watch(
         let interval = std::time::Duration::from_secs(interval_secs);
         let mut seen: HashMap<u32, TaskState> = HashMap::new();
         let mut seen_plan: Option<PlanState> = None;
+        let mut gone = WatchDriverGone::default();
         loop {
             let frame = match saga.read_frame(&selection) {
                 Ok(frame) => frame,
@@ -2634,7 +2668,19 @@ fn cmd_watch(
                     println!("[{ts}] {} plan: {from} -> {:?}", s.graph_id, s.plan_state);
                 }
             }
-            let (reason, nodes, code) = match watch_exit(s) {
+            // Checked on every still-moving frame, so a driver that comes back
+            // (`resume --detach`) resets the grace window.
+            let (exit, driver) = match watch_exit(s) {
+                Some(exit) => (Some(exit), None),
+                None => match gone.observe(saga, s) {
+                    Some(report) => (
+                        Some(("driver_gone", driver_liveness::needing_driver(s))),
+                        Some(report),
+                    ),
+                    None => (None, None),
+                },
+            };
+            let (reason, nodes, code) = match exit {
                 Some((reason, nodes)) => (reason, nodes, watch_status_code(reason)),
                 None if timeout_secs > 0 && started.elapsed() >= timeout => {
                     ("timeout", Vec::new(), 3)
@@ -2650,6 +2696,11 @@ fn cmd_watch(
             };
             if json {
                 let mut exit = serde_json::json!({ "exit": reason, "nodes": nodes });
+                if let Some(report) = &driver {
+                    exit["driver"] = serde_json::json!(report.label);
+                    exit["driver_log"] = serde_json::json!(report.log_path);
+                    exit["driver_hint"] = serde_json::json!("resume");
+                }
                 if frame.generation_id.is_some() {
                     exit["generation_id"] = serde_json::json!(frame.generation_id);
                     exit["revision_id"] = serde_json::json!(frame.revision_id);
@@ -2658,6 +2709,9 @@ fn cmd_watch(
             } else {
                 let ids: Vec<String> = nodes.iter().map(u32::to_string).collect();
                 println!("exit: {reason} nodes=[{}]", ids.join(","));
+                if let Some(report) = &driver {
+                    print!("{}", report.text());
+                }
             }
             return ExitCode::from(code);
         }
@@ -3714,6 +3768,7 @@ mod watch_exit_tests {
         assert_eq!(watch_status_code("failed"), 1);
         assert_eq!(watch_status_code("awaiting_review"), 0);
         assert_eq!(watch_status_code("completed"), 0);
+        assert_eq!(watch_status_code("driver_gone"), 4);
     }
 
     #[test]
