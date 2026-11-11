@@ -172,8 +172,8 @@ pub struct ModelEntry {
 /// Upper bound on one harness entry's `models` list. Each model is a routing arm with
 /// its own feedback row, so the list stays small and bounded.
 pub const MAX_MODELS_PER_HARNESS: usize = 16;
-/// Upper bound on one `model_ref` in a `models` list, in bytes.
-const MAX_MODEL_REF_BYTES: usize = 256;
+/// Upper bound on one `model_ref` in a `models` list, in bytes (the domain predicate's).
+const MAX_MODEL_REF_BYTES: usize = meshloop_domain::advisory::MAX_MODEL_REF_BYTES;
 /// Tiers accepted in a `models` list. The legacy `model_tier` keeps its lenient parse,
 /// where an unknown value means lightweight.
 const LIST_MODEL_TIERS: [&str; 3] = ["top", "mid", "lightweight"];
@@ -196,6 +196,7 @@ impl HarnessConfig {
 /// Checks the model form of one harness entry. The single `model_ref` form keeps its
 /// pre-#134 behaviour (no new checks); the `models` list is validated in full.
 fn validate_models(name: &str, hc: &HarnessConfig) -> Result<(), ConfigError> {
+    use meshloop_domain::advisory::ModelRefFault;
     let err = |msg: String| Err(ConfigError::Parse(format!("harness '{name}': {msg}")));
     let Some(models) = &hc.models else {
         if hc.model_ref.is_none() {
@@ -218,24 +219,28 @@ fn validate_models(name: &str, hc: &HarnessConfig) -> Result<(), ConfigError> {
     let mut seen = std::collections::HashSet::new();
     for (i, m) in models.iter().enumerate() {
         let r = &m.model_ref;
-        if r.trim().is_empty() {
-            return err(format!("models[{i}].model_ref must not be empty"));
-        }
-        if r.len() > MAX_MODEL_REF_BYTES {
-            return err(format!(
-                "models[{i}].model_ref is longer than {MAX_MODEL_REF_BYTES} bytes"
-            ));
-        }
-        // The ref becomes one argv element; a leading '-' would read as a harness flag.
-        if r.starts_with('-') {
-            return err(format!(
-                "models[{i}].model_ref '{r}' must not start with '-'"
-            ));
-        }
-        if r.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return err(format!(
-                "models[{i}].model_ref must not contain whitespace or control characters"
-            ));
+        // #134's predicate, shared with the advisory priors loader (#139). The ref
+        // becomes one argv element; a leading '-' would read as a harness flag.
+        match meshloop_domain::advisory::check_model_ref(r) {
+            Ok(()) => {}
+            Err(ModelRefFault::Empty) => {
+                return err(format!("models[{i}].model_ref must not be empty"));
+            }
+            Err(ModelRefFault::TooLong) => {
+                return err(format!(
+                    "models[{i}].model_ref is longer than {MAX_MODEL_REF_BYTES} bytes"
+                ));
+            }
+            Err(ModelRefFault::LeadingDash) => {
+                return err(format!(
+                    "models[{i}].model_ref '{r}' must not start with '-'"
+                ));
+            }
+            Err(ModelRefFault::WhitespaceOrControl) => {
+                return err(format!(
+                    "models[{i}].model_ref must not contain whitespace or control characters"
+                ));
+            }
         }
         if !seen.insert(r.as_str()) {
             return err(format!("duplicate model_ref '{r}' in models"));

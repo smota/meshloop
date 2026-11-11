@@ -1,6 +1,6 @@
 {
   "schema": "nodecode-meshloop/cli-contract/1",
-  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on fixture repositories and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null. A field with \"optional\": true may be absent, and has its type when present. `command` names the envelope's command when it is not meshloop:<first argv word>. `graph` lists the fields the cell reads of a plan (the plan file review-plan shows, and data.graph of plan and review-plan). accept, and integrate without --deliverable, answer text, not JSON: the cell reads their exit code, then reads back what they recorded through inspect_attempts and status.",
+  "about": "Every field of `meshloop <verb> --json` that the nodecode-meshloop cell reads. The cell checks each response against this file, and crates/meshloop-cli/tests/nodecode_cell_contract.rs runs the verbs on fixture repositories and asserts the same paths and types. A path is dot-separated; `[]` means every element of that array. A type ending in `?` may also be null. A field with \"optional\": true may be absent, and has its type when present. `command` names the envelope's command when it is not meshloop:<first argv word>. `graph` lists the fields the cell reads of a plan (the plan file review-plan shows, and data.graph of plan and review-plan). accept, and integrate without --deliverable, answer text, not JSON: the cell reads their exit code, then reads back what they recorded through inspect_attempts and status. priors_attempts holds the fields only /meshloop learn reads (the #139 attempt fields and the node tier), so an older binary still answers report and accept while learn fails closed.",
   "envelope": [
     { "path": "ok", "type": "boolean" },
     { "path": "command", "type": "string" }
@@ -93,6 +93,59 @@
         { "path": "data.nodes[].attempts[].evidence[].tool", "type": "string?" },
         { "path": "data.nodes[].attempts[].evidence[].exit_code", "type": "integer?" },
         { "path": "data.nodes[].attempts[].evidence[].summary_redacted", "type": "string?" }
+      ]
+    },
+    "priors_attempts": {
+      "argv": ["inspect", "--attempts", "--graph", "gcell"],
+      "ok": true,
+      "fields": [
+        { "path": "data.nodes[].tier", "type": "string" },
+        { "path": "data.nodes[].attempts[].attempt_id", "type": "integer" },
+        { "path": "data.nodes[].attempts[].dispatch_mode", "type": "string?" },
+        { "path": "data.nodes[].attempts[].model_passed", "type": "boolean?" },
+        { "path": "data.nodes[].attempts[].check_result", "type": "string?" }
+      ]
+    },
+    "priors_show": {
+      "argv": ["priors", "show"],
+      "command": "meshloop:priors-show",
+      "ok": true,
+      "fields": [
+        { "path": "data.in_effect", "type": "boolean" },
+        { "path": "data.priors_sha256", "type": "string?" },
+        { "path": "data.evidence_floor", "type": "integer" },
+        { "path": "data.row", "type": "object?" },
+        { "path": "data.row.seq", "type": "integer", "optional": true },
+        { "path": "data.row.identity", "type": "string", "optional": true },
+        { "path": "data.priors", "type": "array" },
+        { "path": "data.routing.attempts", "type": "integer" },
+        { "path": "data.routing.changed_top", "type": "integer" },
+        { "path": "data.diagnostics", "type": "array" },
+        { "path": "data.diagnostics[].code", "type": "string" },
+        { "path": "data.diagnostics[].level", "type": "string" }
+      ]
+    },
+    "priors_check": {
+      "argv": ["priors", "check", "--file", "advisory-priors.json"],
+      "command": "meshloop:priors-check",
+      "ok": true,
+      "fields": [
+        { "path": "data.file_fault", "type": "string?" },
+        { "path": "data.usable", "type": "array" },
+        { "path": "data.usable[].harness", "type": "string" },
+        { "path": "data.usable[].model_ref", "type": "string" },
+        { "path": "data.usable[].tier", "type": "string" },
+        { "path": "data.usable[].attempts", "type": "integer" },
+        { "path": "data.usable[].successes", "type": "integer" },
+        { "path": "data.ignored", "type": "array" },
+        { "path": "data.ignored[].code", "type": "string" },
+        { "path": "data.diagnostics", "type": "array" },
+        { "path": "data.diagnostics[].code", "type": "string" },
+        { "path": "data.diagnostics[].level", "type": "string" },
+        { "path": "data.diagnostics[].harness", "type": "string?" },
+        { "path": "data.diagnostics[].model_ref", "type": "string?" },
+        { "path": "data.diagnostics[].tier", "type": "string?" },
+        { "path": "data.diagnostics[].detail", "type": "string" }
       ]
     },
     "integrate_preview": {

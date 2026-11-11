@@ -89,6 +89,18 @@ pub trait HarnessCapabilities: Sync {
     fn process_image(&self) -> Option<String> {
         None
     }
+
+    /// Whether `invoke` passes the candidate's `model_ref` to the harness: true when the
+    /// harness's argument template substitutes `{model_ref}` (#139). The engine never sees
+    /// the template. Recorded once per attempt as `attempts.model_passed`.
+    fn passes_model_ref(&self) -> bool {
+        false
+    }
+
+    /// How this harness dispatches. No default: every harness states it, so a native
+    /// harness (#147) cannot inherit `Subprocess`. The priors oracle gives a candidate
+    /// whose harness is not a subprocess no prior (ADR 0038 #139 amendment, rule 3).
+    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +144,9 @@ pub enum StoreError {
     },
     Io(String),
     Corrupt(String),
+    /// The caller passed a value the store refuses to record (e.g. a bad `--as`
+    /// identity). Nothing was written; the stored data is fine.
+    InvalidInput(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +296,43 @@ pub struct AttemptRow {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub outcome: Option<String>,
+    /// Whether dispatch passed `model_ref` to the harness (#139). Written when the row is
+    /// created and never changed after; `None` on rows written before #139.
+    pub model_passed: Option<bool>,
+    /// The dispatch mode the row records. A placeholder until the store has a mode
+    /// column (#147); read only through `DispatchMode::of_recorded_attempt`.
+    pub dispatch: meshloop_domain::advisory::RecordedDispatch,
+}
+
+/// One worker attempt routed while advisory priors were in effect (#139). Written in the
+/// attempt row's transaction. Never an Evidence row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvisoryRouting {
+    pub attempt_id: AttemptId,
+    pub priors_sha256: String,
+    /// The dispatched candidate differs from the one dispatch would pick with the oracle
+    /// off, already-spent candidates excluded in both.
+    pub changed_top: bool,
+}
+
+/// A promoted priors file as routing reads it: one read of the latest ledger row,
+/// minus every entry that row's `accept` ignored and every entry the loader ignores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorsSnapshot {
+    /// The ledger row's sequence number.
+    pub sequence: i64,
+    pub priors_sha256: String,
+    pub entries: Vec<meshloop_domain::advisory::PriorEntry>,
+}
+
+/// Engine port for promoted advisory priors (ADR 0038 #139 amendment, rule 4).
+/// `Ok(None)` means no priors are in effect: no row, a revoke, or a file-level fault.
+/// Routing never re-resolves provenance; the decision made at `accept` is final.
+pub trait AdvisoryPriorsSource {
+    fn snapshot(&self) -> Result<Option<PriorsSnapshot>, StoreError>;
+    /// Reports a `snapshot` fault the engine routes past without priors. Adapters
+    /// warn and record telemetry; the engine does no I/O.
+    fn report_fault(&self, fault: &StoreError);
 }
 
 /// Repository pattern (design-patterns.md): engine depends only on this trait, never on
@@ -398,6 +450,20 @@ pub trait RunStore:
     fn list_runs(&self) -> Result<Vec<RunRow>, StoreError>;
     fn next_attempt_id(&self) -> Result<AttemptId, StoreError>;
     fn save_attempt(&mut self, row: &AttemptRow) -> Result<(), StoreError>;
+    /// `save_attempt`, plus the attempt's `advisory_routing` row in the same transaction
+    /// when priors were in effect. A store that cannot record routing refuses it.
+    fn save_attempt_routed(
+        &mut self,
+        row: &AttemptRow,
+        routing: Option<&AdvisoryRouting>,
+    ) -> Result<(), StoreError> {
+        match routing {
+            None => self.save_attempt(row),
+            Some(_) => Err(StoreError::Io(
+                "this store cannot record advisory routing".into(),
+            )),
+        }
+    }
     fn load_attempt(&self, attempt_id: AttemptId) -> Result<Option<AttemptRow>, StoreError>;
     fn attempts_for_task(
         &self,
@@ -461,6 +527,12 @@ pub trait RunStore:
     /// In-process oracle spend, if this store keeps a ledger. Not a schema field.
     /// Test doubles return `None` and therefore never charge.
     fn session_spend(&self) -> Option<&SessionSpendLedger> {
+        None
+    }
+
+    /// Promoted advisory priors, if this store keeps a promotion ledger (#139).
+    /// Test doubles return `None`, so routing is unchanged.
+    fn advisory_priors(&self) -> Option<&dyn AdvisoryPriorsSource> {
         None
     }
 }
@@ -531,8 +603,14 @@ impl EvidenceStore for InMemoryEvidenceStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionPortError {
     EmptyQuery,
-    BatchTooLarge { len: usize },
-    Unscripted { fingerprint: String },
+    BatchTooLarge {
+        len: usize,
+    },
+    Unscripted {
+        fingerprint: String,
+    },
+    /// The priors oracle has no prior for this arm (#139): the router keeps the local mean.
+    NoPrior,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

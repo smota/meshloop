@@ -245,6 +245,7 @@ const OPERATIONS: &[&str] = &[
     "graph.resume",
     "task.transition",
     "task.dwell",
+    "advisory.priors",
 ];
 const OUTCOMES: &[&str] = &[
     "success",

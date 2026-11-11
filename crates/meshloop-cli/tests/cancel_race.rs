@@ -355,6 +355,9 @@ mod stale_cancel {
     }
 
     impl HarnessCapabilities for Worker {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<HarnessProfile, HarnessError> {
             Ok(HarnessProfile {
                 harness: "h".into(),
@@ -461,6 +464,8 @@ mod stale_cancel {
                 started_at: Some("1".into()),
                 ended_at: None,
                 outcome: None,
+                model_passed: None,
+                dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
             })
             .unwrap();
 

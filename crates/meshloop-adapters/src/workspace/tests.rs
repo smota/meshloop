@@ -213,7 +213,7 @@ fn migration_v4_preserves_legacy_unbound() {
     assert_eq!(original_id, native_identity(&path).unwrap());
     assert_eq!(
         rows(&store.conn, "schema_meta")[0][0],
-        rusqlite::types::Value::Integer(8)
+        rusqlite::types::Value::Integer(9)
     );
     assert_eq!(rows(&store.conn, "workspace_legacy_unbound").len(), 4);
     assert!(rows(&store.conn, "workspace_repositories").is_empty());
@@ -289,7 +289,7 @@ fn migration_v1_v3_explicit_compatibility() {
             schema::migrate(&conn).unwrap();
             assert_eq!(
                 rows(&conn, "schema_meta")[0][0],
-                rusqlite::types::Value::Integer(8)
+                rusqlite::types::Value::Integer(9)
             );
         }
         for (table, columns, before_rows) in before {
@@ -1126,7 +1126,7 @@ fn lifecycle_fence_v6_rollback_and_future_schema_refusal() {
     assert_eq!(before_schema, schema_snapshot(&c));
     assert_eq!(lifecycle, lifecycle_snapshot(&c));
     assert_eq!(schema::schema_version(&c).unwrap(), Some(5));
-    for version in [8, 9] {
+    for version in [8, 9, 10] {
         let future = f.base.join(format!("future{version}.sqlite"));
         let c = Connection::open(&future).unwrap();
         c.execute_batch(&format!("CREATE TABLE schema_meta(version INTEGER);INSERT INTO schema_meta VALUES({version});CREATE TABLE sentinel(value TEXT);INSERT INTO sentinel VALUES('unchanged');")).unwrap();
@@ -1151,6 +1151,68 @@ fn lifecycle_fence_v6_rollback_and_future_schema_refusal() {
         );
     }
 }
+/// #139: a v8 ledger migrates forward to v9. Existing rows are untouched, an old
+/// attempt reads `model_passed` NULL, and the priors ledger starts empty.
+#[test]
+fn advisory_tables_migrate_from_schema8_without_touching_history() {
+    use meshloop_engine::ports::{AttemptRow, RunStore};
+    let f = Fixture::new();
+    let path = f.base.join("advisory-v8.sqlite");
+    let mut store = SqliteStore::open(&path).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO runs (graph_id, plan_state, run_base, integrate_ref, plan_json, plan_sha256, created_at)
+             VALUES ('g','PlanAccepted','base','meshloop/g/integrate','{}','abc','1')",
+            [],
+        )
+        .unwrap();
+    store
+        .save_attempt(&AttemptRow {
+            attempt_id: meshloop_domain::evidence::AttemptId(1),
+            graph_id: "g".into(),
+            task_id: meshloop_domain::task_graph::TaskId(1),
+            harness: Some("fixture".into()),
+            model_ref: Some("m".into()),
+            worktree_path: None,
+            pid: None,
+            image_name: None,
+            pane_id: None,
+            started_at: Some("1".into()),
+            ended_at: None,
+            outcome: Some("base:abc".into()),
+            model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
+        })
+        .unwrap();
+    drop(store);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(&format!("{DOWNGRADE_V9} UPDATE schema_meta SET version=8;"))
+        .unwrap();
+    let before = history(&conn);
+    drop(conn);
+    // A read-only reader of the v8 ledger sees the attempt without the new column.
+    let readonly = SqliteStore::open_read_only(&path).unwrap().unwrap();
+    assert_eq!(schema::schema_version(&readonly.conn).unwrap(), Some(8));
+    let row = readonly
+        .load_attempt(meshloop_domain::evidence::AttemptId(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.model_passed, None);
+    assert!(readonly.latest_promotion().unwrap().is_none());
+    drop(readonly);
+    let store = SqliteStore::open(&path).unwrap();
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(9));
+    assert_eq!(before, history(&store.conn));
+    assert!(rows(&store.conn, "advisory_promotions").is_empty());
+    assert!(rows(&store.conn, "advisory_routing").is_empty());
+    let row = store
+        .load_attempt(meshloop_domain::evidence::AttemptId(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.model_passed, None);
+    schema::validate9(&store.conn).unwrap();
+}
 #[test]
 fn driver_liveness_migrates_from_schema6_without_dropping_history() {
     let f = Fixture::new();
@@ -1164,16 +1226,16 @@ fn driver_liveness_migrates_from_schema6_without_dropping_history() {
             [],
         )
         .unwrap();
-    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(9));
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE cleanup_journal; DROP TABLE run_driver_liveness; UPDATE schema_meta SET version=6;")
+    conn.execute_batch(&format!("{DOWNGRADE_V9} DROP TABLE cleanup_journal; DROP TABLE run_driver_liveness; UPDATE schema_meta SET version=6;"))
         .unwrap();
     let before = history(&conn);
     assert_eq!(schema::schema_version(&conn).unwrap(), Some(6));
     drop(conn);
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(9));
     assert_eq!(before, history(&store.conn));
     assert!(rows(&store.conn, "run_driver_liveness").is_empty());
 }
@@ -1956,6 +2018,9 @@ fn provisional_completion_drains_request_enqueued_during_final_collect_as_stale(
         request: std::sync::Mutex<Option<CancellationObservation>>,
     }
     impl HarnessCapabilities for FinalCollectRequest {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<HarnessProfile, HarnessError> {
             Ok(HarnessProfile {
                 harness: "fixture".into(),
@@ -2541,6 +2606,10 @@ fn cleanup_recovery_crash_points_and_disagreement() {
     }
 }
 
+/// Removes the v9 objects (#139) from a current ledger, so a test can rebuild an older
+/// one from it.
+const DOWNGRADE_V9: &str = "DROP TABLE advisory_routing; DROP TABLE advisory_promotions; ALTER TABLE attempts DROP COLUMN model_passed;";
+
 #[test]
 fn cleanup_recovery_schema7_upgrade_and_readonly8_validation() {
     let f = Fixture::new();
@@ -2549,8 +2618,10 @@ fn cleanup_recovery_schema7_upgrade_and_readonly8_validation() {
     drop(store);
     drop(lease);
     let conn = Connection::open(&f.ledger).unwrap();
-    conn.execute_batch("DROP TABLE cleanup_journal; UPDATE schema_meta SET version=7;")
-        .unwrap();
+    conn.execute_batch(&format!(
+        "{DOWNGRADE_V9} DROP TABLE cleanup_journal; UPDATE schema_meta SET version=7;"
+    ))
+    .unwrap();
     drop(conn);
     let bytes = std::fs::read(&f.ledger).unwrap();
     let readonly = SqliteStore::open_read_only(&f.ledger).unwrap().unwrap();
@@ -2558,13 +2629,13 @@ fn cleanup_recovery_schema7_upgrade_and_readonly8_validation() {
     drop(readonly);
     assert_eq!(bytes, std::fs::read(&f.ledger).unwrap());
     let store = SqliteStore::open(&f.ledger).unwrap();
-    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(8));
+    assert_eq!(schema::schema_version(&store.conn).unwrap(), Some(9));
     assert_eq!(history(&store.conn), before);
     assert!(rows(&store.conn, "cleanup_journal").is_empty());
     drop(store);
     let bytes = std::fs::read(&f.ledger).unwrap();
     let readonly = SqliteStore::open_read_only(&f.ledger).unwrap().unwrap();
-    schema::migrate(&readonly.conn).unwrap(); // v8 performs validation only.
+    schema::migrate(&readonly.conn).unwrap(); // v9 performs validation only.
     drop(readonly);
     assert_eq!(bytes, std::fs::read(&f.ledger).unwrap());
 }
@@ -2798,6 +2869,8 @@ fn run_loop_binding_is_fresh_accepted_and_contains_its_artifacts() {
             started_at: None,
             ended_at: None,
             outcome: None,
+            model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         })
         .unwrap();
     let attempt = integrate(

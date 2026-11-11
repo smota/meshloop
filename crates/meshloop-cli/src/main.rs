@@ -10,6 +10,7 @@ mod driver_liveness;
 mod gitignore;
 mod json_out;
 mod mcp;
+mod priors;
 mod reclaim;
 mod report;
 mod session_bundle;
@@ -94,6 +95,21 @@ fn dispatch(inv: Invocation) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Mcp => ExitCode::from(mcp::run_stdio() as u8),
+        Command::Priors {
+            action,
+            file,
+            identity,
+            config,
+            db,
+        } => priors::cmd_priors(priors::PriorsRequest {
+            action,
+            file,
+            identity,
+            config,
+            db,
+            json: inv.json,
+            origin: inv.origin,
+        }),
         Command::Roles => cmd_roles(inv.json, inv.origin),
         Command::Doctor { config, db } => cmd_doctor(config, db, inv.json, inv.origin),
         Command::Workspace {
@@ -873,6 +889,10 @@ fn cmd_review_plan(
 }
 
 const EMPTY_VERIFY_WARNING: &str = "verify_command is empty: nodes are not checked beyond git diff";
+const PRIORS_NOT_IN_EFFECT_WARNING: &str =
+    "a priors ledger row exists but no priors are in effect; see `meshloop priors show`";
+const PRIORS_UNREADABLE_WARNING: &str =
+    "the store could not be read to check advisory priors; see `meshloop priors show`";
 const NO_PLANNER_WARNING: &str = "no dispatchable harness can run the planner; see data.planner and set [planner] harness or tier";
 
 #[allow(clippy::too_many_arguments)]
@@ -1983,6 +2003,7 @@ fn cmd_inspect(
                                 "revision_id": frame.revision_id,
                                 "task_id": n.task_id.0,
                                 "state": format!("{:?}", n.state),
+                                "tier": meshloop_domain::advisory::tier_name(n.tier),
                                 "description": n.description,
                                 "location": frame.locations.get(&n.task_id),
                                 "worktree": n.worktree.as_ref().map(|p| p.display().to_string()),
@@ -2038,6 +2059,8 @@ fn cmd_inspect(
                             "nodes": s.nodes.iter().map(|n| serde_json::json!({
                                 "id": n.task_id.0,
                                 "state": format!("{:?}", n.state),
+                                // The tier routing dispatches at (#139): the fold keys on it.
+                                "tier": meshloop_domain::advisory::tier_name(n.tier),
                                 "description": n.description,
                                 "pane_id": n.pane_id,
                                 "live": n.live,
@@ -2979,8 +3002,13 @@ fn cmd_doctor(
         },
     };
     let harnesses_ready = error.is_none();
-    let store_ignored =
-        gitignore::store_ignored(&db.unwrap_or_else(|| compose::default_db(&repo_root())));
+    let db = db.unwrap_or_else(|| compose::default_db(&repo_root()));
+    let store_ignored = gitignore::store_ignored(&db);
+    match priors::doctor_priors(&db) {
+        priors::DoctorPriors::Quiet => {}
+        priors::DoctorPriors::NotInEffect => warnings.push(PRIORS_NOT_IN_EFFECT_WARNING),
+        priors::DoctorPriors::Unreadable => warnings.push(PRIORS_UNREADABLE_WARNING),
+    }
 
     let data = serde_json::json!({
         "daemonless": true,
@@ -3555,6 +3583,7 @@ mod watch_exit_tests {
             pane_id: None,
             live: None,
             deliverable: None,
+            tier: Tier::Tier2,
         }
     }
 

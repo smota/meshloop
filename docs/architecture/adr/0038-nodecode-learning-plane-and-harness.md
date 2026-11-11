@@ -4,9 +4,9 @@
 - Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
-- Amended: 2026-11-10 (#134)
+- Amended: 2026-11-10 (#134); 2026-11-10 (#139, advisory input contract: Accepted 2026-11-11)
 - Author/executor: Claude (builder sub-agent)
-- Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039
+- Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039. #139 amendment: fresh-context Claude architecture review (opus), round 1 accept with changes (9 majors, applied), round 2 accept after one sentence (N1, applied by the coordinator)
 - Decision owner: Samuel
 - Approval evidence: accepted 2026-11-10 by the coordinator (Claude) under authority delegated by the repository owner, who waived human approvals for goal #132 ([claim comment](https://github.com/smota/meshloop/issues/132#issuecomment-6770755409)). No human read this record before acceptance.
 - Supersedes: none
@@ -164,6 +164,88 @@ ran and diffs it read, never a session's or sub-agent's report, with native and
 subprocess evidence under separate keys; specifics are #149's. Native dispatch for
 nodecode is refused until #152 proves it and the containment rule of this record is met.
 
+### Amendment 2026-11-10 (#139): advisory input contract
+
+**Accepted 2026-11-11** by the coordinator (Claude) under authority delegated by the repository owner; no human read this amendment before acceptance. It freezes the "Advisory input" outline above before any
+kernel code is written. The record's Accepted status is unchanged. Names may be refined
+in the build; the rules may not. Mechanism, code references and tests are in
+[learning-plane.md](../learning-plane.md#advisory-input-139). The file format is
+[`schemas/advisory-priors.v1.schema.json`](../../../schemas/advisory-priors.v1.schema.json).
+
+1. **Scope: routing priors only.** Tier hints, planning notes, repair constraints and
+   plan-decision lessons are deferred until #140 records a GO. Plan-decision lessons
+   also need an append-only `plan_decisions` table first. #139's tier-hint criterion
+   moves with them.
+2. **Evidence: subprocess and verified only.** This deviates from the owner's ordering
+   on #132: #149 is not built first. An attempt counts only when all of these hold:
+   - its dispatch mode is `subprocess`;
+   - `model_passed` is true;
+   - its model is not `unverified`;
+   - its task is not `Cancelled`;
+   - its `check_result` is `passed` or `failed`.
+
+   `check_result` comes from the attempt's final deterministic-result event. A crash or
+   timeout has no check result and is excluded. ADR 0039 decision 7 keeps native and
+   subprocess series apart and makes priors ignore `unverified` entries; #139 enforces
+   that here, defensively. This is a coordinator decision under delegated owner
+   authority, pending owner visibility on #132 and #149.
+3. **Mode is compiler-checked.** The mode comes from a domain `DispatchMode` enum, read
+   with an exhaustive match. Adding `Native` (#147) fails to compile until the row's
+   mode is read, so #147 must not merge without that change. The priors oracle returns
+   an error, meaning the local mean, for any harness whose dispatch is not
+   `subprocess`.
+4. **Effect only through the oracle port, bounded once.** The engine port is
+   `AdvisoryPriorsSource::snapshot()`, and a priors `PredictiveSuccessOracle` is built
+   from it.
+   - The kernel computes π = (successes + 1) / (attempts + 2). The file never states π.
+   - π enters only as the prior in `fused_historical_mean`. The ± 0.25 clip on the
+     local mean is applied once, whatever the prior's source.
+   - The priors oracle is consulted with `spend: None` and applies to worker routing
+     only. Combining it with a live oracle needs an amendment and must still produce
+     one π.
+   - The candidate set never changes. An entry for a candidate that was filtered out
+     is never looked up.
+5. **Key and floor.** The key is (harness, `model_ref`, tier, `subprocess`). Language and
+   task kind are deferred, because the store does not record them.
+   - The floor is n ≥ 5 counted attempts per key. It is a compiled-in constant, so the
+     file cannot lower it. An entry must also stand for more attempts than the 4
+     pseudo-observations π gets.
+   - These entries are ignored with a diagnostic: below the floor, a duplicate key (all
+     copies), a duplicate provenance reference, `successes` not equal to the passed
+     references, or an unknown field in the entry.
+6. **File.** The file is versioned JSON, at most 1 MiB. Each entry carries its counts and
+   one `{graph_id, task_id, attempt_id, passed}` reference per attempt, never worker
+   text. A file-level fault means no priors. Unknown top-level fields are ignored.
+   Every case produces a diagnostic and none is a failure.
+7. **Promotion is a kernel verb.**
+   - **Accept.** `meshloop priors accept --file F --as <identity>` reads F once, within a
+     bounded size. It ignores any entry whose resolvable references contradict its key,
+     mode, model or result. It then appends one ledger row, in one transaction, holding
+     the bytes as a BLOB, their SHA-256, the identity, the counts of resolved and
+     unresolved references, and the ignored entries.
+   - **Revoke.** `meshloop priors revoke --as <identity>` appends a revoke row.
+   - **Ledger.** The ledger is append-only: triggers abort any UPDATE or DELETE.
+   - **Identity.** `--as` is required. It is rejected when empty, when it starts with
+     `-`, when it contains control characters, or when it is over 128 bytes.
+   - **Routing.** Each `select` call reads one snapshot of the latest row. The snapshot drops every entry listed in the row's ignored JSON, plus every entry the loader ignores. Routing never re-resolves provenance; the decision made at accept is final.
+   - **Read-only.** `meshloop priors show|check` only read.
+   - **Cell.** The cell never promotes. Its `:tool` veto refuses `priors accept` and
+     `priors revoke` but not `show` or `check`. No MCP tool promotes.
+8. **No promoted row, no change.** With no promoted row, routing order and the plan,
+   review-plan and run outputs are byte-for-byte unchanged. Three things change anyway,
+   all additive:
+   - read-only attempt fields (`dispatch_mode`, `check_result`, `model_passed`);
+   - a store schema bump, with the version coordinated with #147;
+   - an `advisory_routing` row for each attempt routed while priors are in effect,
+     holding the digest and whether the top candidate changed.
+9. **Provenance and placement.** The fold is deterministic cell code. It reads attempt
+   fields only and never reads worker output, model-review verdicts or evidence
+   summaries. Value types and the predicates go in `meshloop-domain`, I/O in adapters,
+   the port in the engine and the verbs in the CLI. Offline CI stays socket-free.
+10. **#140.** The warm-up pins each candidate in turn. If every arm is at the success
+    ceiling, the priors are equal and the order matches the baseline, so a NO-GO is
+    expected.
+
 ## Consequences
 
 - **Kernel changes are scoped.** #134 changes config and routing keys; #139 adds an engine
@@ -185,6 +267,8 @@ nodecode is refused until #152 proves it and the containment rule of this record
 
 ## Verification and implementation evidence
 
-None; Proposed and not implemented. Acceptance needs architecture review against ADRs
-0003, 0022 and 0032, joint review with ADR 0039 (#146), and human acceptance.
-Implementation evidence will come from #134 to #141 and #138.
+Accepted 2026-11-10 after architecture review against ADRs 0003, 0022 and 0032, jointly
+with ADR 0039 (see Approval evidence). Implementation evidence comes from #134 to #141 and
+#138. The #139 amendment was accepted on 2026-11-11 and is built (kernel and cell, #139); the
+regression tests it requires are listed in
+[learning-plane.md](../learning-plane.md#required-regression-tests).

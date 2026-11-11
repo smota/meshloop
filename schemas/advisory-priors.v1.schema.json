@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smota/meshloop/schemas/advisory-priors.v1.schema.json",
+  "title": "advisory-priors v1",
+  "description": "Advisory routing priors for the Meshloop kernel (ADR 0038, amendment 2026-11-10 for #139). Routing priors only: tier hints and planning notes are deferred until a GO at #140 and are not part of v1 (a file carrying them has unknown top-level fields, which are ignored). The nodecode-meshloop cell writes the file as a proposal; it has effect only after `meshloop priors accept --file F --as <identity>` stores its bytes in the append-only promotion ledger. The kernel loader, not this schema, is the authority. Length limits here count code points; the kernel counts UTF-8 bytes. A file-level failure means no priors; an entry-level failure (including an unknown field inside an entry) ignores that entry; unknown top-level fields are ignored. Every case yields a diagnostic, never a failed command. No field carries worker output.",
+  "type": "object",
+  "required": ["schema", "version", "generated_at", "generator", "priors"],
+  "properties": {
+    "schema": { "const": "meshloop/advisory-priors" },
+    "version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "generator": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "source": {
+      "description": "Optional pointers to what was folded. Display only.",
+      "type": "object",
+      "properties": {
+        "meshloop_version": { "type": "string", "maxLength": 64 },
+        "graph_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/graph_id" }
+        }
+      }
+    },
+    "priors": {
+      "description": "One entry per key (harness, model_ref, tier, dispatch_mode). The kernel derives pi = (successes + 1) / (attempts + 2) and passes it through the PredictiveSuccessOracle port into fused_historical_mean; the file never states pi. Entries sharing a key are all ignored (duplicate_key).",
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/prior" }
+    }
+  },
+  "$defs": {
+    "graph_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "tier": { "enum": ["Tier1", "Tier2", "Tier3"] },
+    "count": { "type": "integer", "minimum": 0, "maximum": 4096 },
+    "attempt_ref": {
+      "description": "An attempt Meshloop dispatched as subprocess, with model_passed true and a recorded check_result. `passed` is that check_result.",
+      "type": "object",
+      "required": ["graph_id", "task_id", "attempt_id", "passed"],
+      "additionalProperties": false,
+      "properties": {
+        "graph_id": { "$ref": "#/$defs/graph_id" },
+        "task_id": { "type": "integer", "minimum": 0 },
+        "attempt_id": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "boolean" }
+      }
+    },
+    "prior": {
+      "type": "object",
+      "required": ["harness", "model_ref", "tier", "dispatch_mode", "attempts", "successes", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "harness": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model_ref": {
+          "description": "The model recorded on the attempt rows (#134). The kernel applies #134's model_ref predicate, moved to meshloop-domain: non-empty, at most 256 bytes, no leading '-', no whitespace or control characters. `unverified` (ADR 0039) is refused.",
+          "type": "string",
+          "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f-][^\\s\\u0000-\\u001f\\u007f-\\u009f]{0,255}$",
+          "not": { "const": "unverified" }
+        },
+        "tier": { "$ref": "#/$defs/tier" },
+        "dispatch_mode": {
+          "description": "Positive marker. Only subprocess attempts are evidence for #139.",
+          "const": "subprocess"
+        },
+        "attempts": {
+          "description": "Must equal the length of provenance and be at least the kernel's floor (5) to have effect.",
+          "$ref": "#/$defs/count"
+        },
+        "successes": {
+          "description": "Must equal the number of provenance refs with passed = true.",
+          "$ref": "#/$defs/count"
+        },
+        "provenance": {
+          "description": "One reference per counted attempt. The loader also refuses two refs naming the same (graph_id, task_id, attempt_id) whatever their `passed` (duplicate_provenance).",
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/attempt_ref" }
+        }
+      }
+    }
+  }
+}

@@ -83,6 +83,18 @@ impl HarnessCapabilities for DispatchHarness {
             Self::Fixture(h) | Self::Direct(h) => h.process_image(),
         }
     }
+
+    fn passes_model_ref(&self) -> bool {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.passes_model_ref(),
+        }
+    }
+
+    fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+        match self {
+            Self::Fixture(h) | Self::Direct(h) => h.dispatch_mode(),
+        }
+    }
 }
 
 pub struct Composed {

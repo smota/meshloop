@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advisory;
 pub mod capability;
 pub mod cleanup;
 pub mod decision;

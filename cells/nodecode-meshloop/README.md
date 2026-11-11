@@ -7,7 +7,8 @@ is the first step of the learning plane in
 ([#135](https://github.com/smota/meshloop/issues/135) read-only,
 [#136](https://github.com/smota/meshloop/issues/136) driving,
 [#137](https://github.com/smota/meshloop/issues/137) an optional one-way projection onto a
-nodecode Board). Background and nodecode facts
+nodecode Board, [#139](https://github.com/smota/meshloop/issues/139) a routing-prior proposal
+it never promotes). Background and nodecode facts
 are in [learning-plane.md](../../docs/architecture/learning-plane.md).
 
 The cell runs the `meshloop` binary as `meshloop <verb> --json --origin-harness nodecode
@@ -67,6 +68,9 @@ Read-only, in the shell and through eval:
 | `/meshloop report [GRAPH]` | `(meshloop:report "GRAPH")` | The run report: harnesses and `model_ref`s dispatched, selected harnesses not exercised, one line per node |
 | `/meshloop review-plan [--plan FILE]` | none | The plan file's nodes and where its review stands |
 | `/meshloop hook-check FORM` | none | Whether the `:tool` veto refuses an eval call whose form is FORM |
+| `/meshloop learn [--graph G ...] [--out FILE]` | none | Folds finished attempts into a routing-prior proposal file and answers its digest ([Routing priors](#routing-priors-139)). It writes that file only, never to meshloop, and promotes nothing |
+| `/meshloop priors show` | none | Whether promoted priors are in effect (`meshloop priors show --json`) |
+| `/meshloop priors check FILE` | none | `meshloop priors check --file FILE --json`, summarized: what routing would use and every diagnostic. Read-only. `priors-check FILE` is the same |
 | `/meshloop board-sync [GRAPH]` | none | Puts this session on the repository's nodecode board and posts the runs' new events there, when `board` is on ([The Board projection](#the-board-projection)). It writes nothing to meshloop |
 
 Commands that write. These are slash commands only: they are not eval verbs or tools, and no
@@ -141,28 +145,105 @@ the router substitutes each one into `{model_ref}`. When the operator's invoke t
 it (for example `--model {model_ref}`), `model_ref` is the model meshloop dispatched.
 Otherwise it is the entry's label and the CLI runs its own default model.
 
+### Routing priors (#139)
+
+ADR 0038's [#139 amendment](../../docs/architecture/adr/0038-nodecode-learning-plane-and-harness.md#amendment-2026-11-10-139-advisory-input-contract)
+and [learning-plane.md](../../docs/architecture/learning-plane.md#advisory-input-139) define
+this; the file format is [`schemas/advisory-priors.v1.schema.json`](../../schemas/advisory-priors.v1.schema.json).
+It is routing priors only: tier hints and planning notes wait for #178.
+
+`/meshloop learn` reads `meshloop inspect --attempts --graph G --json` for each graph named
+with `--graph` (or as a bare word). With none named, it folds every finished run (`completed`,
+`failed` or `cancelled`) among the newest run and the graphs `meshloop workspace inventory`
+lists, and names the others it skipped. meshloop has no verb that lists every graph in its
+store, so a run whose worktrees were all reclaimed is folded only when named.
+
+The fold is deterministic code in [`learn.lisp`](learn.lisp), never a model turn. It reads
+the attempt's `harness`, `model_ref`, `attempt_id`, `dispatch_mode`, `model_passed` and
+`check_result`, and the node's `id`, `tier` and `state`. It never reads worker output,
+outcomes, evidence summaries, node descriptions or Board posts. An attempt counts only when
+`dispatch_mode` is `subprocess`, `model_passed` is true, `model_ref` passes #134's rule and
+is not `unverified`, its task is not `Cancelled`, and `check_result` is `passed` or `failed`.
+Any other attempt is excluded under the first reason that holds: `not_subprocess`,
+`model_not_passed`, `model_unverified`, `cancelled`, `no_check_result` (a crash or a
+timeout). Counted attempts are grouped by (harness, `model_ref`, tier, `subprocess`), with
+the tier `inspect` reports, which is the one routing uses (the plan's, or the one meshloop
+assigned at plan time when the plan named none). Each entry carries one
+`{graph_id, task_id, attempt_id, passed}` reference per attempt, `successes` is the count of
+references with `passed` true, and a row seen twice is counted once. Entries and references
+are sorted, so the same attempts give the same bytes but for `generated_at`.
+
+An answer without the #139 fields (a binary older than the kernel side) fails closed: one
+line naming the missing field, and no file. A fold with no counted attempt writes no file.
+The proposal goes to `<nodecode home>/meshloop/priors/meshloop-<hash>/proposal-<UTC time>.json`,
+or with `--out FILE` to a new `.json` file inside the repository's `.agent-runs/`, checked
+before meshloop is read and again, links resolved, before a folder is made. It is at most
+1 MiB. Promoting it is a person's act, in a shell: the digest prints the two commands and
+the cell runs neither. `/meshloop priors accept` and `/meshloop priors revoke` only refuse,
+saying what to type. The kernel's floor is n ≥ 5 counted attempts per key; the file keeps
+entries below it, and the digest marks them.
+
+```text
+meshloop learn: wrote a routing-prior proposal to /home/op/.nodecode/meshloop/priors/meshloop-1a2b3c4d5e6f/proposal-20261111T093000Z.json (sha256:...); folded 2 graphs (g-a, g-b): 8 attempts counted, 10 excluded
+  prior codex / gpt-x / Tier1: 1 attempt, 1 passed, 0 failed; below the kernel's floor (n >= 5): it will be ignored
+  prior codex / gpt-x / Tier2: 6 attempts, 5 passed, 1 failed; clears the kernel's floor (n >= 5)
+  prior grok / grok-4 / Tier2: 1 attempt, 1 passed, 0 failed; below the kernel's floor (n >= 5): it will be ignored
+  excluded by reason: not_subprocess 3, model_not_passed 2, model_unverified 2, cancelled 1, no_check_result 2
+  promoted priors in effect: none (not_promoted)
+  This cell never promotes. To promote, type these in a shell yourself, reading the first one's diagnostics before the second:
+    meshloop priors check --file /home/op/.nodecode/meshloop/priors/meshloop-1a2b3c4d5e6f/proposal-20261111T093000Z.json
+    meshloop priors accept --file /home/op/.nodecode/meshloop/priors/meshloop-1a2b3c4d5e6f/proposal-20261111T093000Z.json --as <your-name>
+```
+
+The digest's `promoted priors` line comes from `meshloop priors show --json`: the promoted
+digest, its ledger row and who accepted it, how many entries apply, and the
+`advisory_routing` counts (routed attempts and those whose top candidate the priors
+changed). With nothing in effect it names the file-level reason, such as `not_promoted`. A
+binary without that verb says `unknown`. `learn` also takes the kernel's `evidence_floor`
+from that answer. `/meshloop priors check FILE` lists the entries routing would use once
+promoted, how many it would ignore, and each diagnostic with its level and key:
+
+```text
+meshloop priors check: .agent-runs/priors/p.json: 1 usable, 0 ignored; 0 diagnostics (read-only, nothing promoted)
+  usable fixture / fixture-model / Tier1: 5 attempts, 5 passed
+  To promote it, a person types in a shell: meshloop priors accept --file .agent-runs/priors/p.json --as <your-name>
+```
+
+The fields the cell reads of `inspect` (the #139 attempt fields and the node `tier`),
+`priors show` and `priors check` are the `priors_attempts`, `priors_show` and
+`priors_check` cases of [`contract.json`](contract.json).
+
 ### The `:tool` veto
 
 ADR 0038 makes accept, review-plan and integrate operator-typed slash commands, never
-model-callable. The cell installs one hook on nodecode's `:tool` point. It reads every string
+model-callable, and promoting or revoking routing priors a person's act the cell never
+performs. The cell installs one hook on nodecode's `:tool` point. It reads every string
 in a tool call's arguments as written and with `\uXXXX` and `%XX` decoded, and refuses the
-call when one of them runs `meshloop accept`, `review-plan` or `integrate`:
+call when one of them runs `meshloop accept`, `review-plan`, `integrate`, `priors accept` or
+`priors revoke` (`priors show` and `priors check` pass):
 
 - an argv list or token run naming the `meshloop` executable (any path, `meshloop.exe`, the
-  `meshloop:accept` form) and then the verb;
+  `meshloop:accept` form) and then the verb, or `priors` and then `accept` or `revoke`,
+  flags stepped over;
 - a shell line, read with quotes joined and backslashes dropped (`m""eshloop`, `mesh''loop`
   and `me\shloop` are `meshloop`) and cut at `;`, `&&`, `||`, `&` and newlines with a `|`
-  pipeline kept whole, whose command holds a gated verb anywhere and a meshloop runner: the
+  pipeline kept whole, whose command holds a gated verb anywhere (or `priors` and `accept` or
+  `revoke` anywhere, so `echo revoke | xargs meshloop priors` too) and a meshloop runner: the
   executable, a `$VARIABLE` in command position, or `meshloop-cli` after `-p`. That covers
   `echo accept | xargs meshloop` and `B=meshloop; $B accept`;
-- the MCP tools `meshloop_accept`, `meshloop_review_plan` and `meshloop_integrate`, or any
-  tool whose server segment is meshloop and whose last `__` segment is a gated verb;
-- the `/meshloop accept` slash line;
+- the MCP tools `meshloop_accept`, `meshloop_review_plan`, `meshloop_integrate`,
+  `meshloop_priors_accept` and `meshloop_priors_revoke` (no MCP tool promotes; these are
+  refused should one be named so), or any tool whose server segment is meshloop and whose
+  last `__` segment is a gated verb or `priors_accept`/`priors_revoke`;
+- the `/meshloop accept` and `/meshloop priors revoke` slash lines;
 - this cell's own code, reached through `meshloop::`, or by `find-symbol`, `intern`,
   `find-package` or `in-package` naming its package.
 
 The meshloop binary takes its verb as the first argument and refuses a flag there, so moving
-the verb after flags is no way around the veto. The refusal is recorded as the call's failure.
+the verb after flags is no way around the veto. The refusal is recorded as the call's failure. A fault in the veto's own reading never escapes the hook:
+the call is refused (failing closed) with one line saying so. Likewise every `/meshloop`
+command answers one line when anything in it fails, the Board sync after it included; the
+cell keeps running.
 
 This is defence in depth, not a security boundary. The organism's eval has the operator's full
 host authority. A call can build the command from pieces or reach meshloop another way, and
@@ -392,6 +473,20 @@ list. To read a new field, add it to `contract.json` first.
   `hook-check`, because a real tool call needs a model turn); a fixture graph goes plan,
   review-plan, run, accept, resume, integrate, with auto-reclaim leaving no worktree or
   branch; and cancel leaves no process in the repository and only worktrees meshloop owns.
+  For routing priors (#139) it checks that `learn` refuses a `--out` with a `..` step or
+  outside `.agent-runs/` before reading meshloop, that `/meshloop priors accept` and
+  `revoke` refuse and run nothing, and the veto on `priors accept` and `revoke` through
+  `hook-check`. Against a binary without the #139 attempt fields, `learn` fails closed in
+  one line and writes no file. With a binary that has `meshloop priors`, it runs a round
+  trip with no model turn: a fixture run of five independent nodes whose template passes
+  `{model_ref}`; `/meshloop learn` folds it into a proposal under `.agent-runs/` (one key
+  clearing the floor, the v1 rules held, the digest naming the file's SHA-256, nothing
+  written to the meshloop store, no overwrite); `/meshloop priors check` reads it back;
+  the operator checks it and accepts it in a shell (`meshloop priors accept --as
+  test-operator`, never the cell); `/meshloop priors show` names the row and who accepted
+  it; a second run is routed with the priors in effect, so `priors show` reports
+  `in_effect` and routed attempts; and `learn` over both runs names the promoted digest.
+  Without that verb those checks are skipped with a note.
   For the Board projection (#137), on a fixture repository of its own with the
   `nodecode-board` cell on and a supervising session on the board, it checks the
   following. With `board` off, `board-sync` refuses and `status` posts nothing. With it
@@ -413,7 +508,10 @@ list. To read a new field, add it to `contract.json` first.
   its mention and wakes no one. A restarted cell posts nothing again, and a cursor kept on
   another ledger id resets and says so. The
   throwaway home has no model, so a woken turn ends at once ("no model is chosen yet")
-  with no model call: the wake is delivered and nothing is spent. It never touches the
+  with no model call: the wake is delivered and nothing is spent. The throwaway config turns nodecode's own updates off (`"update": {"mode": "off"}`): an
+  installed build otherwise takes a newer release mid-test, stops every cell and re-execs on
+  another port, so the pinned release would not stay the one tested; the test checks that
+  nodecode neither updated nor restarted. It never touches the
   operator's nodecode home. `--work` must sit inside the repository's
   `.agent-runs/`, the temp directory or `$RUNNER_TEMP`; it is removed when every check
   passes.
@@ -447,7 +545,25 @@ list. To read a new field, add it to `contract.json` first.
   on another ledger, when an event is current (newest counted row reaching the folded
   state, so not a pre-#167 stale row), paths outside the repository and with `\`, the
   mention never cut, a plan post in flight naming its plan state (`pN:STATE`, so a later
-  plan change is never taken for it), and which graphs a command names. When the pinned
+  plan change is never taken for it), and which graphs a command names. For `/meshloop
+  learn` (#139) it folds fixture JSON shaped as `inspect --attempts` answers with the #139
+  fields: each exclusion reason (mode `native`, `null` or missing; `model_passed` false or
+  `null`; model `unverified` or empty; a cancelled task; `check_result` `null` or missing),
+  keys with and without a node tier, a row seen twice, `successes` equal to the passed
+  references, no reference twice, the same bytes for any order or repetition of the graphs,
+  no worker text in the file or the digest, the file's fields and escaping, a tier v1
+  cannot carry failing closed, a pre-#139 answer failing the contract case learn checks
+  while `report`'s still holds, the digest's lines (each prior key with its counts and
+  floor, exclusions by reason, skipped graphs, the promote commands, quoting), learn's
+  words, and the `--out` rule on a scratch folder (`..`, outside `.agent-runs/`, not
+  `.json`, an existing file, a folder linked outside). It also tests the veto on `priors
+  accept` and `priors revoke` in every reading above and lets `priors show`, `priors
+  check` and `/meshloop learn` through, and reads the sources to check that learn asks
+  meshloop only for `inspect`, `status`, `workspace inventory` and `priors show|check`.
+  It also summarizes `priors check` answers in the kernel's shape (usable entries, ignored
+  count, each diagnostic with its level and key, no promote command for a file fault).
+  `MESHLOOP_PRIORS_SAMPLE=FILE` writes the fixture proposal to FILE, for a check against
+  the schema with a JSON Schema validator. When the pinned
   nodecode release is installed, it also reads that release's board source for the
   functions this cell calls by name (`member-board`, `join`, `post`, `post_chars`). It also reads the sources to check
   that the cell is one-way: no source names the Board's post facts, its `:round` delivery
@@ -456,8 +572,10 @@ list. To read a new field, add it to `contract.json` first.
   `xtask check` runs it.
 
 - **Optional CI:** the `nodecode-cell` job in `.github/workflows/ci.yml` installs a pinned
-  nodecode release on a throwaway `HOME` and runs the load test. It checks `install.sh`
-  and the installed executable against
+  nodecode release on a throwaway `HOME` and runs the load test. It uses the MIT
+  `install.sh` shipped inside that release, vendored at
+  [`test/vendor/nodecode-install-98dd6dc80.sh`](test/vendor/nodecode-install-98dd6dc80.sh)
+  (nodecode.ai serves `install.sh` unversioned), and checks it and the installed executable against
   [`test/nodecode-98dd6dc80.sha256`](test/nodecode-98dd6dc80.sha256) before running
   either. It is `continue-on-error`,
   and neither `xtask` nor `cargo test` calls it.

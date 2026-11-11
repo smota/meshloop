@@ -3,7 +3,9 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; ADR 0038: accept, review-plan and integrate are the operator's to type, as
-;;;; /meshloop slash commands, and are never model-callable. This cell installs
+;;;; /meshloop slash commands, and are never model-callable; so are the two-word
+;;;; verbs priors accept and priors revoke (#139), which promote and revoke
+;;;; routing priors and which this cell never runs at all. This cell installs
 ;;;; one hook on nodecode's :TOOL point that refuses an organism tool call whose
 ;;;; text runs one of them: `meshloop accept ...' in a shell string or an argv
 ;;;; list, the MCP tool meshloop_accept, a call into this cell's own code, or the
@@ -23,13 +25,15 @@
 ;;;;  - As tokens, cut at blanks, quotes, brackets and shell separators: a token
 ;;;;    naming the meshloop executable followed, within a few tokens and stepping
 ;;;;    over flags, keywords, format directives and Lisp list constructors, by a
-;;;;    gated verb (an argv list in Lisp or Python); a token with the MCP tool
+;;;;    gated verb, or by priors and then accept or revoke (an argv list in Lisp
+;;;;    or Python); a token with the MCP tool
 ;;;;    name; this cell's package reached with ::; or a find-symbol, intern,
 ;;;;    find-package or in-package form naming the cell's package.
 ;;;;  - As shell lines, the string itself and each double-quoted string in it:
 ;;;;    words joined across quotes with backslashes dropped (m""eshloop is
 ;;;;    meshloop), commands cut at ; && || & and newlines, a | pipeline kept
-;;;;    whole. A command whose words hold a gated verb anywhere and a meshloop
+;;;;    whole. A command whose words hold a gated verb anywhere (or priors and
+;;;;    accept or revoke anywhere) and a meshloop
 ;;;;    runner (the executable or a $VARIABLE in command position, which a
 ;;;;    wrapper such as xargs, env, sudo or timeout passes on, or meshloop-cli
 ;;;;    after -p) is refused: `echo accept | xargs meshloop' and `B=meshloop;
@@ -45,8 +49,15 @@
 (defparameter +gated-verbs+ '("accept" "review-plan" "integrate")
   "The meshloop verbs that record a human decision: never a tool call's.")
 
-(defparameter +gated-tools+ '("meshloop_accept" "meshloop_review_plan" "meshloop_integrate")
-  "The same verbs as `meshloop mcp' names its tools.")
+(defparameter +gated-pairs+ '(("priors" "accept") ("priors" "revoke"))
+  "The two-word meshloop verbs that record a person's decision (ADR 0038, #139):
+promoting routing priors and revoking them. priors show and priors check only
+read, and pass.")
+
+(defparameter +gated-tools+ '("meshloop_accept" "meshloop_review_plan" "meshloop_integrate"
+                              "meshloop_priors_accept" "meshloop_priors_revoke")
+  "The same verbs as `meshloop mcp' would name its tools. No MCP tool promotes
+priors (ADR 0038); the last two are refused should one ever be named so.")
 
 (defparameter +internal-prefixes+ '("meshloop::" "nodecode-meshloop::")
   "A token reaching this cell's own unexported code: the slash commands' functions.")
@@ -125,6 +136,24 @@ meshloop or meshloop.exe (so /meshloop, the slash line, is one too)."
   "Whether TOKEN, as a verb, is one of +GATED-VERBS+."
   (member (verb-of token) +gated-verbs+ :test #'string=))
 
+(defun gated-pair (first second)
+  "\"priors accept\" or \"priors revoke\" when FIRST and SECOND, as verbs, are
+one of +GATED-PAIRS+; NIL otherwise, and for priors show or priors check."
+  (and first second
+       (find-if (lambda (pair) (and (string= (verb-of first) (first pair))
+                                    (string= (verb-of second) (second pair))))
+                +gated-pairs+)
+       (format nil "~a ~a" (verb-of first) (verb-of second))))
+
+(defun joined-pair-p (verb)
+  "Whether VERB is a gated pair written as one word: priors-accept, priors_revoke."
+  (find-if (lambda (pair)
+             (member (verb-of verb)
+                     (list (format nil "~a-~a" (first pair) (second pair))
+                           (format nil "~a_~a" (first pair) (second pair)))
+                     :test #'string=))
+           +gated-pairs+))
+
 (defun stepped-over-p (token)
   "Whether TOKEN may sit between the executable and its verb: a flag, a
 keyword, a format directive or a list constructor."
@@ -146,6 +175,21 @@ nodecode-meshloop in any case."
   (let ((colon (position #\: token :from-end t)))
     (member (if colon (subseq token (1+ colon)) token) +symbol-finders+ :test #'string-equal)))
 
+(defun next-verb-index (tokens from)
+  "The index of the first of TOKENS, a vector, at or after FROM and within
+*VERB-REACH* of it, that is not stepped over; NIL when there is none."
+  (loop for j from from below (min (length tokens) (+ from *verb-reach*))
+        unless (stepped-over-p (aref tokens j)) return j))
+
+(defun gated-from (tokens j)
+  "What the verb at index J of TOKENS runs when it is gated: a gated verb, or a
+gated pair it starts with the next verb after it; NIL otherwise."
+  (let ((verb (aref tokens j)))
+    (if (gated-verb-p verb)
+        (verb-of verb)
+        (let ((k (next-verb-index tokens (1+ j))))
+          (and k (gated-pair verb (aref tokens k)))))))
+
 (defun token-reading (text)
   "Why TEXT, read as tokens, runs a gated meshloop verb, or NIL."
   (let* ((cased (tokens-cased text))
@@ -161,14 +205,13 @@ nodecode-meshloop in any case."
                                  +internal-prefixes+)
                         (return (format nil "it reaches into this cell's own code (~a)" token)))
                        ((and (char= #\/ (char token 0)) (string/= (verb-of token) token)
-                             (gated-verb-p token))
-                        (return (format nil "it types the slash command ~a" token)))
+                             (gated-from tokens i))
+                        (return (format nil "it types the slash command ~a" (gated-from tokens i))))
                        ((executable-p token)
-                        (let ((verb (loop for j from (1+ i) below (min (length tokens) (+ i 1 *verb-reach*))
-                                          for next = (aref tokens j)
-                                          unless (stepped-over-p next) return next)))
-                          (when (and verb (gated-verb-p verb))
-                            (return (format nil "it runs meshloop ~a" (verb-of verb)))))))))))
+                        (let* ((j (next-verb-index tokens (1+ i)))
+                               (gated (and j (gated-from tokens j))))
+                          (when gated
+                            (return (format nil "it runs meshloop ~a" gated))))))))))
 
 (defun tokens-cased (text)
   "TEXT cut as TOKENS cuts it, case kept."
@@ -291,6 +334,17 @@ reads) runs nothing."
                             ((member flag '("-pmeshloop-cli" "--package=meshloop-cli") :test #'string-equal)
                              flag))))))
 
+(defun shell-verb (words)
+  "The gated verb WORDS hold anywhere: a gated pair (priors and accept or
+revoke, in any order, as xargs may append the second), else a gated verb;
+NIL when they hold none."
+  (or (loop for (head second) in +gated-pairs+
+            thereis (and (find head words :key #'verb-of :test #'string=)
+                         (find second words :key #'verb-of :test #'string=)
+                         (format nil "~a ~a" head second)))
+      (let ((verb (find-if #'gated-verb-p words)))
+        (and verb (verb-of verb)))))
+
 (defun shell-reading (text &optional (depth 3))
   "Why TEXT, read as shell lines, runs a gated meshloop verb, or NIL. A word
 that still holds a blank once its quotes are joined (sh -c 'meshloop acce''pt',
@@ -298,10 +352,10 @@ eval \"mesh\"\"loop ...\") is read again as a line of its own, DEPTH deep."
   (loop for line in (cons text (double-quoted text))
         thereis (loop for command in (shell-commands line)
                       for words = (remove "" (mapcar #'word-core command) :test #'string=)
-                      for verb = (find-if #'gated-verb-p words)
+                      for verb = (shell-verb words)
                       for runner = (and verb (meshloop-runner words))
                       when runner
-                        return (format nil "it runs ~a with ~a in one command" runner (verb-of verb))
+                        return (format nil "it runs ~a with ~a in one command" runner verb)
                       when (plusp depth)
                         do (let ((inner (loop for word in words
                                               for blank = (find-if (lambda (c) (find c '(#\Space #\Tab #\Newline))) word)
@@ -321,7 +375,8 @@ __ segment a gated verb (mcp__meshloop__accept)."
   (let* ((lower (string-downcase name))
          (tool (find-if (lambda (tool) (search tool lower)) +gated-tools+)))
     (if tool
-        (format nil "the tool ~a is meshloop ~a" name (substitute #\- #\_ (subseq tool 9)))
+        (format nil "the tool ~a is meshloop ~a" name
+                (substitute (if (search "priors_" tool) #\Space #\-) #\_ (subseq tool 9)))
         (let ((segments (loop with start = 0
                               for at = (search "__" lower :start2 start)
                               collect (subseq lower start at)
@@ -330,8 +385,10 @@ __ segment a gated verb (mcp__meshloop__accept)."
           (when (and (rest segments)
                      (some (lambda (segment) (search "meshloop" segment)) (butlast segments)))
             (let ((verb (substitute #\- #\_ (car (last segments)))))
-              (when (gated-verb-p verb)
-                (format nil "the tool ~a is meshloop ~a" name (verb-of verb)))))))))
+              (cond ((gated-verb-p verb)
+                     (format nil "the tool ~a is meshloop ~a" name (verb-of verb)))
+                    ((joined-pair-p verb)
+                     (format nil "the tool ~a is meshloop ~a" name (substitute #\Space #\- (verb-of verb)))))))))))
 
 (defun gated-call (name arguments)
   "Why a tool call NAME with ARGUMENTS runs one of meshloop's human gates, or NIL."
@@ -341,15 +398,20 @@ __ segment a gated verb (mcp__meshloop__accept)."
 
 (defun veto-gated-calls (op next)
   "The :TOOL point. OP is (:name TOOL :arguments HASH :call-id ID). A call that
-runs accept, review-plan or integrate answers a refusal, recorded as the call's
-failure, and NEXT never runs; every other call runs as it would."
-  (let ((reason (gated-call (getf op :name) (getf op :arguments))))
+runs accept, review-plan, integrate, priors accept or priors revoke answers a
+refusal, recorded as the call's failure, and NEXT never runs; every other call
+runs as it would. A fault in the reading itself never escapes the hook: the
+call is refused, failing closed, with one line saying so."
+  (let ((reason (handler-case (gated-call (getf op :name) (getf op :arguments))
+                  (error (condition)
+                    (format nil "the veto could not read the call (~a), so it is refused"
+                            (nlk:one-line condition :cap *text-cap*))))))
     (if reason
         (nle:failure
-         (format nil "ERROR: refused by nodecode-meshloop: ~a. Accept, review-plan and integrate ~
-                      record a person's decision, so the operator types them as /meshloop commands, ~
-                      naming who decides with --as. The call did not run: tell the operator the ~
-                      command instead, and do not retry it another way" reason))
+         (format nil "ERROR: refused by nodecode-meshloop: ~a. Accept, review-plan, integrate, ~
+                      priors accept and priors revoke record a person's decision, so the operator ~
+                      types them, naming who decides with --as. The call did not run: tell the ~
+                      operator the command instead, and do not retry it another way" reason))
         (funcall next op))))
 
 (defun hook-installed-p ()

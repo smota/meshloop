@@ -1,8 +1,9 @@
 //! CLI contract for the optional nodecode cell (ADR 0038, #135, #136).
 //!
 //! `cells/nodecode-meshloop/contract.json` names every field the cell reads from
-//! `meshloop <verb> --json`: the read-only views and the operator's plan, review-plan,
-//! run, resume, cancel, accept and integrate. This test runs those verbs on fixture
+//! `meshloop <verb> --json`: the read-only views, the operator's plan, review-plan,
+//! run, resume, cancel, accept and integrate, and what `/meshloop learn` and
+//! `/meshloop priors show|check` read (#139). This test runs those verbs on fixture
 //! repositories, in the order the cell's commands run them and with the arguments the
 //! cell passes, and asserts each named field is there with its type. A CLI change that
 //! breaks the cell's input fails here, with no nodecode installed and no socket opened:
@@ -359,6 +360,9 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
             "inspect_attempts",
             "integrate_preview",
             "plan",
+            "priors_attempts",
+            "priors_check",
+            "priors_show",
             "resume_detached",
             "resume_driver_alive",
             "review_plan",
@@ -574,6 +578,55 @@ fn cli_json_carries_every_field_the_nodecode_cell_reads() {
         serde_json::json!(["gcell"])
     );
 
+    // /meshloop learn reads the #139 attempt fields and the node tier (#139): gcell's
+    // first node names no tier, so it is reported as routing keys it.
+    let learn = case("priors_attempts");
+    let tiers: Vec<&Value> = learn["data"]["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .map(|n| &n["tier"])
+        .collect();
+    assert_eq!(
+        tiers,
+        [&Value::from("Tier2"), &Value::from("Tier2")],
+        "{learn:#}"
+    );
+
+    // /meshloop priors check FILE: a proposal with one usable entry (unresolved
+    // provenance, report only) and one below the floor, so every list is reached.
+    fs::write(fixture.repo.join("advisory-priors.json"), CONTRACT_PROPOSAL).expect("proposal");
+    let check = case("priors_check");
+    assert_eq!(
+        check["data"]["usable"].as_array().map(Vec::len),
+        Some(1),
+        "{check:#}"
+    );
+    assert_eq!(
+        check["data"]["ignored"][0]["code"], "below_evidence_floor",
+        "{check:#}"
+    );
+
+    // /meshloop priors show, before and after the operator's accept, typed in a shell
+    // and never by the cell: the row and the priors in effect.
+    let shown = case("priors_show");
+    assert_eq!(shown["data"]["in_effect"], false, "{shown:#}");
+    let out = fixture.meshloop(&[
+        "priors",
+        "accept",
+        "--file",
+        "advisory-priors.json",
+        "--as",
+        "contract-person",
+    ]);
+    assert!(out.status.success(), "priors accept: {out:?}");
+    let shown = case("priors_show");
+    assert_eq!(shown["data"]["in_effect"], true, "{shown:#}");
+    assert_eq!(
+        shown["data"]["row"]["identity"], "contract-person",
+        "{shown:#}"
+    );
+
     // /meshloop plan, on a repository whose harness plans.
     let planner = Fixture::new(Harness::Planner);
     let argv = argv_of(&contract, "plan");
@@ -687,3 +740,26 @@ fn cell_contract_types_are_ones_the_cell_checks() {
         }
     }
 }
+
+/// A v1 proposal: one entry that clears the floor, whose references are not in this
+/// ledger (`provenance_unresolved`, report only), and one below the floor (ignored).
+const CONTRACT_PROPOSAL: &str = r#"{
+  "schema": "meshloop/advisory-priors",
+  "version": 1,
+  "generated_at": "2026-11-11T09:30:00Z",
+  "generator": {"name": "nodecode-meshloop", "version": "0.4.0"},
+  "source": {"graph_ids": ["gelsewhere"]},
+  "priors": [
+    {"harness": "fixture", "model_ref": "fixture-model", "tier": "Tier2", "dispatch_mode": "subprocess",
+     "attempts": 5, "successes": 4, "provenance": [
+       {"graph_id": "gelsewhere", "task_id": 1, "attempt_id": 1, "passed": true},
+       {"graph_id": "gelsewhere", "task_id": 1, "attempt_id": 2, "passed": true},
+       {"graph_id": "gelsewhere", "task_id": 2, "attempt_id": 3, "passed": true},
+       {"graph_id": "gelsewhere", "task_id": 2, "attempt_id": 4, "passed": true},
+       {"graph_id": "gelsewhere", "task_id": 3, "attempt_id": 5, "passed": false}]},
+    {"harness": "fixture", "model_ref": "fixture-model", "tier": "Tier1", "dispatch_mode": "subprocess",
+     "attempts": 1, "successes": 1, "provenance": [
+       {"graph_id": "gelsewhere", "task_id": 4, "attempt_id": 6, "passed": true}]}
+  ]
+}
+"#;

@@ -146,6 +146,309 @@ failed at once ("no model is chosen yet") with no model call. That shows deliver
 cost. No turn with a real model was run for #137, so how a woken model behaves is still
 only the spike's observation.
 
+## Advisory input (#139)
+
+This section holds the mechanism for the ADR 0038 amendment of 2026-11-10 (#139). That
+amendment was **accepted on 2026-11-11** (coordinator, delegated owner authority) and is
+**built** in #139: the kernel side in `meshloop-domain/src/advisory.rs` (value types and
+predicates), `meshloop-adapters/src/advisory.rs` (loader, ledger, snapshot),
+`meshloop-engine/src/priors.rs` (the oracle) and `meshloop-cli/src/priors.rs` (the verbs),
+with tests in `crates/meshloop-cli/tests/advisory_priors.rs`; the cell side in
+`cells/nodecode-meshloop/learn.lisp`, with its fixture tests in `test/pure_test.lisp`, a
+load-test round trip (learn, then check and accept in a shell, then a run routed with the
+priors in effect) and the contract cases `priors_attempts`, `priors_show` and
+`priors_check` asserted by `nodecode_cell_contract.rs`. It covers
+routing priors only. Tier hints, planning notes, repair constraints and plan-decision
+lessons are deferred until a GO at #140. Plan-decision lessons first need an append-only
+`plan_decisions` table, because today `review-plan` answers only the decision it just
+recorded (`main.rs:823`) and `runs` keeps only `review_note` (`schema.rs:32-41`). The file
+format is [`schemas/advisory-priors.v1.schema.json`](../../schemas/advisory-priors.v1.schema.json).
+Code references are at base `ac87e7a`.
+
+### New read-only attempt fields
+
+The #139 build adds three fields to the attempt JSON (`report.rs:154`, `attempt_json`).
+Each field is listed as required in the cell's `priors_attempts` case in `contract.json`,
+the fields only `/meshloop learn` reads, so an older binary still answers `report` and
+`accept` while `learn` fails closed. #139 also adds the node's tier to `inspect`
+(`data.nodes[].tier`, `Tier1`, `Tier2` or `Tier3`), the tier routing uses: the plan's tier,
+or the one meshloop assigned at plan time when the plan named none (`DefaultTierAssigner`,
+`planner.rs`: Tier1 for a node nothing depends on, Tier2 for one others depend on, Tier3
+with two or more dependencies), and `Tier2` only when none is stored. The fold keys
+evidence by that value.
+
+| Field | Values | Source |
+|---|---|---|
+| `dispatch_mode` | `"subprocess"` | A domain `DispatchMode` enum, read with an exhaustive `match` through `DispatchMode::of_recorded_attempt(row.dispatch)`. The attempt row carries a `RecordedDispatch` placeholder (`NoColumn`) because the store has no mode column and the binary has one dispatch path. When #147 adds `Native`, the matches fail to compile until the row's mode column is threaded through `RecordedDispatch`. #147 must not merge without that change. `HarnessCapabilities::dispatch_mode()` has no default, so every harness states its mode. |
+| `check_result` | `"passed"`, `"failed"` or `null` | The attempt's final deterministic-result event. `DeterministicChecksPassed` or `VerifyGatePassed` gives `passed`; `DeterministicChecksFailed` gives `failed`, except the one Meshloop appends when its own driver died during verification (`fail_orphaned_verification`, reason `VERIFICATION_INFRASTRUCTURE_FAULT`, "driver died during verification"): an infrastructure fault is not a model failure and gives `null` (architect decision in the #139 review; the text is unchanged, so older ledgers read the same). Anything else gives `null`, including a crash, a timeout, a cancellation, or a result whose append was refused (#167). |
+| `model_passed` | `true`, `false` or `null` | A new nullable `attempts.model_passed` column, written when the attempt row is created for every attempt. It is true when the harness's `invoke_args_template` substitutes `{model_ref}` (`config.rs:156`, `harness.rs:100`). Rows written before #139 hold `null`. Write-once: attempt upserts keep it with `COALESCE(attempts.model_passed, excluded.model_passed)`. |
+
+A column on `attempts` is the least invasive place that is written for every attempt. The
+other new tables are written only while priors are in effect.
+
+**Additive changes with no promoted row.** Routing order and the plan, review-plan and run
+outputs are unchanged. These change anyway, all additive: the three attempt fields above;
+`inspect`'s `nodes[].tier`; the store schema bump to v9 (`advisory_promotions`,
+`advisory_routing`, `attempts.model_passed`); the `priors` verb in `--help` and in the
+`banner()` command list (`report.rs`); and two `doctor` warnings, one when a ledger row
+exists but no priors are in effect and one when the store cannot be read to check.
+
+An older binary refuses a schema-v9 store outright; against an older store it returns
+attempt JSON without these fields. The fold treats either as an
+error and fails closed: it writes no proposal and says why.
+
+### What counts as evidence
+
+The fold counts an attempt only when every one of these holds:
+
+- `dispatch_mode` is `"subprocess"`;
+- `model_passed` is `true`;
+- `model_ref` is non-empty and not `unverified`;
+- the task is not `Cancelled`;
+- `check_result` is `passed` or `failed`.
+
+A failed check counts as a failure. A crash, a timeout or a Meshloop verification fault
+("driver died during verification") is excluded and never counts as a failure. Every excluded attempt is reported with one of these reasons:
+
+- `not_subprocess`
+- `model_not_passed`
+- `model_unverified`
+- `cancelled`
+- `no_check_result`
+
+The fold reads only attempt fields (`harness`, `model_ref`, `dispatch_mode`,
+`model_passed`, `check_result`), the node tier and the task state. It never reads worker
+output, model-review verdicts (ADR 0007), evidence summaries, node descriptions or Board
+posts.
+
+### From entry to routing
+
+1. **Snapshot.** The engine port is `AdvisoryPriorsSource::snapshot() ->
+   Result<Option<PriorsSnapshot>, StoreError>`. The router takes one snapshot for each
+   `select` call (`router.rs:204`) from a single read of the latest ledger row, and may
+   cache it by row sequence number. `None` means `oracle: None`, as today
+   (`run_loop.rs:1554`).
+   The snapshot drops every entry listed in the ledger row's ignored JSON (decided at
+   `accept`), plus every entry the loader ignores; routing never re-resolves provenance.
+2. **Derive π.** For each surviving entry, the kernel computes
+   π = (successes + 1) / (attempts + 2). The result is never 0 or 1.
+3. **Look up the arm.** The priors oracle implements `PredictiveSuccessOracle`
+   (`ports.rs:582`). It looks up `OracleQuery.arm`, which has the form
+   `harness\nmodel_ref\nTierN` (`router.rs:104`). It returns an error, and the router
+   then keeps the local mean (`router.rs:112`), in three cases:
+   - no entry matches;
+   - the entry is ignored;
+   - the candidate's harness dispatch is not `subprocess`.
+
+   The third case cannot occur until #147 lands, so its regression test is added with
+   #147.
+4. **Fuse.** `fused_historical_mean` computes (s + 4π) / (n + 4) and clips the result to
+   μ_local ± 0.25 (`router.rs:76-78`).
+   - On a fresh store (n = 0, μ_local = 0.5), the fused mean is π limited to 0.25–0.75.
+   - With local history, π's weight falls to 4 / (n + 4).
+5. **No charge.** The composition passes `spend: None`. The store's ledger has a budget of
+   0 and a cost of 1 (`store.rs:39,68`), so any charge would fail
+   (`ports.rs:374-386`, `router.rs:99-102`) and silently turn the priors off.
+6. **Planner dispatch is unchanged.** Planner-dispatch routing (`run_loop.rs:661`) keeps
+   `oracle: None`.
+7. **Candidate set.** `select` filters before it scores (`router.rs:214-226`), so a prior
+   only reorders candidates that survived the filters.
+
+### Loader diagnostics
+
+Every case below produces a diagnostic, never a failure, and leaves the exit code
+unchanged.
+
+**File level: no priors are applied.**
+
+| Code | Cause |
+|---|---|
+| `not_promoted` | There is no `accept` row. |
+| `revoked` | The latest row is `revoke`. |
+| `digest_mismatch` | The stored BLOB does not hash to the row's digest, which means the store is corrupted. |
+| `too_large` | The file is over 1 MiB. |
+| `not_json` | The file is not valid JSON. |
+| `wrong_schema` | `schema` is not `meshloop/advisory-priors`. |
+| `wrong_version` | `version` is not 1. |
+
+**Entry level: the entry is ignored.**
+
+| Code | Cause |
+|---|---|
+| `below_evidence_floor` | `attempts` is below 5. |
+| `duplicate_key` | The key appears more than once. Every copy is ignored. |
+| `duplicate_provenance` | Two references name the same (`graph_id`, `task_id`, `attempt_id`). |
+| `count_mismatch` | The length of `provenance` differs from `attempts`. |
+| `successes_mismatch` | `successes` differs from the number of references with `passed`. |
+| `not_subprocess` | `dispatch_mode` is not `subprocess`. |
+| `model_invalid` | The model fails #134's predicate (`config.rs:219-238`, moved to `meshloop-domain`): empty, over 256 bytes, a leading `-`, whitespace or control characters. The value `unverified` also fails. |
+| `unknown_entry_field` | The entry or one of its references has a field v1 does not define. |
+| `provenance_contradicts` | Raised by `accept` and `check` only. A reference resolved in the local ledger disagrees with the entry's key, mode, `model_passed` or `passed`. |
+
+**Report only.**
+
+| Code | Cause |
+|---|---|
+| `not_a_candidate` | No configured candidate matches the entry, so the entry is inert. |
+| `unknown_field` | A top-level field is not defined in v1, such as `tier_hints` or `notes`. |
+| `provenance_unresolved` | A reference is not in the local ledger. |
+
+`provenance_unresolved` does not block, because #140 promotes into fresh stores.
+
+Schema length limits count code points, while the kernel counts UTF-8 bytes. Before any
+string from the file or the ledger is displayed (harness, model, identity, source path),
+control characters and Unicode format (Cf) characters are stripped, bidi controls
+included.
+
+Diagnostics appear in two places:
+
+- `priors show|check` always lists them.
+- `doctor` adds a warning only when a ledger row exists but no priors are in effect.
+
+### Promotion ledger
+
+Store schema version 8 (`schema.rs:566`) is bumped by a forward migration. The version
+number is coordinated with #147, which also bumps it. The migration adds three things.
+
+**`advisory_promotions`.** Each row holds:
+
+- sequence number;
+- action (`accept` or `revoke`);
+- `priors_sha256`;
+- `bytes` BLOB (accept only, at most 1 MiB);
+- identity;
+- time;
+- source path;
+- counts of resolved and unresolved references;
+- the ignored entries as JSON (keys and codes).
+
+`BEFORE UPDATE` and `BEFORE DELETE` triggers `RAISE(ABORT)`. The `events` table is not
+used, because its rows are graph and task transitions (`schema.rs:19-31`).
+
+**`advisory_routing`.** Columns: `attempt_id PRIMARY KEY REFERENCES attempts`,
+`priors_sha256 NOT NULL` and `changed_top BOOLEAN NOT NULL`. A row is written in the same
+transaction as the attempt row, and only while priors are in effect. `changed_top` is true
+when the candidate `dispatch_ready` dispatches differs from the one it would dispatch with
+the oracle off (already-spent candidates excluded in both cases). This
+lets #140 check that an effect is "traceable". It is never an Evidence row.
+
+**`attempts.model_passed`.** The nullable column described above.
+
+**`priors accept --file F --as <identity>`** runs these steps:
+
+1. Read F once, at most 1 MiB + 1 bytes. The digest, the parse and the stored BLOB all
+   come from that one buffer.
+2. Refuse a file-level fault.
+3. Resolve the references against the local ledger and ignore any entry that has
+   `provenance_contradicts`.
+4. Print every diagnostic.
+5. Append the row in one transaction.
+
+**`priors revoke --as <identity>`** appends a revoke row.
+
+**`--as`** is required and never defaulted. It is rejected when it is empty, when it
+starts with `-`, when it contains control characters, or when it is over 128 bytes.
+
+### Cell side
+
+- **Commands.** `/meshloop learn [--graph G ...] [--out FILE]` folds and writes a
+  proposal; `/meshloop priors show` and `/meshloop priors check FILE` are read-only
+  passthroughs. None is gated by `meshloop.write_commands`, because none writes to
+  meshloop. The cell has no command that promotes or revokes: `/meshloop priors accept`
+  and `/meshloop priors revoke` refuse and name the shell command a person types,
+  `meshloop priors accept --file F --as <name>` or `meshloop priors revoke --as <name>`.
+  The digest prints the first; the cell runs neither.
+- **Veto.** The `:tool` veto (`gates.lisp`, `+gated-pairs+`) refuses the two-word pairs
+  `priors accept` and `priors revoke` read as tokens (argv lists, the slash line, flags
+  stepped over), as shell lines (both words anywhere in one command with a meshloop
+  runner), and as MCP names (`meshloop_priors_accept`, `mcp__meshloop__priors_revoke`).
+  `priors show` and `priors check` stay allowed. Tests cover both cases
+  (`test/pure_test.lisp`, and the load test through `hook-check`).
+- **Proposals.** The cell writes a proposal only under its own state in the nodecode
+  home (`meshloop/priors/meshloop-<hash>/`) or to a new `.json` file the operator names
+  inside the repository's `.agent-runs/`, at most 1 MiB. The kernel keeps no file copy.
+- **Lessons.** For #139 the routing-prior proposal file is the lesson. Lessons kept as
+  nodecode memories or skills, never loaded as code, come with #178.
+- **Discovery.** Without `--graph`, `learn` folds the finished runs among the newest run
+  and the graphs `workspace inventory` lists: meshloop has no verb listing every graph in
+  its store, so a run whose worktrees were all reclaimed is folded only when named.
+
+### Digest
+
+After each `/meshloop learn`, the cell lists:
+
+- the proposal path and its SHA-256;
+- one row per prior key: attempts, successes, failures and whether it clears the floor;
+- exclusion counts by reason;
+- the promoted digest in effect, if any, and `changed_top` counts from
+  `advisory_routing`, both read through `meshloop priors show --json`;
+- the two commands a person types to promote it, which the cell never runs.
+
+The digest holds pointers and counts only.
+
+### Required regression tests
+
+All tests run under `cargo test --workspace --locked --offline`, except the cell fixture
+tests, which run in the cell's own suite.
+
+**Routing invariants**
+
+1. A file never adds or removes a candidate. For any content, `select` returns the same
+   set.
+2. For any π and n, |fused − μ_local| ≤ 0.25.
+3. Without a promoted row, routing order is byte-identical, and so are the plan,
+   review-plan and run outputs. This holds with no row, with a revoked row, and with a
+   proposal file present but not promoted. The routing and planning tests pass unmodified
+   (store schema-version asserts change with the v9 bump).
+4. A zero-budget spend ledger does not turn the priors off.
+
+**Evidence and exclusions**
+
+5. Each exclusion holds in both the fold and the loader:
+   - mode missing, `null` or not `subprocess`;
+   - `model_passed` false or missing;
+   - model `unverified`;
+   - a cancelled task;
+   - a crash, a timeout, or a Meshloop verification fault (`no_check_result`).
+6. A native-routed candidate gets no prior. This test is added with #147.
+7. The attempt JSON reports `check_result` correctly for each terminal path.
+
+**File and entry validation**
+
+8. An entry below the floor has no effect and is reported.
+9. Duplicate keys cause every copy to be ignored.
+10. Duplicate provenance causes the entry to be ignored.
+11. A `successes` mismatch, a count mismatch, or an unknown field in an entry causes the
+    entry to be ignored.
+12. Wrong version, malformed JSON and unknown top-level fields produce a diagnostic and
+    exit 0.
+
+**Promotion and ledger**
+
+13. `accept` reads F once. Changing F after `accept` has no effect.
+14. Routing uses one snapshot per `select` call.
+15. `UPDATE` and `DELETE` on `advisory_promotions` are refused.
+16. `provenance_contradicts` ignores the entry and is recorded in the ledger row, and the entry is never applied when routing.
+17. `--as` validation rejects each bad form.
+18. An `advisory_routing` row is written only while priors are in effect, and
+    `changed_top` is correct.
+
+**Cell**
+
+19. The veto refuses `priors accept` and `priors revoke` in both readings, and allows
+    `priors show` and `priors check`.
+20. The digest after a fixture run lists each prior key with its evidence counts.
+
+### Decision for #140 and its known limit
+
+A prior encodes success only. Decision (c): #140's warm-up batch explores every candidate
+by pinning each one in turn. The warm-up is never one of the measured runs.
+
+If every arm reaches the success ceiling, as lp-4 does (24/24), every π is about the
+same. Every fused mean then clips to the same value, and the order matches the baseline.
+Time and token effects cannot flow through a prior. In that case a NO-GO is the expected
+result, and it should be reported as measured.
+
 ## Platform
 
 The cell and nodecode workers run on Linux and on WSL2 with all state, worktrees and the

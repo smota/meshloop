@@ -79,6 +79,10 @@ pub struct ScopedAttempt {
     pub task_id: meshloop_domain::task_graph::TaskId,
     pub harness: Option<String>,
     pub model_ref: Option<String>,
+    /// Whether dispatch passed `model_ref` to the harness (#139). `None` before #139.
+    pub model_passed: Option<bool>,
+    /// The dispatch mode the row records (#139; a placeholder until #147).
+    pub dispatch: meshloop_domain::advisory::RecordedDispatch,
     pub location: PortableLocation,
     pub process: Option<ProcessIdentity>,
     pub pane_id: Option<String>,

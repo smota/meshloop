@@ -347,7 +347,18 @@ impl RunLoop<'_> {
                         None
                     }
                 });
+            let check_result = meshloop_domain::advisory::CheckResult::final_of(
+                events
+                    .iter()
+                    .filter(|e| e.attempt_id == Some(a.attempt_id))
+                    .map(|e| (e.event, e.reason.as_deref())),
+            );
             attempts.entry(a.task_id).or_default().push(AttemptView {
+                dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(
+                    a.dispatch,
+                ),
+                check_result,
+                model_passed: a.model_passed,
                 attempt_id: a.attempt_id,
                 harness: a.harness.clone(),
                 model_ref: a.model_ref.clone(),
@@ -429,6 +440,7 @@ impl RunLoop<'_> {
                     // Completion timestamps do not prove OS process/tree liveness.
                     live: attempt.map(|_| "Ambiguous".into()),
                     deliverable: n.deliverable.clone(),
+                    tier: n.tier.unwrap_or(meshloop_domain::task_graph::Tier::Tier2),
                 }
             })
             .collect();

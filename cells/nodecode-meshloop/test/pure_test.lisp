@@ -13,7 +13,10 @@
 ;;;; reading of a call, the argument checks of the commands that write
 ;;;; (identity, task, graph, branch, plan path, flags), and the Board
 ;;;; projection's pure parts (board name, post template, mentions, cursor file)
-;;;; with a source check that it is one-way (#137). The load test
+;;;; with a source check that it is one-way (#137), and the routing-prior fold
+;;;; of /meshloop learn on fixture JSON (#139): each exclusion reason, keys,
+;;;; successes, unique provenance, byte-for-byte determinism, the digest, the
+;;;; --out path rule, and the veto on priors accept and priors revoke. The load test
 ;;;; (load_test.py) is what runs the cell in nodecode. Optional: neither
 ;;;; `cargo test' nor `xtask check' runs this. Exit status 0 means every check held.
 
@@ -27,7 +30,7 @@
 
 (defparameter *cell* (merge-pathnames "../" (make-pathname :name nil :type nil
                                                            :defaults *load-truename*)))
-(defparameter *files* '("package" "cell" "gates" "board" "drive"))
+(defparameter *files* '("package" "cell" "gates" "board" "learn" "drive"))
 (defparameter *failures* 0)
 (defparameter *checks* 0)
 
@@ -84,6 +87,80 @@
   (let ((hex (format nil "~(~{~2,'0x~}~)" (coerce (sb-md5:md5sum-string text :external-format :utf-8) 'list))))
     (concatenate 'string "sha256:" hex hex)))
 (defun nlk::trimmed (text) (string-trim '(#\Space #\Tab #\Return #\Newline) text))
+;; nodecode's JSON reading, as lib/json.lisp defines it: objects as EQUAL hash
+;; tables, arrays as simple vectors, true T, false NIL, null :NULL.
+(defun nlk::decode-json (text &key whole)
+  (declare (ignore whole))
+  (let ((i 0) (n (length text)))
+    (labels ((ws () (loop while (and (< i n) (member (char text i) '(#\Space #\Tab #\Newline #\Return))) do (incf i)))
+             (word (w) (and (<= (+ i (length w)) n) (string= w text :start2 i :end2 (+ i (length w)))))
+             (val ()
+               (ws)
+               (let ((c (char text i)))
+                 (cond ((char= c #\{) (incf i) (obj))
+                       ((char= c #\[) (incf i) (arr))
+                       ((char= c #\") (incf i) (str))
+                       ((word "true") (incf i 4) t)
+                       ((word "false") (incf i 5) nil)
+                       ((word "null") (incf i 4) :null)
+                       (t (num)))))
+             (obj ()
+               (let ((h (make-hash-table :test #'equal)))
+                 (ws)
+                 (if (char= (char text i) #\})
+                     (progn (incf i) h)
+                     (loop (ws) (incf i)
+                           (let ((k (str))) (ws) (incf i) (setf (gethash k h) (val)))
+                           (ws)
+                           (let ((c (char text i))) (incf i) (when (char= c #\}) (return h)))))))
+             (arr ()
+               (let ((items '()))
+                 (ws)
+                 (if (char= (char text i) #\])
+                     (progn (incf i) (vector))
+                     (loop (push (val) items) (ws)
+                           (let ((c (char text i))) (incf i)
+                             (when (char= c #\]) (return (coerce (nreverse items) 'simple-vector))))))))
+             (str ()
+               (with-output-to-string (out)
+                 (loop (let ((c (char text i)))
+                         (incf i)
+                         (cond ((char= c #\") (return))
+                               ((char= c #\\)
+                                (let ((e (char text i)))
+                                  (incf i)
+                                  (case e
+                                    (#\n (write-char #\Newline out))
+                                    (#\t (write-char #\Tab out))
+                                    (#\u (write-char (code-char (parse-integer text :start i :end (+ i 4) :radix 16)) out)
+                                     (incf i 4))
+                                    (t (write-char e out)))))
+                               (t (write-char c out)))))))
+             (num ()
+               (let ((start i))
+                 (loop while (and (< i n) (find (char text i) "-+0123456789.eE")) do (incf i))
+                 (if (find-if (lambda (c) (find c ".eE")) text :start start :end i)
+                     (let ((*read-default-float-format* 'double-float))
+                       (read-from-string text t nil :start start :end i))
+                     (parse-integer text :start start :end i)))))
+      (val))))
+(defun nlk::json-value (object type &rest path)
+  (let ((value object) (present t))
+    (dolist (key path)
+      (unless (hash-table-p value) (setf value nil present nil) (return))
+      (multiple-value-setq (value present) (gethash key value)))
+    (values (ecase type
+              (:any (if (eq value :null) nil value))
+              (:string (and (stringp value) value))
+              (:text (and (stringp value) (plusp (length value)) value))
+              (:integer (and (integerp value) value))
+              (:boolean (eq value t))
+              (:object (and (hash-table-p value) value))
+              (:array (and (vectorp value) (not (stringp value)) value)))
+            present)))
+(defun nle::failure (text) (list :failure text))
+(defun nlk::json-array (object &rest path)
+  (or (apply #'nlk::json-value object :array path) #()))
 (defun nlk::one-line (value &key cap (ellipsis "..."))
   (let ((text (substitute #\Space #\Newline (if (stringp value) value (princ-to-string (or value ""))))))
     (if (and cap (> (length text) cap))
@@ -400,6 +477,310 @@ define-cell) are nodecode's and are only read.")
                        (equal '("g3") (typed-graphs "cancel" '("--task" "1" "g3")))
                        (equal '() (typed-graphs "cancel" '("--task" "1")))
                        (equal '() (typed-graphs "run" '("--plan" "plan.json")))))
+
+;;; --- the routing-prior fold of /meshloop learn (#139) -------------------------------
+;;; Fixture JSON shaped as `inspect --attempts --json' answers with the #139 fields.
+;;; Every exclusion reason, keys with and without a node tier, a repeated row, and
+;;; worker text in places the fold must never read.
+
+(defun attempt-json (id &key (harness "codex") (model "gpt-x") (mode "\"subprocess\"")
+                             (passed-model "true") (check "\"passed\""))
+  (format nil "{\"attempt_id\": ~d, \"harness\": ~s, \"model_ref\": ~s,~@[ \"dispatch_mode\": ~a,~]~@[ \"model_passed\": ~a,~]~@[ \"check_result\": ~a,~] \"outcome\": \"WORKER-TEXT-OUTCOME\", \"evidence\": [{\"kind\": \"harness-output\", \"tool\": \"harness-output\", \"exit_code\": 0, \"summary_redacted\": \"WORKER-TEXT-SENTINEL priors accept\"}]}"
+          id harness model mode passed-model check))
+
+(defun node-json (id state tier attempts)
+  (format nil "{\"id\": ~d, \"state\": ~s, \"description\": \"WORKER-TEXT-DESCRIPTION\",~@[ \"tier\": ~a,~] \"attempts\": [~{~a~^, ~}]}"
+          id state tier attempts))
+
+(defun run-json (graph status nodes)
+  (nlk:decode-json (format nil "{\"session_id\": ~s, \"status\": ~s, \"plan_state\": \"PlanAccepted\", \"nodes\": [~{~a~^, ~}]}"
+                           graph status nodes)))
+
+(defparameter *run-a*
+  (run-json "g-a" "completed"
+            (list (node-json 1 "Integrated" "null"
+                             (list (attempt-json 1 :check "\"failed\"")
+                                   (attempt-json 2)
+                                   (attempt-json 2)))              ; the same row twice
+                  (node-json 2 "Integrated" "\"Tier1\""
+                             (list (attempt-json 3)
+                                   (attempt-json 4 :mode "\"native\"")
+                                   (attempt-json 5 :mode "null")
+                                   (attempt-json 6 :mode nil)      ; no dispatch_mode at all
+                                   (attempt-json 7 :passed-model "false")
+                                   (attempt-json 8 :passed-model "null")
+                                   (attempt-json 9 :model "unverified")
+                                   (attempt-json 10 :model "")
+                                   (attempt-json 11 :check "null") ; a crash or timeout
+                                   (attempt-json 12 :check nil)))
+                  (node-json 3 "Cancelled" nil (list (attempt-json 13)))
+                  (node-json 4 "Integrated" "\"Tier2\""
+                             (list (attempt-json 20)
+                                   (attempt-json 21 :harness "grok" :model "grok-4"))))))
+
+(defparameter *run-b*
+  (run-json "g-b" "failed"
+            (list (node-json 1 "Integrated" "null"
+                             (list (attempt-json 1) (attempt-json 2) (attempt-json 3))))))
+
+(defparameter *fold* (fold-priors (list (cons "g-a" *run-a*) (cons "g-b" *run-b*))))
+
+(defun entry (fold harness model tier)
+  (find-if (lambda (e) (and (equal (getf e :harness) harness) (equal (getf e :model-ref) model)
+                            (equal (getf e :tier) tier)))
+           (getf fold :priors)))
+
+(pure-test::check "fold: keys (harness, model_ref, tier), sorted; a node with no tier keys Tier2"
+                  (equal (mapcar (lambda (e) (list (getf e :harness) (getf e :model-ref) (getf e :tier))) (getf *fold* :priors))
+                         '(("codex" "gpt-x" "Tier1") ("codex" "gpt-x" "Tier2") ("grok" "grok-4" "Tier2")))
+                  (getf *fold* :priors))
+(pure-test::check "fold: every exclusion reason, each attempt under the first that holds"
+                  (equal (getf *fold* :excluded)
+                         '(("not_subprocess" . 3) ("model_not_passed" . 2) ("model_unverified" . 2)
+                           ("cancelled" . 1) ("no_check_result" . 2)))
+                  (getf *fold* :excluded))
+(pure-test::check "fold: a failed check counts as a failure, from two graphs"
+                  (let ((e (entry *fold* "codex" "gpt-x" "Tier2")))
+                    (and (= 6 (getf e :attempts)) (= 5 (getf e :successes))
+                         (equal (getf e :provenance)
+                                '(("g-a" 1 1 nil) ("g-a" 1 2 t) ("g-a" 4 20 t) ("g-b" 1 1 t) ("g-b" 1 2 t) ("g-b" 1 3 t)))))
+                  (entry *fold* "codex" "gpt-x" "Tier2"))
+(pure-test::check "fold: counted is the sum of the entries, and a repeated row is dropped once"
+                  (and (= 8 (getf *fold* :counted)) (= 1 (getf *fold* :duplicates))
+                       (= 8 (reduce #'+ (getf *fold* :priors) :key (lambda (e) (getf e :attempts))))))
+(pure-test::check "fold: successes == the references with passed, attempts == their count, in every entry"
+                  (every (lambda (e) (and (= (getf e :successes) (count-if #'fourth (getf e :provenance)))
+                                          (= (getf e :attempts) (length (getf e :provenance)))))
+                         (getf *fold* :priors)))
+(pure-test::check "fold: no (graph, task, attempt) reference twice, in an entry or across entries"
+                  (let ((refs (loop for e in (getf *fold* :priors)
+                                    append (mapcar (lambda (r) (subseq r 0 3)) (getf e :provenance)))))
+                    (= (length refs) (length (remove-duplicates refs :test #'equal)))))
+
+(defparameter *time* "2026-11-11T09:30:00Z")
+(defparameter *json* (priors-json *fold* *time*))
+
+(pure-test::check "fold: the same input folds to the same bytes, whatever the order or repetition of graphs"
+                  (and (string= *json* (priors-json (fold-priors (list (cons "g-b" *run-b*) (cons "g-a" *run-a*))) *time*))
+                       (string= *json* (priors-json (fold-priors (list (cons "g-a" *run-a*) (cons "g-b" *run-b*)
+                                                                       (cons "g-a" *run-a*)))
+                                                    *time*))
+                       (string= *json* (priors-json (fold-priors (list (cons "g-a" *run-a*) (cons "g-b" *run-b*))) *time*))))
+(pure-test::check "fold: no worker text, description, outcome or evidence reaches the file"
+                  (not (search "WORKER-TEXT" *json*)))
+(let ((file (nlk:decode-json *json*)))
+  (pure-test::check "file: schema, version, generator, source and the v1 entry fields, in order"
+                    (and (equal (gethash "schema" file) "meshloop/advisory-priors")
+                         (eql (gethash "version" file) 1)
+                         (equal (gethash "generated_at" file) *time*)
+                         (equal (nlk:json-value file :string "generator" "name") "nodecode-meshloop")
+                         (equalp (nlk:json-value file :array "source" "graph_ids") #("g-a" "g-b"))
+                         (= 3 (length (gethash "priors" file)))
+                         (every (lambda (e) (and (equal (gethash "dispatch_mode" e) "subprocess")
+                                                 (= 7 (hash-table-count e))))
+                                (gethash "priors" file))
+                         (search "\"harness\": \"codex\",
+      \"model_ref\": \"gpt-x\",
+      \"tier\": \"Tier1\",
+      \"dispatch_mode\": \"subprocess\",
+      \"attempts\": 1,
+      \"successes\": 1,
+      \"provenance\": [
+        {\"graph_id\": \"g-a\", \"task_id\": 2, \"attempt_id\": 3, \"passed\": true}
+      ]" *json*))
+                    *json*)
+  (pure-test::check "file: every key the file carries equals the fold's, with UTF-8 size under 1 MiB"
+                    (and (< (utf-8-length *json*) *priors-file-limit*)
+                         (equal (map 'list (lambda (e) (gethash "attempts" e)) (gethash "priors" file)) '(1 6 1)))))
+;; For a schema check outside SBCL: MESHLOOP_PRIORS_SAMPLE=FILE writes the proposal there.
+(let ((sample (sb-ext:posix-getenv "MESHLOOP_PRIORS_SAMPLE")))
+  (when (and sample (plusp (length sample)))
+    (with-open-file (out sample :direction :output :if-exists :supersede :external-format :utf-8)
+      (write-string *json* out))
+    (format t "[note] wrote the fixture proposal to ~a~%" sample)))
+
+(pure-test::check "file: a quote, a backslash and a control character are escaped"
+                  (equal (json-quoted (format nil "a\"b\\c~cd" (code-char 1))) "\"a\\\"b\\\\c\\u0001d\""))
+(pure-test::check "model_ref predicate: #134's rule, and unverified refused"
+                  (and (model-usable-p "gpt-6.1-sol") (model-usable-p "org/model:1")
+                       (notany #'model-usable-p (list "" "unverified" "-x" "a b" (format nil "a~cb" #\Tab)
+                                                      (make-string 257 :initial-element #\a) nil))))
+(pure-test::check "fold: a tier a v1 file cannot carry fails closed"
+                  (pure-test::refuses (fold-priors (list (cons "g" (run-json "g" "completed"
+                                                                             (list (node-json 1 "Integrated" "\"Tier9\"" (list (attempt-json 1))))))))))
+(pure-test::check "fold: an excluded attempt's odd tier does not matter"
+                  (null (pure-test::refuses (fold-priors (list (cons "g" (run-json "g" "completed"
+                                                                                   (list (node-json 1 "Integrated" "\"Tier9\"" (list (attempt-json 1 :mode "null")))))))))))
+(pure-test::check "fold: no attempt id fails closed"
+                  (pure-test::refuses (fold-priors (list (cons "g" (nlk:decode-json "{\"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"tier\": null, \"attempts\": [{\"harness\": \"h\"}]}]}"))))))
+(pure-test::check "fold: no run, no prior"
+                  (let ((fold (fold-priors '()))) (and (null (getf fold :priors)) (zerop (getf fold :counted)))))
+
+;; An older binary: attempt rows without the #139 fields fail the contract case
+;; learn checks (PRIORS-ATTEMPTS refuses through CHECKED), so it writes nothing, while
+;; inspect_attempts, which report and accept read, still holds.
+(setf *contract* (nlk:decode-json (pure-test::file-text-at (merge-pathnames "contract.json" pure-test::*cell*))))
+(let* ((old (nlk:decode-json (format nil "{\"ok\": true, \"command\": \"meshloop:inspect\", \"data\": {\"session_id\": \"g\", \"status\": \"completed\", \"plan_state\": \"PlanAccepted\", \"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"description\": \"d\", \"attempts\": [{\"attempt_id\": 1, \"harness\": \"h\", \"model_ref\": \"m\", \"outcome\": \"o\", \"evidence\": []}]}]}}")))
+       (new (nlk:decode-json (format nil "{\"ok\": true, \"command\": \"meshloop:inspect\", \"data\": {\"session_id\": \"g\", \"status\": \"completed\", \"plan_state\": \"PlanAccepted\", \"nodes\": [{\"id\": 1, \"state\": \"Integrated\", \"description\": \"d\", \"tier\": \"Tier2\", \"attempts\": [~a]}]}}" (attempt-json 1)))))
+  (pure-test::check "contract: a pre-#139 answer lacks what learn reads, and learn refuses it"
+                    (and (missing-field old (case-fields "priors_attempts"))
+                         (null (missing-field old (case-fields "inspect_attempts")))))
+  (pure-test::check "contract: a #139 answer has every field learn reads"
+                    (null (missing-field new (case-fields "priors_attempts")))
+                    (missing-field new (case-fields "priors_attempts"))))
+(setf *contract* nil)
+
+;; priors check's answer as the kernel shapes it (crates/meshloop-cli/src/priors.rs).
+(let* ((object (nlk:decode-json "{\"ok\": true, \"command\": \"meshloop:priors-check\", \"data\": {\"file\": \"p.json\", \"bytes\": 900, \"priors_sha256\": \"ab12\", \"file_fault\": null, \"evidence_floor\": 5, \"resolved_refs\": 5, \"unresolved_refs\": 0, \"usable\": [{\"index\": 0, \"harness\": \"fixture\", \"model_ref\": \"fixture-model\", \"tier\": \"Tier2\", \"dispatch_mode\": \"subprocess\", \"attempts\": 5, \"successes\": 5, \"pi\": 0.857, \"candidate\": true}], \"ignored\": [{\"index\": 1, \"code\": \"below_evidence_floor\", \"harness\": \"fixture\", \"model_ref\": \"m2\", \"tier\": \"Tier1\", \"dispatch_mode\": \"subprocess\"}], \"diagnostics\": [{\"code\": \"below_evidence_floor\", \"level\": \"entry\", \"entry\": 1, \"harness\": \"fixture\", \"model_ref\": \"m2\", \"tier\": \"Tier1\", \"dispatch_mode\": \"subprocess\", \"detail\": \"1 attempts is below the floor\"}]}}"))
+       (text (summarize-priors-check "p.json" object)))
+  (pure-test::check "priors check summary: usable entries, ignored count, each diagnostic with its key, the promote command"
+                    (and (search "meshloop priors check: p.json: 1 usable, 1 ignored; 1 diagnostic (read-only, nothing promoted)" text)
+                         (search "usable fixture / fixture-model / Tier2: 5 attempts, 5 passed" text)
+                         (search "below_evidence_floor [entry] fixture / m2 / Tier1: 1 attempts is below the floor" text)
+                         (search "meshloop priors accept --file p.json --as <your-name>" text))
+                    text))
+(let ((text (summarize-priors-check "x.json" (nlk:decode-json "{\"ok\": true, \"command\": \"meshloop:priors-check\", \"data\": {\"file_fault\": \"not_json\", \"usable\": [], \"ignored\": [], \"diagnostics\": [{\"code\": \"not_json\", \"level\": \"file\", \"entry\": null, \"harness\": null, \"model_ref\": null, \"tier\": null, \"dispatch_mode\": null, \"detail\": \"expected value\"}]}}"))))
+  (pure-test::check "priors check summary: a file fault, and no promote command for it"
+                    (and (search "x.json: file fault not_json, no priors would apply; 0 usable" text)
+                         (search "not_json [file]: expected value" text) (not (search "priors accept" text)))
+                    text))
+
+;; The digest: pointers and counts only.
+(let ((digest (fold-digest *fold* "/h/p.json" "sha256:abc" '(("g-c" . "running, not finished; name it with --graph to fold it anyway"))
+                           "promoted priors in effect: none")))
+  (dolist (want '("meshloop learn: wrote a routing-prior proposal to /h/p.json (sha256:abc); folded 2 graphs (g-a, g-b): 8 attempts counted, 10 excluded"
+                  "prior codex / gpt-x / Tier1: 1 attempt, 1 passed, 0 failed; below the kernel's floor (n >= 5): it will be ignored"
+                  "prior codex / gpt-x / Tier2: 6 attempts, 5 passed, 1 failed; clears the kernel's floor (n >= 5)"
+                  "prior grok / grok-4 / Tier2: 1 attempt, 1 passed, 0 failed; below the kernel's floor (n >= 5)"
+                  "excluded by reason: not_subprocess 3, model_not_passed 2, model_unverified 2, cancelled 1, no_check_result 2"
+                  "1 attempt row seen twice under one (graph, task, attempt) dropped"
+                  "skipped g-c: running, not finished"
+                  "promoted priors in effect: none"
+                  "This cell never promotes"
+                  "meshloop priors check --file /h/p.json"
+                  "meshloop priors accept --file /h/p.json --as <your-name>"))
+    (pure-test::check (format nil "digest says: ~a" (subseq want 0 (min 60 (length want)))) (search want digest) digest))
+  (pure-test::check "digest: no worker text" (not (search "WORKER-TEXT" digest))))
+(let ((digest (fold-digest (fold-priors (list (cons "g" (run-json "g" "completed" (list (node-json 1 "Integrated" "null" (list (attempt-json 1 :passed-model "false")))))))) nil nil nil nil)))
+  (pure-test::check "digest: no evidence, no proposal, and no promote command"
+                    (and (search "no attempt counts as evidence, so no proposal was written" digest)
+                         (search "model_not_passed 1" digest) (not (search "priors accept" digest)))
+                    digest))
+(pure-test::check "digest: a path with a blank is quoted in the commands"
+                  (search "--file '/h/a b.json' --as" (promote-lines "/h/a b.json")))
+(pure-test::check "digest: control and bidi characters are not shown"
+                  (equal (shown (format nil "a~cb~cc" (code-char #x202e) (code-char 7))) "abc"))
+
+;; learn's words.
+(pure-test::check "learn words: --graph repeated and bare graph ids, --out"
+                  (multiple-value-bind (graphs out) (learn-words "--graph g1 g2 --out .agent-runs/p.json --graph g3")
+                    (and (equal graphs '("g1" "g2" "g3")) (equal out ".agent-runs/p.json"))))
+(dolist (case '("--force" "--graph" "--graph --x" "--out a.json --out b.json" "--out"))
+  (pure-test::check (format nil "learn words refused: ~a" case) (pure-test::refuses (learn-words case))))
+
+;; --out: a new .json file inside the repository's .agent-runs/, links resolved.
+(let* ((base (format nil "/tmp/nodecode-meshloop-pure-~d/" (random 1000000000 (make-random-state t))))
+       (root (concatenate 'string base "repo/")))
+  (ensure-directories-exist (concatenate 'string root ".git/"))
+  (ensure-directories-exist (concatenate 'string base "elsewhere/"))
+  (unwind-protect
+       (progn
+         (pure-test::check "--out: the check learn makes before reading meshloop makes no folder"
+                           (and (search "/repo/.agent-runs/early/p.json" (out-file root ".agent-runs/early/p.json"))
+                                (not (probe-file (concatenate 'string root ".agent-runs/")))
+                                (pure-test::refuses (out-file root "../x.json"))))
+         (pure-test::check "--out: .agent-runs/priors/p.json is taken, its folder made"
+                           (let ((path (agent-runs-path root ".agent-runs/priors/p.json")))
+                             (and (search "/repo/.agent-runs/priors/p.json" path)
+                                  (probe-file (concatenate 'string root ".agent-runs/priors/")))))
+         (dolist (case (list "../x.json" ".agent-runs/../x.json" "x.json" ".agent-runs/p.txt" "-x.json"
+                             (concatenate 'string base "elsewhere/x.json") "/etc/x.json"))
+           (pure-test::check (format nil "--out refused: ~a" case) (pure-test::refuses (agent-runs-path root case))))
+         (with-open-file (out (concatenate 'string root ".agent-runs/taken.json") :direction :output) (write-string "{}" out))
+         (pure-test::check "--out refused: a file that exists"
+                           (pure-test::refuses (agent-runs-path root ".agent-runs/taken.json")))
+         (sb-ext:run-program "/bin/ln" (list "-s" (concatenate 'string base "elsewhere") (concatenate 'string root ".agent-runs/out")))
+         (pure-test::check "--out refused: a folder linked outside .agent-runs/, and nothing made there"
+                           (and (pure-test::refuses (agent-runs-path root ".agent-runs/out/sub/x.json"))
+                                (not (probe-file (concatenate 'string base "elsewhere/sub/"))))))
+    (sb-ext:run-program "/bin/rm" (list "-rf" base))))
+
+;;; --- the :tool veto on priors accept and priors revoke (#139) -----------------------
+
+(dolist (case '(("priors accept, shell string" "(sh \"meshloop priors accept --file .agent-runs/p.json --as me\")")
+                ("priors revoke, shell string" "(sh \"meshloop priors revoke --as me\")")
+                ("priors revoke, quoted argv" "(uiop:run-program '(\"meshloop\" \"priors\" \"revoke\" \"--as\" \"me\"))")
+                ("priors accept, argv list" "(sb-ext:run-program \"/x/target/debug/meshloop\" (list \"priors\" \"accept\" \"--file\" \"p.json\"))")
+                ("priors accept, python argv" "subprocess.run([\"meshloop\", \"priors\", \"accept\", \"--file\", \"p.json\"])")
+                ("priors revoke after a flag" "(sh \"meshloop priors --json revoke --as me\")")
+                ("priors revoke, upper case" "(SH \"MESHLOOP PRIORS REVOKE --AS ME\")")
+                ("priors revoke, slash line" "(post \"/api/gateway/slash\" \"{\\\"line\\\":\\\"/meshloop priors revoke --as me\\\"}\")")
+                ("priors accept, prefixed slash" "(post \"/meshloop:priors accept --file p.json\")")
+                ("priors revoke piped into xargs" "(sh \"echo revoke | xargs meshloop priors --as me\")")
+                ("priors revoke, executable in a variable" "(sh \"B=meshloop; $B priors revoke --as me\")")
+                ("priors revoke, cargo run -p" "(sh \"cargo run -q -p meshloop-cli -- priors revoke --as me\")")
+                ("priors revoke, spliced" "sh -c 'meshloop priors rev''oke --as me'")
+                ("priors revoke, \\u escape" "(sh \"meshloop priors \\u0072evoke --as me\")")
+                ("priors accept, a wrapper's command" "(sh \"timeout 5 meshloop priors accept --file p.json --as me\")")
+                ("priors accept, MCP tool name" "(mcp-call \"meshloop_priors_accept\" (list))")))
+  (pure-test::check (format nil "veto refuses: ~a" (first case)) (pure-test::veto (second case)) (second case)))
+(dolist (case '(("priors show" "(sh \"meshloop priors show --json\")")
+                ("priors check" "(sh \"meshloop priors check --file .agent-runs/p.json --json\")")
+                ("priors check, argv" "(uiop:run-program '(\"meshloop\" \"priors\" \"check\" \"--file\" \"p.json\"))")
+                ("priors show, slash line" "(post \"/api/gateway/slash\" \"{\\\"line\\\":\\\"/meshloop priors show\\\"}\")")
+                ("/meshloop learn" "(post \"/api/gateway/slash\" \"{\\\"line\\\":\\\"/meshloop learn --graph g1\\\"}\")")
+                ("the words in a message" "(sh \"git commit -m 'revoke the stale priors docs'\")")
+                ("priors show, then a commit" "(sh \"meshloop priors show; git commit -m revoke\")")))
+  (pure-test::check (format nil "veto lets through: ~a" (first case)) (null (pure-test::veto (second case)))
+                    (pure-test::veto (second case))))
+(pure-test::check "veto refuses MCP priors tools by name and by last __ segment"
+                  (every (lambda (name) (gated-call name (make-hash-table)))
+                         '("mcp__meshloop__meshloop_priors_revoke" "mcp__meshloop__priors_accept" "mcp__meshloop__priors_revoke")))
+(pure-test::check "veto lets MCP priors show and another server's priors_accept through"
+                  (notany (lambda (name) (gated-call name (make-hash-table)))
+                          '("mcp__meshloop__priors_show" "mcp__meshloop__priors_check" "mcp__github__priors_accept")))
+
+;;; A fault never kills the cell: the :tool hook fails closed in one line, and a
+;;; /meshloop command answers one line, whatever escapes it.
+(let ((original (fdefinition 'gated-call)) (reached nil))
+  (unwind-protect
+       (progn
+         (setf (fdefinition 'gated-call) (lambda (&rest x) (declare (ignore x)) (error "boom in the reading")))
+         (let ((answer (veto-gated-calls (list :name "eval" :arguments (make-hash-table) :call-id "c")
+                                         (lambda (op) (declare (ignore op)) (setf reached t) "ran"))))
+           (pure-test::check "veto: a fault in its reading refuses the call in one line, never signals, never runs it"
+                             (and (not reached) (eq :failure (first answer))
+                                  (search "the veto could not read the call (boom in the reading), so it is refused" (second answer)))
+                             answer)))
+    (setf (fdefinition 'gated-call) original)))
+(pure-test::check "guarded: an answer passes through, a fault is one line"
+                  (and (equal "ok" (guarded "x" (lambda () "ok")))
+                       (equal "meshloop integrate: failed: boom" (guarded "integrate" (lambda () (error "boom"))))))
+(let ((original (fdefinition 'after-command)))
+  (unwind-protect
+       (progn
+         (setf (fdefinition 'after-command) (lambda (&rest x) (declare (ignore x)) (error "the sync after it broke")))
+         (let ((answer (run-slash "doctor" "s-X")))
+           (pure-test::check "run-slash: a fault after the command (the Board sync) is one line, not a dead cell"
+                             (equal answer "meshloop doctor: failed: the sync after it broke") answer)))
+    (setf (fdefinition 'after-command) original)))
+
+;;; Read from the source: learn asks meshloop only for read verbs, and for priors
+;;; only show and check; no source runs priors accept or revoke.
+(let ((learn (pure-test::file-text "learn")))
+  (pure-test::check "learn runs only meshloop's read verbs: inspect, status, workspace inventory, priors show|check"
+                    (and (not (search "(act " learn))
+                         (loop for start = (search "(ask \"" learn) then (search "(ask \"" learn :start2 (1+ start))
+                               while start
+                               always (let ((text (subseq learn (+ start 5) (min (length learn) (+ start 40)))))
+                                        (some (lambda (ok) (eql 0 (search ok text)))
+                                              '("\"inspect\" (list \"--attempts\"" "\"status\" '()" "\"workspace\" (list \"inventory\""
+                                                "\"priors\" (list \"show\"" "\"priors\" (list \"check\"")))))))
+(pure-test::check "no source passes accept or revoke to a priors call"
+                  (let ((all (format nil "~{~a~}" (mapcar #'pure-test::file-text pure-test::*files*))))
+                    (notany (lambda (form) (search form all))
+                            '("\"priors\" (list \"accept\"" "\"priors\" (list \"revoke\"" "(list \"priors\" \"accept\""
+                              "(list \"priors\" \"revoke\"" "(act \"priors\"" "'(\"priors\" \"accept\"" "'(\"priors\" \"revoke\""))))
 
 ;;; One-way, read from the sources: the cell calls the Board's join and post
 ;;; only, never a function that reads posts, holds no :round hook, and the

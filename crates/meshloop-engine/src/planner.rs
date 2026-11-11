@@ -740,6 +740,9 @@ mod tests {
     }
 
     impl HarnessCapabilities for FakeHarness {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             unimplemented!()
         }
@@ -819,6 +822,9 @@ mod tests {
         std::fs::write(dir.join("meshloop-plan.json"), json).unwrap();
         struct InvokeFail;
         impl HarnessCapabilities for InvokeFail {
+            fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+                meshloop_domain::advisory::DispatchMode::Subprocess
+            }
             fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
                 unimplemented!()
             }

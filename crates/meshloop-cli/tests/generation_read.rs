@@ -1072,6 +1072,8 @@ fn bound_start_restart_and_cancel_preserve_dirty_legacy_artifacts_and_history() 
                 started_at: Some("1".into()),
                 ended_at: None,
                 outcome: None,
+                model_passed: None,
+                dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
             })
             .unwrap();
         drop(legacy);

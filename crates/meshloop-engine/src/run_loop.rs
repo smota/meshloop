@@ -226,6 +226,8 @@ pub struct NodeStatus {
     pub pane_id: Option<String>,
     pub live: Option<String>,
     pub deliverable: Option<String>,
+    /// The tier routing dispatches this node at: the plan's tier, Tier2 when unset.
+    pub tier: Tier,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +285,13 @@ pub struct AttemptView {
     /// Revision the attempt's worktree started from.
     pub base_revision: Option<String>,
     pub evidence: Vec<EvidenceView>,
+    /// How the attempt was dispatched (#139). Read-only.
+    pub dispatch_mode: meshloop_domain::advisory::DispatchMode,
+    /// The attempt's final deterministic-result event (#139). `None` for a crash, a
+    /// timeout, a cancellation before checks, or a result whose append was refused.
+    pub check_result: Option<meshloop_domain::advisory::CheckResult>,
+    /// Whether dispatch passed `model_ref` to the harness (#139). `None` before #139.
+    pub model_passed: Option<bool>,
 }
 
 /// Run-level totals for `status`.
@@ -613,6 +622,21 @@ impl<'a> RunLoop<'a> {
     fn tasks(&self, graph_id: &str) -> Result<HashMap<TaskId, TaskState>, OrchestratorError> {
         let recs = self.store.records_for_graph(graph_id)?;
         replay_tasks(&recs).map_err(Into::into)
+    }
+
+    /// One read of the promoted priors (#139). A loader fault is `Ok(None)` and
+    /// `priors show` names it. A store fault is not swallowed: the adapter reports it
+    /// (warning and telemetry) and this dispatch routes without priors, because an
+    /// advisory input must never stop a run.
+    fn priors_snapshot(&self) -> Option<crate::ports::PriorsSnapshot> {
+        let source = self.store.advisory_priors()?;
+        match source.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(fault) => {
+                source.report_fault(&fault);
+                None
+            }
+        }
     }
 
     pub fn graph(&self, graph_id: &str) -> Result<TaskGraph, OrchestratorError> {
@@ -1543,7 +1567,19 @@ impl<'a> RunLoop<'a> {
         let quotas = self.load_quotas();
         let preferred = self.last_success_harness(graph_id);
         let penalty = CouplingPenalty(0);
-        let selected: Vec<crate::router::Candidate> = {
+        // One snapshot of promoted priors per select call (#139). Without one, routing
+        // is exactly the pre-#139 path: `oracle: None` and the store's spend ledger.
+        let priors = self.priors_snapshot();
+        let oracle = priors.as_ref().map(|snapshot| {
+            let dispatch: HashMap<String, meshloop_domain::advisory::DispatchMode> = self
+                .harnesses
+                .iter()
+                .map(|(name, h)| (name.clone(), h.dispatch_mode()))
+                .collect();
+            crate::priors::PriorsOracle::new(snapshot, &dispatch)
+        });
+        let now = SystemTime::now();
+        let route = |oracle: Option<&dyn crate::ports::PredictiveSuccessOracle>| {
             let feedback_store = &*self.store;
             let ctx = RoutingContext {
                 task_tier: tier,
@@ -1551,32 +1587,44 @@ impl<'a> RunLoop<'a> {
                 preferred_harness: preferred.as_deref(),
                 headroom: &HashMap::new(),
                 feedback: feedback_store,
-                oracle: None,
-                spend: feedback_store.session_spend(),
+                oracle,
+                // The priors oracle never charges: the store's ledger has a zero budget,
+                // so a charge would silently turn the priors off (ADR 0038 #139, rule 4).
+                spend: match oracle {
+                    Some(_) => None,
+                    None => feedback_store.session_spend(),
+                },
             };
             self.router
-                .select(
-                    &self.candidates,
-                    &profiles,
-                    &quotas,
-                    SystemTime::now(),
-                    &ctx,
-                )
+                .select(&self.candidates, &profiles, &quotas, now, &ctx)
                 .into_iter()
                 .cloned()
-                .collect()
+                .collect::<Vec<crate::router::Candidate>>()
         };
+        let selected = route(
+            oracle
+                .as_ref()
+                .map(|o| o as &dyn crate::ports::PredictiveSuccessOracle),
+        );
         if selected.is_empty() {
             return Ok(Tick::Idle {
                 reason: IdleReason::NoCapableCandidate,
             });
         }
         let spent = Spent::from_attempts(&self.store.attempts_for_task(graph_id, task_id)?);
-        let candidate: crate::router::Candidate = selected
-            .iter()
-            .find(|c| !spent.contains(c))
-            .cloned()
-            .unwrap_or_else(|| selected[0].clone());
+        let pick = |list: &[crate::router::Candidate]| -> Option<crate::router::Candidate> {
+            list.iter()
+                .find(|c| !spent.contains(c))
+                .or_else(|| list.first())
+                .cloned()
+        };
+        let candidate: crate::router::Candidate = pick(&selected)
+            .ok_or_else(|| OrchestratorError::Illegal("routing returned no candidate".into()))?;
+        // Whether the priors changed the pick: the same routing with the oracle off,
+        // spent candidates excluded in both. Computed only while priors are in effect.
+        let changed_top = priors
+            .as_ref()
+            .map(|_| pick(&route(None)).as_ref() != Some(&candidate));
         self.require_dispatch_ok(&candidate.harness)?;
 
         let attempt_id = self.store.next_attempt_id()?;
@@ -1643,13 +1691,27 @@ impl<'a> RunLoop<'a> {
             started_at: Some(stamp()),
             ended_at: None,
             outcome: Some(format!("base:{start}")),
+            model_passed: self
+                .harnesses
+                .get(&candidate.harness)
+                .map(|h| h.passes_model_ref()),
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
+        };
+        let routing = match (&priors, changed_top) {
+            (Some(snapshot), Some(changed_top)) => Some(crate::ports::AdvisoryRouting {
+                attempt_id,
+                priors_sha256: snapshot.priors_sha256.clone(),
+                changed_top,
+            }),
+            _ => None,
         };
         // An owned run records the attempt and its artifact before the worktree
         // exists (issue #142); the artifact references the attempt row.
         let owned = lease.is_some();
         let registered = match lease.as_mut() {
             Some(lease) => {
-                self.store.save_attempt(&attempt_row)?;
+                self.store
+                    .save_attempt_routed(&attempt_row, routing.as_ref())?;
                 self.own_artifact_held(
                     lease.as_mut(),
                     graph_id,
@@ -1675,7 +1737,8 @@ impl<'a> RunLoop<'a> {
             // An owned run saved the row above. Record it here too, so the failed
             // attempt counts toward the retry budget and spends its harness.
             if !owned {
-                self.store.save_attempt(&attempt_row)?;
+                self.store
+                    .save_attempt_routed(&attempt_row, routing.as_ref())?;
             }
             let fail = self.append(
                 graph_id,
@@ -1689,7 +1752,8 @@ impl<'a> RunLoop<'a> {
         }
 
         if !owned {
-            self.store.save_attempt(&attempt_row)?;
+            self.store
+                .save_attempt_routed(&attempt_row, routing.as_ref())?;
         }
 
         let spec = build_agent_spec(
@@ -2769,7 +2833,8 @@ impl<'a> RunLoop<'a> {
             attempt,
             TaskState::Verifying,
             Event::DeterministicChecksFailed,
-            Some("driver died during verification".into()),
+            // Meshloop's own fault, not the worker's: no check result (#139).
+            Some(meshloop_domain::advisory::VERIFICATION_INFRASTRUCTURE_FAULT.into()),
         )?;
         Ok(Tick::Transition {
             task,
@@ -3178,9 +3243,16 @@ impl<'a> RunLoop<'a> {
         // The attempt row's `outcome` column holds the attempt's base revision ("base:<sha>"),
         // which recovery reads; the outcome shown is the attempt's last ledger event instead.
         let mut last_event: HashMap<AttemptId, Event> = HashMap::new();
+        let mut checks: HashMap<AttemptId, Option<meshloop_domain::advisory::CheckResult>> =
+            HashMap::new();
         for r in self.store.records_for_graph(graph_id)? {
             if let Some(id) = r.attempt_id {
                 last_event.insert(id, r.event);
+                if let Some(result) =
+                    meshloop_domain::advisory::CheckResult::of_record(r.event, r.reason.as_deref())
+                {
+                    checks.insert(id, result);
+                }
             }
         }
         rows.into_iter()
@@ -3202,6 +3274,11 @@ impl<'a> RunLoop<'a> {
                     .map(EvidenceView::from_evidence)
                     .collect();
                 Ok(AttemptView {
+                    dispatch_mode: meshloop_domain::advisory::DispatchMode::of_recorded_attempt(
+                        a.dispatch,
+                    ),
+                    check_result: checks.get(&a.attempt_id).copied().flatten(),
+                    model_passed: a.model_passed,
                     attempt_id: a.attempt_id,
                     duration_s: duration_secs(&a.started_at, &a.ended_at),
                     harness: a.harness,
@@ -3325,6 +3402,7 @@ impl<'a> RunLoop<'a> {
                 pane_id,
                 live,
                 deliverable: n.deliverable.clone(),
+                tier: n.tier.unwrap_or(Tier::Tier2),
             });
         }
         Ok(RunStatus {
@@ -3983,6 +4061,8 @@ mod tests {
             started_at: None,
             ended_at: ended_at.map(String::from),
             outcome: None,
+            model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         }
     }
 
@@ -4214,6 +4294,8 @@ mod tests {
             started_at: Some(started.into()),
             ended_at: ended.map(str::to_string),
             outcome: None,
+            model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         }
     }
 
@@ -4451,6 +4533,9 @@ mod tests {
     struct ClaudeImage;
 
     impl HarnessCapabilities for ClaudeImage {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             Ok(meshloop_domain::capability::HarnessProfile {
                 harness: "claude".into(),
@@ -4543,6 +4628,17 @@ mod tests {
         compare_and_append: bool,
         /// Routing feedback recorded, in order.
         outcomes: Vec<(FeedbackKey, bool)>,
+        /// Promoted priors this store answers with (#139); `None` is "not promoted".
+        priors: Option<crate::ports::PriorsSnapshot>,
+        /// Snapshot reads, to prove one read per select call.
+        priors_reads: std::cell::Cell<usize>,
+        /// `advisory_routing` rows written with their attempt rows.
+        routing: Vec<crate::ports::AdvisoryRouting>,
+        /// The oracle spend ledger the SQLite store keeps (zero budget), when set.
+        spend: Option<crate::ports::SessionSpendLedger>,
+        /// A snapshot read fault to answer with, and the faults reported back.
+        priors_fault: Option<StoreError>,
+        reported: std::cell::RefCell<Vec<StoreError>>,
     }
 
     impl DispatchStore {
@@ -4565,7 +4661,26 @@ mod tests {
                 cancel_on_evidence: false,
                 compare_and_append: false,
                 outcomes: Vec::new(),
+                priors: None,
+                priors_reads: std::cell::Cell::new(0),
+                routing: Vec::new(),
+                spend: None,
+                priors_fault: None,
+                reported: std::cell::RefCell::new(Vec::new()),
             }
+        }
+    }
+
+    impl crate::ports::AdvisoryPriorsSource for DispatchStore {
+        fn snapshot(&self) -> Result<Option<crate::ports::PriorsSnapshot>, StoreError> {
+            self.priors_reads.set(self.priors_reads.get() + 1);
+            match &self.priors_fault {
+                Some(fault) => Err(fault.clone()),
+                None => Ok(self.priors.clone()),
+            }
+        }
+        fn report_fault(&self, fault: &StoreError) {
+            self.reported.borrow_mut().push(fault.clone());
         }
     }
 
@@ -4736,6 +4851,21 @@ mod tests {
                 .ok_or_else(|| StoreError::Corrupt("attempt missing".into()))?;
             row.pane_id = pane_id.map(str::to_string);
             Ok(())
+        }
+        fn advisory_priors(&self) -> Option<&dyn crate::ports::AdvisoryPriorsSource> {
+            Some(self)
+        }
+        fn save_attempt_routed(
+            &mut self,
+            row: &AttemptRow,
+            routing: Option<&crate::ports::AdvisoryRouting>,
+        ) -> Result<(), StoreError> {
+            self.save_attempt(row)?;
+            self.routing.extend(routing.cloned());
+            Ok(())
+        }
+        fn session_spend(&self) -> Option<&crate::ports::SessionSpendLedger> {
+            self.spend.as_ref()
         }
         forbidden_port_calls! {
             fn save_run(&mut self, row: &RunRow) -> Result<(), StoreError>;
@@ -4916,6 +5046,9 @@ mod tests {
     }
 
     impl HarnessCapabilities for ScriptedModels {
+        fn dispatch_mode(&self) -> meshloop_domain::advisory::DispatchMode {
+            meshloop_domain::advisory::DispatchMode::Subprocess
+        }
         fn probe(&self) -> Result<meshloop_domain::capability::HarnessProfile, HarnessError> {
             Ok(meshloop_domain::capability::HarnessProfile {
                 harness: self.name.into(),
@@ -5060,6 +5193,196 @@ mod tests {
             .filter(|e| e.event == Event::RetryAuthorized)
             .count();
         (tick, arms, retries)
+    }
+
+    fn priors_snapshot(entries: &[(&str, &str, u32, u32)]) -> crate::ports::PriorsSnapshot {
+        use meshloop_domain::advisory::{AttemptRef, DispatchMode, PriorEntry, PriorKey};
+        crate::ports::PriorsSnapshot {
+            sequence: 7,
+            priors_sha256: "c".repeat(64),
+            entries: entries
+                .iter()
+                .enumerate()
+                .map(|(index, (harness, model, n, ok))| PriorEntry {
+                    index,
+                    key: PriorKey {
+                        harness: (*harness).into(),
+                        model_ref: (*model).into(),
+                        // `gate_node(None, ..)` dispatches as Tier2.
+                        tier: Tier::Tier2,
+                        mode: DispatchMode::Subprocess,
+                    },
+                    attempts: *n,
+                    successes: *ok,
+                    provenance: (0..*n)
+                        .map(|i| AttemptRef {
+                            graph_id: "other".into(),
+                            task_id: 1,
+                            attempt_id: u64::from(i) + 100,
+                            passed: i < *ok,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Dispatches task 1 once with `store`, returning the store afterwards.
+    fn dispatch_once(store: DispatchStore, harness: &ScriptedModels) -> DispatchStore {
+        let other = admission_ports(Ok(None));
+        let mut store = store;
+        let mut run = RunLoop {
+            harnesses: [(
+                harness.name.to_string(),
+                harness as &dyn HarnessCapabilities,
+            )]
+            .into_iter()
+            .collect(),
+            candidates: vec![top("codex", "first"), top("codex", "second")],
+            workspace: &QuietWorkspace,
+            store: &mut store,
+            processes: &other,
+            checks: &other,
+            router: Router::default(),
+            limits: RunLimits {
+                max_retries: 2,
+                task_timeout: Duration::from_secs(30),
+                max_concurrent_workers: 1,
+            },
+            fixture_only: false,
+            verify_command: vec![],
+            worktree_base: std::env::temp_dir(),
+            active_graph: Some("g".into()),
+            planner: PlannerSelection::default(),
+            pending_outcomes: HashMap::new(),
+            micro_repair: None,
+            ownership: None,
+        };
+        let graph = TaskGraph {
+            graph_id: "g".into(),
+            nodes: vec![gate_node(None, AcceptanceGate::Human)],
+        };
+        run.dispatch_ready("g", &graph, TaskId(1))
+            .expect("dispatch");
+        drop(run);
+        store
+    }
+
+    fn dispatched_model(store: &DispatchStore) -> String {
+        store.attempts[0].model_ref.clone().unwrap_or_default()
+    }
+
+    /// LP tests 3 and 18 (no row): without promoted priors the oracle-off pick is
+    /// dispatched and no `advisory_routing` row is written.
+    #[test]
+    fn without_priors_dispatch_is_unchanged_and_writes_no_routing_row() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let store = dispatch_once(DispatchStore::new(), &codex);
+        assert_eq!(dispatched_model(&store), "first");
+        assert!(store.routing.is_empty());
+        // One read per select call (LP test 14), even when nothing is promoted.
+        assert_eq!(store.priors_reads.get(), 1);
+        // model_passed is recorded at dispatch from the harness (#139).
+        assert_eq!(store.attempts[0].model_passed, Some(false));
+    }
+
+    /// LP tests 4, 14 and 18: a promoted prior moves the pick, the routing row says the
+    /// top changed, the snapshot is read once, and a zero-budget spend ledger does not
+    /// turn the priors off.
+    #[test]
+    fn promoted_priors_reorder_dispatch_and_record_changed_top() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let mut store = DispatchStore::new();
+        store.priors = Some(priors_snapshot(&[
+            ("codex", "first", 8, 1),
+            ("codex", "second", 8, 8),
+        ]));
+        store.spend = Some(crate::ports::SessionSpendLedger::new(0, 1));
+        let store = dispatch_once(store, &codex);
+        assert_eq!(dispatched_model(&store), "second");
+        assert_eq!(
+            store.routing,
+            vec![crate::ports::AdvisoryRouting {
+                attempt_id: AttemptId(1),
+                priors_sha256: "c".repeat(64),
+                changed_top: true,
+            }]
+        );
+        assert_eq!(store.priors_reads.get(), 1);
+        assert_eq!(store.spend.as_ref().map(|l| l.remaining()), Some(0));
+    }
+
+    /// Review item 5: a snapshot read fault is reported, not swallowed, and the
+    /// dispatch routes without priors (no routing row, baseline pick).
+    #[test]
+    fn a_snapshot_fault_is_reported_and_routes_without_priors() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let mut store = DispatchStore::new();
+        store.priors = Some(priors_snapshot(&[("codex", "second", 8, 8)]));
+        store.priors_fault = Some(StoreError::Io("disk".into()));
+        let store = dispatch_once(store, &codex);
+        assert_eq!(dispatched_model(&store), "first");
+        assert!(store.routing.is_empty());
+        assert_eq!(
+            *store.reported.borrow(),
+            vec![StoreError::Io("disk".into())]
+        );
+    }
+
+    /// LP test 18: priors in effect that agree with the oracle-off pick record a row
+    /// with `changed_top` false; an entry for a configured arm the router does not
+    /// prefer does not change the pick either.
+    #[test]
+    fn priors_that_agree_with_routing_record_an_unchanged_top() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let mut store = DispatchStore::new();
+        store.priors = Some(priors_snapshot(&[("codex", "first", 8, 8)]));
+        let store = dispatch_once(store, &codex);
+        assert_eq!(dispatched_model(&store), "first");
+        assert_eq!(store.routing.len(), 1);
+        assert!(!store.routing[0].changed_top);
+    }
+
+    /// LP test 18, spent exclusion: a retry skips the spent arm in both the routed and
+    /// the oracle-off pick, so the prior that only reorders the spent arm changes nothing.
+    #[test]
+    fn changed_top_excludes_spent_candidates_in_both_picks() {
+        let codex = ScriptedModels::new("codex", &[]);
+        let mut store = DispatchStore::new();
+        // "second" was already tried (it has a pid, so only its arm is spent).
+        store.attempts.push(AttemptRow {
+            attempt_id: AttemptId(1),
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            harness: Some("codex".into()),
+            model_ref: Some("second".into()),
+            worktree_path: None,
+            pid: Some(4),
+            image_name: None,
+            pane_id: None,
+            started_at: Some("1".into()),
+            ended_at: Some("2".into()),
+            outcome: Some("base:base".into()),
+            model_passed: Some(true),
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
+        });
+        store.events.extend([TransitionRecord {
+            graph_id: "g".into(),
+            task_id: TaskId(1),
+            attempt_id: None,
+            from: TaskState::Pending,
+            to: TaskState::Ready,
+            event: Event::DependencySatisfied,
+            reason: None,
+            executor: "t".into(),
+            occurred_at: "1".into(),
+        }]);
+        store.priors = Some(priors_snapshot(&[("codex", "second", 8, 8)]));
+        let store = dispatch_once(store, &codex);
+        assert_eq!(store.attempts[1].model_ref.as_deref(), Some("first"));
+        assert_eq!(store.routing.len(), 1);
+        assert_eq!(store.routing[0].attempt_id, AttemptId(2));
+        assert!(!store.routing[0].changed_top);
     }
 
     fn ended_failed(tick: &Tick) -> bool {
@@ -5740,6 +6063,8 @@ mod tests {
             started_at: Some("1".into()),
             ended_at: Some("1".into()),
             outcome: Some("base:base".into()),
+            model_passed: None,
+            dispatch: meshloop_domain::advisory::RecordedDispatch::NoColumn,
         });
         let attempt = store
             .latest_attempt_for_task("g", TaskId(1))
