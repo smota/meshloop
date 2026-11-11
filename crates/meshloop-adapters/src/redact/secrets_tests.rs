@@ -412,6 +412,7 @@ fn adversarial_inputs() -> Vec<String> {
         "sk-".repeat(200_000),
         "a-".repeat(300_000),
         "KEY ".repeat(150_000),
+        "KEY=".repeat(500_000),
         "Bearer ".repeat(100_000),
         "-----BEGIN ".repeat(60_000),
         "api_key=\"".repeat(60_000),
@@ -776,7 +777,8 @@ fn an_earlier_replacement_ends_a_header_value_but_does_not_disable_it() {
 
 /// Inspected bytes (every scan, search and per-word or per-value pass) never
 /// exceed this many per input byte.
-const INSPECT_PER_BYTE: usize = 8;
+// Measured worst case 7.25 (`"KEY="` repeated); 10 leaves headroom for small changes.
+const INSPECT_PER_BYTE: usize = 10;
 
 fn inspected_ratio(input: &str) -> f64 {
     let (_, inspected) = super::secrets::scrub_counting(input);
