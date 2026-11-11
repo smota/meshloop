@@ -160,7 +160,11 @@ Code references are at base `ac87e7a`.
 ### New read-only attempt fields
 
 The #139 build adds three fields to the attempt JSON (`report.rs:154`, `attempt_json`).
-Each field is listed as required for `inspect_attempts` in `contract.json`.
+Each field is listed as required in the cell's `priors_attempts` case in `contract.json`,
+the fields only `/meshloop learn` reads, so an older binary still answers `report` and
+`accept` while `learn` fails closed. The fold also needs the node's tier, which `inspect`
+does not report before #139: the cell asks for `data.nodes[].tier` (the plan's tier, or
+`null` when the plan names none, which routing keys as `Tier2`), marked `pending_kernel`.
 
 | Field | Values | Source |
 |---|---|---|
@@ -329,26 +333,38 @@ starts with `-`, when it contains control characters, or when it is over 128 byt
 
 ### Cell side
 
-- **Commands.** `/meshloop priors accept --file F --as <name>` and
-  `/meshloop priors revoke --as <name>` are operator-typed slash commands only. They are
-  off until `meshloop.write_commands` is set. `/meshloop priors show|check` are
-  read-only and not gated.
-- **Veto.** The `:tool` veto (`gates.lisp:45-48`) gains the two-word pairs
-  `priors accept` and `priors revoke`. It matches them both as tokens and as shell lines.
-  `priors show` and `priors check` stay allowed. Tests cover both cases.
-- **Proposals.** The cell writes proposals to any path. The kernel keeps no file copy.
-- **Lessons.** Lessons are stored as nodecode memories or skills and are never loaded as
-  code.
+- **Commands.** `/meshloop learn [--graph G ...] [--out FILE]` folds and writes a
+  proposal; `/meshloop priors show` and `/meshloop priors check FILE` are read-only
+  passthroughs. None is gated by `meshloop.write_commands`, because none writes to
+  meshloop. The cell has no command that promotes or revokes: `/meshloop priors accept`
+  and `/meshloop priors revoke` refuse and name the shell command a person types,
+  `meshloop priors accept --file F --as <name>` or `meshloop priors revoke --as <name>`.
+  The digest prints the first; the cell runs neither.
+- **Veto.** The `:tool` veto (`gates.lisp`, `+gated-pairs+`) refuses the two-word pairs
+  `priors accept` and `priors revoke` read as tokens (argv lists, the slash line, flags
+  stepped over), as shell lines (both words anywhere in one command with a meshloop
+  runner), and as MCP names (`meshloop_priors_accept`, `mcp__meshloop__priors_revoke`).
+  `priors show` and `priors check` stay allowed. Tests cover both cases
+  (`test/pure_test.lisp`, and the load test through `hook-check`).
+- **Proposals.** The cell writes a proposal only under its own state in the nodecode
+  home (`meshloop/priors/meshloop-<hash>/`) or to a new `.json` file the operator names
+  inside the repository's `.agent-runs/`, at most 1 MiB. The kernel keeps no file copy.
+- **Lessons.** For #139 the routing-prior proposal file is the lesson. Lessons kept as
+  nodecode memories or skills, never loaded as code, come with #178.
+- **Discovery.** Without `--graph`, `learn` folds the finished runs among the newest run
+  and the graphs `workspace inventory` lists: meshloop has no verb listing every graph in
+  its store, so a run whose worktrees were all reclaimed is folded only when named.
 
 ### Digest
 
-After each run, the cell lists:
+After each `/meshloop learn`, the cell lists:
 
 - the proposal path and its SHA-256;
 - one row per prior key: attempts, successes, failures and whether it clears the floor;
 - exclusion counts by reason;
-- the promoted digest in effect, if any;
-- `changed_top` counts from `advisory_routing`.
+- the promoted digest in effect, if any, and `changed_top` counts from
+  `advisory_routing`, both read through `meshloop priors show --json`;
+- the two commands a person types to promote it, which the cell never runs.
 
 The digest holds pointers and counts only.
 
