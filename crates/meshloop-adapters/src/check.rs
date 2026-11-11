@@ -312,9 +312,11 @@ impl Drain {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Both readers have finished: these joins cannot block.
-        let stdout = self.stdout.join().unwrap_or_default();
-        let stderr = self.stderr.join().unwrap_or_default();
+        // Both readers have finished: these joins cannot block. A reader that panicked
+        // lost output; treat it like abandoned output (fail closed), never as empty.
+        let (Ok(stdout), Ok(stderr)) = (self.stdout.join(), self.stderr.join()) else {
+            return None;
+        };
         Some((stdout, stderr))
     }
 }
