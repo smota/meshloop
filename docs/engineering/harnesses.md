@@ -128,6 +128,19 @@ request with new live evidence from #152. Nodecode also needs an ADR 0038 amendm
 |---|---|---|---|
 | (none proven yet) | — | — | — |
 
+## Verification runs worker-written code (#181)
+
+Whatever the harness, `verify_command` runs in the attempt worktree after the worker
+exits. By default it runs on the host with the operator's full authority and
+environment, so a check that executes repository code (`cargo test`, `npm test`, `make`,
+build scripts, test runners that load repository config) executes code the worker
+wrote, outside any worker containment. Either use checks that only read the worktree
+(`git diff --check`, `grep`, a parse-only linter), or set `[verify] runner` to run every
+check under `adapters/sandbox/meshloop-verify-sandbox`: worktree the only writable path,
+no credential, no network unless `--allow-network`. How to enable it, toolchain paths and
+what is and is not contained: [Contained verification](nodecode-containment.md#contained-verification).
+`meshloop doctor` warns when a harness runs under containment but verification does not.
+
 ## Nodecode worker (#138)
 
 Nodecode is a worker harness through operator configuration only, and only under the

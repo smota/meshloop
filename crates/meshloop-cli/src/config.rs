@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use meshloop_adapters::check::VerifyRunner;
 use meshloop_adapters::harness::PromptVia;
 use meshloop_domain::task_graph::Tier;
 use meshloop_engine::run_loop::PlannerSelection;
@@ -63,6 +64,23 @@ fn default_probe_timeout_seconds() -> u64 {
 pub struct VerifyConfig {
     #[serde(default)]
     pub verify_command: Vec<String>,
+    /// Optional argv prefix put in front of every `verify_command` (issue #181), such as
+    /// `["/abs/meshloop-verify-sandbox", "--worktree", "{worktree}", "--"]`. Empty or
+    /// absent: the command runs on the host, unchanged. `load` validates it.
+    #[serde(default)]
+    pub runner: Vec<String>,
+}
+
+impl VerifyConfig {
+    /// The validated runner prefix, or `None` when verification runs on the host.
+    pub fn runner(&self) -> Result<Option<VerifyRunner>, ConfigError> {
+        if self.runner.is_empty() {
+            return Ok(None);
+        }
+        VerifyRunner::new(self.runner.clone())
+            .map(Some)
+            .map_err(|e| ConfigError::Parse(format!("verify.{e}")))
+    }
 }
 
 /// `[workspace]`. `root` is optional. A relative root is resolved from the repository.
@@ -319,6 +337,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         )));
     }
     config.planner.selection()?;
+    config.verify.runner()?;
     if config.limits.probe_timeout_seconds == 0 {
         return Err(ConfigError::Parse(
             "limits.probe_timeout_seconds must be greater than 0".into(),
@@ -824,5 +843,109 @@ probe_timeout_seconds = 0",
             Err(ConfigError::SelectedButNotConfigured(_))
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Issue #181: without `runner` verification runs on the host as before; an empty
+    /// list means the same. A set prefix is kept verbatim.
+    #[test]
+    fn verify_runner_is_optional_and_kept_verbatim() {
+        let c = load_with("runner-none", "[verify]\nverify_command = [\"true\"]").unwrap();
+        assert!(c.verify.runner.is_empty());
+        assert!(c.verify.runner().unwrap().is_none());
+        let c = load_with("runner-empty", "[verify]\nrunner = []").unwrap();
+        assert!(c.verify.runner().unwrap().is_none());
+        let exe = if cfg!(windows) {
+            r"C:\\tools\\sandbox.exe"
+        } else {
+            "/opt/meshloop/meshloop-verify-sandbox"
+        };
+        let c = load_with(
+            "runner-set",
+            &format!(
+                "[verify]\nverify_command = [\"make\", \"check\"]\nrunner = [\"{exe}\", \"--worktree\", \"{{worktree}}\", \"--\"]"
+            ),
+        )
+        .unwrap();
+        let runner = c.verify.runner().unwrap().expect("runner set");
+        assert_eq!(runner.prefix()[1..], ["--worktree", "{worktree}", "--"]);
+        assert_eq!(c.verify.verify_command, vec!["make", "check"]);
+    }
+
+    /// Issue #181: the commented `runner` example loads once uncommented and points at
+    /// the shipped verification sandbox with `{worktree}` as a whole argument.
+    #[test]
+    fn commented_verify_runner_example_loads_when_uncommented() {
+        if cfg!(windows) {
+            // The example's paths are POSIX; the sandbox is Linux-only.
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join("config/meshloop.example.toml")).unwrap();
+        let start = text
+            .find("# runner = [")
+            .expect("example config has a commented verify runner");
+        let block: String = text[start..]
+            .lines()
+            .take_while(|l| l.starts_with('#'))
+            .map(|l| l.strip_prefix("# ").unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let uncommented = text.replacen(
+            "verify_command = []",
+            &format!("verify_command = []\n{block}"),
+            1,
+        );
+        let path = write_temp("runner-example", &uncommented);
+        let config = load(&path).expect("uncommented runner example loads");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        let runner = config.verify.runner().unwrap().expect("runner set");
+        assert!(
+            runner
+                .executable()
+                .ends_with("adapters/sandbox/meshloop-verify-sandbox")
+        );
+        let args = runner.prefix();
+        let i = args.iter().position(|a| a == "--worktree").unwrap();
+        assert_eq!(args[i + 1], "{worktree}");
+        assert_eq!(args.last().map(String::as_str), Some("--"));
+    }
+
+    #[test]
+    fn verify_runner_rejects_bad_prefixes_at_load() {
+        for (tag, runner, frag) in [
+            (
+                "runner-rel",
+                r#"["meshloop-verify-sandbox", "--"]"#,
+                "absolute path",
+            ),
+            ("runner-dot", r#"["./sandbox"]"#, "absolute path"),
+            ("runner-ph0", r#"["{worktree}"]"#, "absolute path"),
+            (
+                "runner-emptyarg",
+                r#"["/x/sandbox", ""]"#,
+                "verify.runner[1] must not be empty",
+            ),
+            (
+                "runner-inline",
+                r#"["/x/sandbox", "--worktree={worktree}"]"#,
+                "whole argument",
+            ),
+            (
+                "runner-unknown",
+                r#"["/x/sandbox", "{prompt_file}"]"#,
+                "not a known placeholder",
+            ),
+            ("runner-type", r#""/x/sandbox --""#, "invalid type"),
+        ] {
+            #[cfg(windows)]
+            if frag != "absolute path" && frag != "invalid type" {
+                // `/x/sandbox` is not absolute on Windows; that is covered above.
+                continue;
+            }
+            match load_with(tag, &format!("[verify]\nrunner = {runner}")) {
+                Err(ConfigError::Parse(msg)) => assert!(msg.contains(frag), "{tag}: {msg}"),
+                other => panic!("{tag}: expected a parse error, got {other:?}"),
+            }
+        }
     }
 }

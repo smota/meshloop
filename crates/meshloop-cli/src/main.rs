@@ -18,7 +18,7 @@ mod workspace_cmd;
 
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use meshloop_domain::state::{PlanDecision, PlanState, TaskState};
@@ -894,6 +894,60 @@ const PRIORS_NOT_IN_EFFECT_WARNING: &str =
 const PRIORS_UNREADABLE_WARNING: &str =
     "the store could not be read to check advisory priors; see `meshloop priors show`";
 const NO_PLANNER_WARNING: &str = "no dispatchable harness can run the planner; see data.planner and set [planner] harness or tier";
+const UNCONTAINED_VERIFY_WARNING: &str = "a selected harness runs under containment, but verify_command runs on the host with the operator's authority and executes worker-written code; set [verify] runner (docs/engineering/nodecode-containment.md#contained-verification)";
+const RUNNER_MISSING_WARNING: &str =
+    "verify.runner's executable is missing or not executable; every verify step will fail";
+
+/// Whether a doctor probe row's harness runs under containment: the shipped nodecode
+/// wrapper as its executable, or a probe version line naming the containment.
+fn harness_row_is_contained(row: &serde_json::Value) -> bool {
+    let wrapper = row["executable"]
+        .as_str()
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .is_some_and(|n| n == "meshloop-nodecode-sandbox");
+    let named = row["version"]
+        .as_str()
+        .is_some_and(|v| v.contains("(contained:"));
+    wrapper || named
+}
+
+/// Doctor's view of `[verify]` (issue #181): whether checks run behind a runner, the
+/// prefix, and the warnings that follow from it and the probe rows.
+fn doctor_verify(
+    cfg: &crate::config::Config,
+    rows: &[serde_json::Value],
+    warnings: &mut Vec<&'static str>,
+) -> serde_json::Value {
+    let runner = cfg.verify.runner().ok().flatten();
+    if let Some(r) = &runner {
+        let exe = Path::new(r.executable());
+        if !is_executable_file(exe) {
+            warnings.push(RUNNER_MISSING_WARNING);
+        }
+    } else if !cfg.verify.verify_command.is_empty() && rows.iter().any(harness_row_is_contained) {
+        warnings.push(UNCONTAINED_VERIFY_WARNING);
+    }
+    serde_json::json!({
+        "contained": runner.is_some(),
+        "runner": runner.as_ref().map(|r| r.prefix().to_vec()),
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
@@ -2973,6 +3027,7 @@ fn cmd_doctor(
 
     let mut warnings: Vec<&str> = Vec::new();
     let mut planner = serde_json::Value::Null;
+    let mut verify = serde_json::Value::Null;
     let (config_path, harnesses, error) = match crate::config::discover(config.as_deref()) {
         Err(_) => (
             None,
@@ -2990,6 +3045,7 @@ fn cmd_doctor(
                     warnings.push(EMPTY_VERIFY_WARNING);
                 }
                 let rows = doctor_probe(&cfg);
+                verify = doctor_verify(&cfg, &rows, &mut warnings);
                 planner = doctor_planner(&cfg, &rows);
                 if planner["eligible"].as_array().is_some_and(|e| e.is_empty()) {
                     warnings.push(NO_PLANNER_WARNING);
@@ -3026,6 +3082,7 @@ fn cmd_doctor(
         "harnesses": harnesses,
         "store_ignored": store_ignored,
         "planner": planner,
+        "verify": verify,
         "warnings": warnings,
         "note": "Doctor loads the config and runs each selected harness's bounded version probe. Live workers run as direct CLI subprocesses in Git worktrees.",
     });
@@ -3073,6 +3130,12 @@ fn cmd_doctor(
                 } else {
                     names.join(", ")
                 }
+            );
+        }
+        if verify["contained"] == true {
+            println!(
+                "  verify: contained ({})",
+                verify["runner"][0].as_str().unwrap_or("?")
             );
         }
         println!("  store_ignored: {store_ignored}");
