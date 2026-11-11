@@ -236,6 +236,10 @@ if [[ "$git_metadata" == "ro" ]]; then
         done
       done < <(sed -nE 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/Ip' -- "$fr")
     done
+    # Fail closed: a config chain longer than the cap is not scanned in full.
+    if ((${#queue[@]})); then
+      die "git config includes more than 32 files inside the git dirs; use --git-metadata none"
+    fi
   fi
 fi
 
