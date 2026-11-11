@@ -789,10 +789,14 @@ mod prompt_file_tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
+        // Path-safe on every platform (an `Instant` Debug string holds `:`).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
         let dir = std::env::temp_dir().join(format!(
-            "meshloop-prompt-{tag}-{}-{:?}",
-            std::process::id(),
-            Instant::now()
+            "meshloop-prompt-{tag}-{}-{nanos}",
+            std::process::id()
         ));
         fs::create_dir_all(&dir).unwrap();
         dir

@@ -1010,12 +1010,18 @@ mod tests {
             );
             fs::remove_file(&path).unwrap();
         }
-        fs::write(dir.join("GIT~1"), "x").unwrap();
-        assert_eq!(
-            nested_git_entry(&dir),
-            Some((PathBuf::from("GIT~1"), NESTED_ENTRY))
-        );
-        fs::remove_file(dir.join("GIT~1")).unwrap();
+        // On NTFS a top-level `GIT~1` is the 8.3 short name of `.git` itself: writing it
+        // rewrites the link, which the worktree-link check refuses instead. Only on
+        // filesystems without short names is it a separate top-level entry.
+        #[cfg(not(windows))]
+        {
+            fs::write(dir.join("GIT~1"), "x").unwrap();
+            assert_eq!(
+                nested_git_entry(&dir),
+                Some((PathBuf::from("GIT~1"), NESTED_ENTRY))
+            );
+            fs::remove_file(dir.join("GIT~1")).unwrap();
+        }
         #[cfg(unix)]
         {
             let outside = std::env::temp_dir().join(format!("meshloop-outside-{}", uuid_ish()));
