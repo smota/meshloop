@@ -898,7 +898,7 @@ fn parse_priors(rest: &[String]) -> Result<Command, String> {
 }
 
 pub fn help_text() -> &'static str {
-    "Meshloop session control plane (native Windows). All skills/commands/tools are prefixed meshloop:.\n\
+    "Meshloop session control plane. All skills/commands/tools are prefixed meshloop:.\n\
      Canonical ids: meshloop:plan | meshloop:review-plan | meshloop:run | meshloop:status | meshloop:accept\n\
      \x20 meshloop:resume | meshloop:cancel | meshloop:inspect | meshloop:integrate | meshloop:roles\n\
      \x20 meshloop:doctor | meshloop:orchestrate | meshloop:mutate-plan | meshloop:mcp | meshloop:bundle\n\
@@ -915,8 +915,12 @@ pub fn help_text() -> &'static str {
      \x20 meshloop cancel --driver <id> [--db <path>] [--json]\n\
      \x20 meshloop watch --graph <id> [--session-id <id>] [--interval <secs, default 5>] [--timeout <secs, 0 = none>] [--json]\n\
      \x20 meshloop events [--graph <id>] [--after <event id>] [--limit <n, default 1000>] [--config <path>] [--db <path>] [--json]\n\
-     \x20 meshloop workspace inventory|preview|apply|adopt|maintain [--cleanup] [--apply] [--digest <hex>] [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
-     \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. --apply requires a matching 64-character digest.\n\
+     \x20 meshloop workspace inventory [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace preview [--cleanup] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace apply --cleanup --digest <64 lowercase hex> [--graph <id>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 meshloop workspace adopt|maintain [--apply --digest <64 lowercase hex>] [--config <path>] [--db <path>] [--worktree-base <path>] [--json]\n\
+     \x20 --cleanup is valid only with preview or apply; apply requires --cleanup and a digest and never accepts --apply; --apply with a digest is valid only with adopt or maintain; --graph is valid only with apply --cleanup.\n\
+     \x20 Workspace preview, adopt, and maintain do not move runs or delete unknown files. Every write needs a matching 64-character digest from the preview.\n\
      \x20 meshloop priors show [--json] | priors check --file <path> [--json]   (read-only)\n\
      \x20 meshloop priors accept --file <path> --as <identity> | priors revoke --as <identity> [--json]\n\
      \x20 meshloop roles [--json]\n\

@@ -230,7 +230,7 @@ pub fn format_attempt(a: &AttemptView) -> String {
 }
 
 pub fn banner() -> String {
-    "Meshloop: agent-session control plane (native Windows). Binary is the engine; skills/MCP are the UX.\n\
+    "Meshloop: agent-session control plane. Binary is the engine; skills/MCP are the UX.\n\
      Commands: plan, review-plan, run --accept-plan, status, resume, cancel, inspect, accept, integrate, orchestrate, doctor, roles, watch, mutate-plan, workspace, priors, mcp, bundle.\n\
      Default store: .meshloop/state.sqlite. Worktrees are kept; `run` does not merge to your branch.\n\
      Live workers are direct CLI subprocesses in Git worktrees. --fixture-only is the CI subprocess double.\n"
@@ -243,6 +243,11 @@ mod tests {
     use meshloop_domain::state::PlanState;
     use meshloop_domain::task_graph::{AcceptanceGate, TaskId, TaskNode, Tier};
     use meshloop_engine::run_loop::NodeStatus;
+
+    #[test]
+    fn banner_does_not_claim_native_windows() {
+        assert!(!banner().contains("native Windows"));
+    }
 
     fn node(id: u32, state: TaskState, live: Option<&str>) -> NodeStatus {
         NodeStatus {
