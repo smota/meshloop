@@ -96,7 +96,7 @@ pub fn forget_gone(store: &mut dyn RunStore, processes: &dyn ProcessView, graph_
     if is_alive(&row, processes) {
         return;
     }
-    if let Err(error) = store.clear_driver(graph_id) {
+    if let Err(error) = store.clear_driver(graph_id, row.pid, &row.started_at) {
         eprintln!("driver liveness: could not clear the previous driver: {error:?}");
     }
 }

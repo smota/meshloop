@@ -1081,14 +1081,19 @@ impl RunStore for SqliteStore {
         Ok(())
     }
 
-    fn clear_driver(&mut self, graph_id: &str) -> Result<(), StoreError> {
+    fn clear_driver(
+        &mut self,
+        graph_id: &str,
+        pid: u32,
+        started_at: &str,
+    ) -> Result<(), StoreError> {
         if self.read_only {
             return Err(StoreError::ReadOnly);
         }
         self.conn
             .execute(
-                "DELETE FROM run_driver_liveness WHERE graph_id=?1",
-                params![graph_id],
+                "DELETE FROM run_driver_liveness WHERE graph_id=?1 AND pid=?2 AND started_at=?3",
+                params![graph_id, pid, started_at],
             )
             .map_err(|e| StoreError::Io(e.to_string()))?;
         Ok(())
@@ -1359,7 +1364,12 @@ mod tests {
         assert_eq!(exited.heartbeat_at, "21");
         store.record_driver_heartbeat("g", 42, "99").unwrap();
         assert_eq!(store.load_driver("g").unwrap().unwrap().heartbeat_at, "21");
-        store.clear_driver("g").unwrap();
+        // A row other than the one checked (different pid or start) is kept.
+        store.clear_driver("g", 7, "10").unwrap();
+        assert!(store.load_driver("g").unwrap().is_some());
+        store.clear_driver("g", 42, "11").unwrap();
+        assert!(store.load_driver("g").unwrap().is_some());
+        store.clear_driver("g", 42, "10").unwrap();
         assert_eq!(store.load_driver("g").unwrap(), None);
     }
 
