@@ -19,10 +19,12 @@ pub enum GitError {
     Dirty,
     /// The worktree's `.git` link was modified; git was not run there (#180).
     LinkModified(GitLinkError),
-    /// A `.git` entry below the worktree's top level (a nested repository or link);
-    /// `path` is worktree-relative. Nothing was staged (#180).
+    /// A nested repository risk in a worktree (#180): a `.git` entry below the top
+    /// level, a gitlink not in the attempt base, or a walk that could not complete.
+    /// `path` is worktree-relative.
     NestedGit {
         path: PathBuf,
+        reason: &'static str,
     },
 }
 
@@ -37,7 +39,10 @@ impl From<GitError> for WorkspaceError {
                 path: e.link,
                 reason: e.reason.to_string(),
             },
-            GitError::NestedGit { path } => WorkspaceError::NestedGit { path },
+            GitError::NestedGit { path, reason } => WorkspaceError::NestedGit {
+                path,
+                reason: reason.to_string(),
+            },
         }
     }
 }
@@ -93,6 +98,43 @@ impl GitWorktreeAdapter {
 
     /// The verified admin dir of a worktree other than the repository root. A link
     /// the worker modified is refused before any git runs there (#180).
+    /// Gitlinks of the attempt base, as `(path, object)`. An unreadable base allows
+    /// none, so every gitlink is refused.
+    fn base_gitlinks(&self, worktree: &Path, base: &str) -> Vec<(String, String)> {
+        if base.is_empty() || base.starts_with('-') {
+            return Vec::new();
+        }
+        self.run_in(worktree, &["ls-tree", "-r", "-z", "--end-of-options", base])
+            .map(|listing| gitlinks(&listing))
+            .unwrap_or_default()
+    }
+
+    /// Reads the index (`ls-files --stage`, which spawns no helper) and refuses any
+    /// gitlink not in `allowed` or whose `<path>/.git` exists on the filesystem.
+    fn check_index_gitlinks(
+        &self,
+        worktree: &Path,
+        allowed: &[(String, String)],
+    ) -> Result<(), GitError> {
+        let index = self.run_in(worktree, &["ls-files", "--stage", "-z"])?;
+        for (path, object) in index_gitlinks(&index) {
+            let rel = PathBuf::from(&path);
+            if !allowed.contains(&(path.clone(), object)) {
+                return Err(GitError::NestedGit {
+                    path: rel,
+                    reason: "gitlink not in the attempt base",
+                });
+            }
+            if std::fs::symlink_metadata(worktree.join(&path).join(".git")).is_ok() {
+                return Err(GitError::NestedGit {
+                    path: rel.join(".git"),
+                    reason: "populated gitlink",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn verified_admin(&self, worktree: &Path) -> Result<PathBuf, GitError> {
         let common = self.common_dir()?.to_path_buf();
         crate::host_git::verify_worktree_link(worktree, &common).map_err(GitError::LinkModified)
@@ -351,32 +393,57 @@ fn annotate_layout(error: GitError) -> GitError {
 }
 
 /// The first entry named `.git` (any case, or the NTFS short name `git~1`) below the
-/// worktree's top level, worktree-relative. At the top level only the exact `.git`
-/// link is allowed. Walks without following symlinks or junctions.
-fn nested_git_entry(worktree: &Path) -> Result<Option<PathBuf>, GitError> {
-    let io = |e: std::io::Error| GitError::Io(e.to_string());
+/// worktree's top level, worktree-relative, with the reason. The top-level link is
+/// checked separately ([`crate::host_git::verify_worktree_link`]). Walks without
+/// following symlinks or junctions. An entry that vanishes during the walk is
+/// skipped; any other walk error is a refusal, never a run-aborting I/O error.
+fn nested_git_entry(worktree: &Path) -> Option<(PathBuf, &'static str)> {
+    let rel = |path: &Path| path.strip_prefix(worktree).unwrap_or(path).to_path_buf();
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut stack = vec![(worktree.to_path_buf(), true)];
     while let Some((dir, top)) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).map_err(io)? {
-            let entry = entry.map_err(io)?;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if gone(&e) && !top => continue,
+            Err(_) => return Some((rel(&dir), "worktree walk failed")),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if gone(&e) => continue,
+                Err(_) => return Some((rel(&dir), "worktree walk failed")),
+            };
             let name = entry.file_name();
             let lower = name.to_string_lossy().to_ascii_lowercase();
-            let gitlike = lower == ".git" || lower == "git~1";
-            if gitlike && !(top && name == ".git") {
-                let path = entry.path();
-                let rel = path.strip_prefix(worktree).unwrap_or(&path).to_path_buf();
-                return Ok(Some(rel));
-            }
-            if top && name == ".git" {
+            if top && lower == ".git" {
                 continue;
             }
+            if lower == ".git" || lower == "git~1" {
+                return Some((rel(&entry.path()), "nested .git entry"));
+            }
             // `DirEntry::file_type` does not follow symlinks (or junctions on Windows).
-            if entry.file_type().map_err(io)?.is_dir() {
-                stack.push((entry.path(), false));
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => stack.push((entry.path(), false)),
+                Ok(_) => {}
+                Err(e) if gone(&e) => {}
+                Err(_) => return Some((rel(&entry.path()), "worktree walk failed")),
             }
         }
     }
-    Ok(None)
+    None
+}
+
+/// Gitlink (mode 160000) entries of `ls-files --stage -z` output, as `(path, object)`.
+fn index_gitlinks(listing: &str) -> Vec<(String, String)> {
+    listing
+        .split('\0')
+        .filter_map(|record| {
+            let (meta, path) = record.split_once('\t')?;
+            let mut parts = meta.split(' ');
+            let (mode, object) = (parts.next()?, parts.next()?);
+            (mode == "160000").then(|| (path.to_string(), object.to_string()))
+        })
+        .collect()
 }
 
 /// Gitlink (mode 160000) entries of `ls-tree -r -z` output, as `(path, object)`.
@@ -523,14 +590,29 @@ impl WorkspacePort for GitWorktreeAdapter {
         .map_err(Into::into)
     }
 
-    fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError> {
+    fn commit_all(
+        &self,
+        worktree: &Path,
+        base: &str,
+        message: &str,
+    ) -> Result<String, WorkspaceError> {
         // A nested repository would be staged as a gitlink, and later status/diff
         // could recurse into it and run its config (#180). Refuse before staging.
-        if let Some(path) = nested_git_entry(worktree)? {
-            return Err(GitError::NestedGit { path }.into());
+        // The link is checked first, so a renamed top-level `.git` is reported as a
+        // modified link rather than a nested entry.
+        if !self.is_repo_root(worktree) {
+            self.verified_admin(worktree)?;
         }
+        if let Some((path, reason)) = nested_git_entry(worktree) {
+            return Err(GitError::NestedGit { path, reason }.into());
+        }
+        let allowed = self.base_gitlinks(worktree, base);
+        self.check_index_gitlinks(worktree, &allowed)?;
         self.run_in(worktree, &["add", "-A"])
             .map_err(WorkspaceError::from)?;
+        // Anything that appeared between the walk and `add -A` (a process outside the
+        // worker's tree) and was staged as a gitlink is refused, terminally.
+        self.check_index_gitlinks(worktree, &allowed)?;
         let porcelain = self.status_porcelain(worktree)?;
         if porcelain.trim().is_empty() {
             return self.head(worktree);
@@ -840,7 +922,7 @@ mod tests {
         ];
         for text in rewrites {
             fs::write(wt.join(".git"), &text).unwrap();
-            let err = adapter.commit_all(&wt, "x").unwrap_err();
+            let err = adapter.commit_all(&wt, &head, "x").unwrap_err();
             assert!(
                 matches!(&err, WorkspaceError::GitLinkModified { path, .. } if path == &wt.join(".git")),
                 "{text}: {err:?}"
@@ -867,26 +949,26 @@ mod tests {
     }
 
     /// #180: any `.git`-named entry below the top level (any case, or `git~1`) is a
-    /// nested repository or link; symlinked directories are not followed.
+    /// nested repository or link; symlinked directories and junctions are not followed.
     #[test]
     fn nested_git_entries_are_found_without_following_links() {
         let dir = std::env::temp_dir().join(format!("meshloop-nested-{}", uuid_ish()));
         fs::create_dir_all(dir.join("a/b")).unwrap();
         fs::write(dir.join(".git"), "gitdir: x\n").unwrap();
-        assert_eq!(nested_git_entry(&dir).unwrap(), None);
+        assert_eq!(nested_git_entry(&dir), None);
         for name in [".git", ".GIT", "git~1", "GIT~1"] {
             let path = dir.join("a/b").join(name);
             fs::write(&path, "gitdir: elsewhere\n").unwrap();
             assert_eq!(
-                nested_git_entry(&dir).unwrap(),
-                Some(PathBuf::from("a").join("b").join(name))
+                nested_git_entry(&dir),
+                Some((PathBuf::from("a").join("b").join(name), "nested .git entry"))
             );
             fs::remove_file(&path).unwrap();
         }
         fs::write(dir.join("GIT~1"), "x").unwrap();
         assert_eq!(
-            nested_git_entry(&dir).unwrap(),
-            Some(PathBuf::from("GIT~1"))
+            nested_git_entry(&dir),
+            Some((PathBuf::from("GIT~1"), "nested .git entry"))
         );
         fs::remove_file(dir.join("GIT~1")).unwrap();
         #[cfg(unix)]
@@ -894,10 +976,69 @@ mod tests {
             let outside = std::env::temp_dir().join(format!("meshloop-outside-{}", uuid_ish()));
             fs::create_dir_all(outside.join(".git")).unwrap();
             std::os::unix::fs::symlink(&outside, dir.join("a/link")).unwrap();
-            assert_eq!(nested_git_entry(&dir).unwrap(), None);
+            assert_eq!(nested_git_entry(&dir), None);
+            fs::remove_dir_all(&outside).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            // A junction to a directory holding `.git` is not followed.
+            let outside = std::env::temp_dir().join(format!("meshloop-outside-{}", uuid_ish()));
+            fs::create_dir_all(outside.join(".git")).unwrap();
+            let junction = dir.join("a").join("junction");
+            let made = StdCommand::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(&junction)
+                .arg(&outside)
+                .guarded_output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+            assert_eq!(nested_git_entry(&dir), None);
+            fs::remove_dir(&junction).unwrap();
             fs::remove_dir_all(&outside).unwrap();
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #180: a gitlink staged by the worker that is not in the attempt base, or whose
+    /// directory holds a `.git`, is refused; a top-level `.git` rename is a link change.
+    #[test]
+    fn worker_gitlinks_and_a_renamed_link_are_refused() {
+        let repo = disposable_repo();
+        let adapter = GitWorktreeAdapter::new(repo.clone());
+        let head = adapter.current_head().unwrap();
+        let wt = repo
+            .parent()
+            .unwrap()
+            .join(format!("wt-gitlink-{}", uuid_ish()));
+        adapter
+            .add_worktree_from(&wt, "meshloop/gitlink", &head)
+            .unwrap();
+        let staged = StdCommand::new("git")
+            .current_dir(&wt)
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(format!("160000,{head},sub"))
+            .guarded_output()
+            .unwrap();
+        assert!(staged.status.success(), "{staged:?}");
+        assert!(matches!(
+            adapter.commit_all(&wt, &head, "x"),
+            Err(WorkspaceError::NestedGit { path, reason })
+                if path == Path::new("sub") && reason == "gitlink not in the attempt base"
+        ));
+        fs::rename(wt.join(".git"), wt.join(".GIT")).unwrap();
+        let renamed = adapter.commit_all(&wt, &head, "x");
+        if fs::symlink_metadata(wt.join(".git")).is_err() {
+            // Case-sensitive filesystem: the link itself is gone.
+            assert!(
+                matches!(renamed, Err(WorkspaceError::GitLinkModified { .. })),
+                "{renamed:?}"
+            );
+        }
+        fs::rename(wt.join(".GIT"), wt.join(".git")).unwrap();
+        WorkspacePort::remove_worktree(&adapter, &wt).unwrap();
+        fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
@@ -913,7 +1054,9 @@ mod tests {
             .add_worktree_from(&wt_path, "meshloop/commit-test", &head)
             .unwrap();
         fs::write(wt_path.join("new.txt"), "hello").unwrap();
-        let new_head = adapter.commit_all(&wt_path, "meshloop: attempt").unwrap();
+        let new_head = adapter
+            .commit_all(&wt_path, &head, "meshloop: attempt")
+            .unwrap();
         assert_ne!(new_head, head);
         adapter.remove_worktree(&wt_path).ok();
         fs::remove_dir_all(&repo).ok();

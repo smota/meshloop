@@ -689,7 +689,16 @@ impl HarnessCapabilities for CliHarness {
                 .ok_or_else(capture_fault)?;
             drop(registry);
             let status = entry.status.ok_or_else(capture_fault)?;
-            drop(entry.child);
+            // ADR 0025, #180: a normal exit leaves no process of the worker's tree
+            // behind, so nothing races host-side git once verification starts.
+            let ended = entry
+                .child
+                .is_none_or(|mut child| child.end_tree_after_exit(TREE_END_TIMEOUT));
+            if !ended {
+                return Err(HarnessError::ProcessFault {
+                    detail: WORKER_TREE_SURVIVED.into(),
+                });
+            }
             let (stdout, stderr) = entry.capture.outcome()?;
             if stderr.to_ascii_lowercase().contains("capacity exhausted") {
                 return Err(HarnessError::CapacityExhausted {
@@ -732,6 +741,11 @@ impl HarnessCapabilities for CliHarness {
         }
     }
 }
+
+/// How long ending a normally exited worker's process tree may take.
+const TREE_END_TIMEOUT: Duration = Duration::from_secs(5);
+/// Detail when a worker's process tree could not be observed empty after its exit.
+pub const WORKER_TREE_SURVIVED: &str = "worker-process-tree-survived";
 
 /// Detail of the refusal when the prompt-file path already exists (#180).
 pub const PROMPT_FILE_EXISTS: &str = "prompt-file-exists";

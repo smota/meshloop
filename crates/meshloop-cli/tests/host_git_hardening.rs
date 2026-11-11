@@ -374,3 +374,34 @@ cd .."#,
     let evidence = fixture.refused();
     assert!(evidence.contains("nested-git"), "{evidence}");
 }
+
+/// (vii) The worker leaves a background process (same process group, output detached)
+/// that writes a marker every 100 ms and could race host-side git. Meshloop ends the
+/// worker's whole process tree after its normal exit, before any verification: once
+/// `run` returns, no new marker appears, so no process survived.
+#[test]
+fn background_process_left_by_the_worker_is_ended_before_verification() {
+    let fixture = Fixture::new(
+        "race",
+        r#"( for i in $(seq 1 100); do : > "$BASE/race-$i"; sleep 0.1; done ) >/dev/null 2>&1 </dev/null &
+sleep 0.3"#,
+    );
+    let race_markers = || {
+        fs::read_dir(&fixture.base)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("race-"))
+            .count()
+    };
+    let plan = fixture.plan_arg();
+    fixture.ok(&["review-plan", "--plan", &plan, "--accept", "--as", "probe"]);
+    fixture.ok(&["run", "--plan", &plan]);
+    let after_run = race_markers();
+    assert!(after_run > 0, "the background process never ran");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        race_markers(),
+        after_run,
+        "a process the worker left behind survived verification"
+    );
+}

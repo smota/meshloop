@@ -164,14 +164,26 @@ Neutralised for every host-side git process:
   on every call. Diffs in a worktree also pass `--no-ext-diff --no-textconv
   --ignore-submodules=all`, and status passes `--ignore-submodules=all` (adapter and
   cleanup), so git never recurses into a nested repository and runs its config.
-- **Nested repositories**: before every `add -A` (the first commit and every repair
-  round), the worktree is walked without following symlinks or junctions. Any entry
-  named `.git` in any case, or the NTFS short name `git~1`, below the top level refuses
-  the attempt: `WorkspaceError::NestedGit { path }`, a failing `nested-git` evidence
-  row with the worktree-relative path, and nothing is staged. This includes a worker
-  that fills an (uninitialised) submodule directory of a repository that uses
-  submodules. A change that adds or moves a gitlink (mode 160000) fails the `gitlinks`
-  check.
+- **Nested repositories**: `commit_all` takes the attempt base. Before every `add -A`
+  (the first commit, every repair round and resumed verification), it checks the
+  worktree link, then walks the worktree without following symlinks or junctions: any
+  entry named `.git` in any case, or the NTFS short name `git~1`, below the top level
+  refuses the attempt. It then reads the index (`ls-files --stage`, no helper process)
+  and refuses any gitlink (mode 160000) that is not in the attempt base or whose
+  `<path>/.git` exists. After `add -A` it reads the index again and refuses a gitlink
+  staged in between. Every refusal is `WorkspaceError::NestedGit { path, reason }`, a
+  failing `nested-git` evidence row naming the worktree-relative path, and a failed
+  attempt with no repair round. An entry that vanishes during the walk is skipped; any
+  other walk error refuses the attempt rather than aborting the run. This includes a
+  worker that fills an (uninitialised) submodule directory of a repository that uses
+  submodules. A change that adds or moves a gitlink also fails the `gitlinks` check.
+- **The worker's process tree ends before verification** (ADR 0025): when a worker
+  exits normally, Meshloop ends every process left in its tree before collecting the
+  outcome, so nothing the worker started can race host-side git. On Windows it
+  terminates the job object and observes it empty; on Unix it kills the process group
+  and polls (`kill -s 0`) until no member is left. If the tree is not observed empty
+  within 5 s the attempt fails (`worker-process-tree-survived`) and no host-side git
+  runs in its worktree.
 - **Inherited environment** that would redirect git or name a program is removed:
   `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, object-directory
   variables, `GIT_CONFIG*` parameters, `GIT_ATTR_SOURCE`, `GIT_EXTERNAL_DIFF`, `GIT_SSH*`,
@@ -211,10 +223,14 @@ Not neutralised, by design or for now:
   worker already runs with the operator's authority. The overrides above still stop the
   listed executable keys; config-defined hooks of a future git (`hook.<name>.command`)
   are not covered.
-- **Time of check**: the link is checked before each command and git is pinned to the
-  checked admin dir; a worker process still running during that window could change
-  files in the admin dir. Meshloop runs git in an attempt worktree after the worker's
-  process tree has exited.
+- **Time of check**: the link and the nested-repository checks run before git, and git
+  is pinned to the checked admin dir. Processes in the worker's process group or job
+  are ended before verification (above). A process that left the group on Unix
+  (`setsid`, `daemon`) or was started outside the job is not seen and could still
+  change the worktree during that window; a gitlink it stages is refused by the
+  post-`add` index check, and status/diff never recurse into submodules. In a container
+  whose PID 1 does not reap orphans, zombies keep the group "alive" and attempts fail
+  with `worker-process-tree-survived`.
 - `xtask` and test helpers run plain git on fixture repositories and are not host-side
   product paths.
 

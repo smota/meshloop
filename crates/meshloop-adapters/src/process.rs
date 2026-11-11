@@ -238,6 +238,24 @@ fn orphan_identity_matches(pid: u32, executable: &std::path::Path) -> bool {
 /// On Windows, executes `taskkill /F /T /PID <pid>` to terminate child compilers,
 /// interpreters, and test runners that would otherwise become orphaned processes.
 /// On Unix, sends SIGKILL to the process group.
+/// Whether any process is left in process group `pgid` (`kill -s 0 -- -pgid`).
+/// `None` when that cannot be determined.
+#[cfg(not(windows))]
+pub fn process_group_alive(pgid: u32) -> Option<bool> {
+    use std::process::Stdio;
+    if pgid == 0 {
+        return None;
+    }
+    Command::new("kill")
+        .args(["-s", "0", "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .map(|status| status.success())
+}
+
 pub fn kill_process_tree(pid: u32) {
     if pid == 0 {
         return;

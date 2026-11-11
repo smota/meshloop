@@ -1980,7 +1980,7 @@ impl<'a> RunLoop<'a> {
             return Ok(None);
         }
         let _ = self.workspace.remove_file(wt, prompt);
-        let revision = match self.workspace.commit_all(wt, commit_message) {
+        let revision = match self.workspace.commit_all(wt, base, commit_message) {
             Ok(rev) => rev,
             // A refused worktree fails the attempt with its reason (#180).
             Err(e) if worktree_refusal(&e).is_some() => {
@@ -2184,7 +2184,7 @@ impl<'a> RunLoop<'a> {
             micro.actuator.as_mut(),
             |request| match request {
                 MicroRepairHost::Rerun => {
-                    let revision = match self.workspace.commit_all(wt, &commit_msg) {
+                    let revision = match self.workspace.commit_all(wt, base, &commit_msg) {
                         Ok(revision) => revision,
                         Err(_) => return MicroRepairHostReply::Unavailable,
                     };
@@ -2254,6 +2254,7 @@ impl<'a> RunLoop<'a> {
         let _ = self.workspace.remove_file(wt, &prompt);
         let commit = self.workspace.commit_all(
             wt,
+            base,
             &format!("meshloop: attempt {} for task {}", attempt_id.0, node.id.0),
         );
         let mut current_revision = match commit {
@@ -2514,17 +2515,7 @@ impl<'a> RunLoop<'a> {
             return Err(OrchestratorError::Workspace(error.clone()));
         };
         self.store
-            .record(Evidence::Deterministic(DeterministicEvidence {
-                candidate: CandidateRef {
-                    task_id: node.id,
-                    attempt_id,
-                    revision: String::new(),
-                },
-                tool: tool.into(),
-                tool_version: "n/a".into(),
-                exit_code: 1,
-                output_redacted: output,
-            }))?;
+            .record(refusal_evidence(node.id, attempt_id, tool, output))?;
         let rec = self.append_deterministic_result(
             graph_id,
             node,
@@ -2835,13 +2826,45 @@ impl<'a> RunLoop<'a> {
             .and_then(|outcome| outcome.strip_prefix("base:"))
             .unwrap_or("")
             .to_string();
-        let _ = self.workspace.commit_all(
+        let commit = self.workspace.commit_all(
             &worktree,
+            &base,
             &format!(
                 "meshloop: resume verification {} for task {}",
                 attempt.attempt_id.0, node.id.0
             ),
         );
+        // A refused worktree fails the attempt with its evidence, as in
+        // `verify_attempt` (#180); other commit faults keep the existing behaviour.
+        let refusal = match &commit {
+            Err(error) => worktree_refusal(error),
+            Ok(_) => None,
+        };
+        let tier = node.tier.unwrap_or(Tier::Tier2);
+        let feedback = FeedbackKey {
+            harness: attempt.harness.clone().unwrap_or_default(),
+            model_ref: attempt.model_ref.clone().unwrap_or_default(),
+            tier: crate::ports::TierKey::from(tier),
+        };
+        if let Some((tool, failure, output)) = refusal {
+            self.store
+                .record(refusal_evidence(node.id, attempt.attempt_id, tool, output))?;
+            let rec = self.append_deterministic_result(
+                graph_id,
+                node,
+                attempt.attempt_id,
+                false,
+                Some(failure.into()),
+            )?;
+            let _ = self.store.record_outcome(&feedback, false);
+            return Ok(Tick::Transition {
+                task: node.id,
+                attempt: rec.attempt_id,
+                from: rec.from,
+                to: rec.to,
+                event: rec.event,
+            });
+        }
         let revision = match self.workspace.head(&worktree) {
             Ok(revision) => revision,
             Err(_) => {
@@ -2875,15 +2898,7 @@ impl<'a> RunLoop<'a> {
         let rec =
             self.append_deterministic_result(graph_id, node, attempt.attempt_id, passed, None)?;
         // Only a recorded result is feedback (issue #167; see `verify_attempt`).
-        let tier = node.tier.unwrap_or(Tier::Tier2);
-        let _ = self.store.record_outcome(
-            &FeedbackKey {
-                harness: attempt.harness.clone().unwrap_or_default(),
-                model_ref: attempt.model_ref.clone().unwrap_or_default(),
-                tier: crate::ports::TierKey::from(tier),
-            },
-            passed,
-        );
+        let _ = self.store.record_outcome(&feedback, passed);
         Ok(Tick::Transition {
             task: node.id,
             attempt: rec.attempt_id,
@@ -3692,6 +3707,26 @@ fn skipped_verify_evidence(candidate: &CandidateRef) -> Evidence {
     })
 }
 
+/// The failing evidence row of a refused worktree. No revision: nothing was committed.
+fn refusal_evidence(
+    task_id: TaskId,
+    attempt_id: AttemptId,
+    tool: &str,
+    output: String,
+) -> Evidence {
+    Evidence::Deterministic(DeterministicEvidence {
+        candidate: CandidateRef {
+            task_id,
+            attempt_id,
+            revision: String::new(),
+        },
+        tool: tool.into(),
+        tool_version: "n/a".into(),
+        exit_code: 1,
+        output_redacted: output,
+    })
+}
+
 /// Workspace errors that mean worker output made the worktree unsafe for host-side
 /// git (#180): `(evidence tool, failure reason, redacted evidence output)`.
 fn worktree_refusal(error: &WorkspaceError) -> Option<(&'static str, &'static str, String)> {
@@ -3701,11 +3736,11 @@ fn worktree_refusal(error: &WorkspaceError) -> Option<(&'static str, &'static st
             "git-link-modified",
             format!("refused: the worktree's .git link was modified ({reason}); git was not run"),
         )),
-        WorkspaceError::NestedGit { path } => Some((
+        WorkspaceError::NestedGit { path, reason } => Some((
             "nested-git",
             "nested-git",
             format!(
-                "refused: {} is a nested git entry; nothing was staged",
+                "refused: {} ({reason}); git does not recurse into it",
                 path.display()
             ),
         )),
@@ -3851,7 +3886,7 @@ mod tests {
             fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
-            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn branch_exists(&self, branch: &str) -> Result<bool, WorkspaceError>;
@@ -4711,7 +4746,7 @@ mod tests {
             fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
-            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5669,7 +5704,7 @@ mod tests {
             fn head(&self, worktree: &Path) -> Result<String, WorkspaceError>;
             fn diff_against(&self, worktree: &Path, base: &str) -> Result<DiffSummary, WorkspaceError>;
             fn status_porcelain(&self, worktree: &Path) -> Result<String, WorkspaceError>;
-            fn commit_all(&self, worktree: &Path, message: &str) -> Result<String, WorkspaceError>;
+            fn commit_all(&self, worktree: &Path, base: &str, message: &str) -> Result<String, WorkspaceError>;
             fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
             fn cherry_pick_range( &self, worktree: &Path, base: &str, head: &str, ) -> Result<(), WorkspaceError>;
             fn prune(&self) -> Result<(), WorkspaceError>;
@@ -5732,7 +5767,12 @@ mod tests {
         fn remove_file(&self, _worktree: &Path, _rel: &str) -> Result<(), WorkspaceError> {
             Ok(())
         }
-        fn commit_all(&self, _worktree: &Path, _message: &str) -> Result<String, WorkspaceError> {
+        fn commit_all(
+            &self,
+            _worktree: &Path,
+            _base: &str,
+            _message: &str,
+        ) -> Result<String, WorkspaceError> {
             Ok("rev".into())
         }
         fn diff_against(
