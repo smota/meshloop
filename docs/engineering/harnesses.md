@@ -173,21 +173,23 @@ Neutralised for every host-side git process:
   `<path>/.git` exists. Staging is `add -A -- . ':(exclude,top,literal)<gitlink>'`
   with one exclude per gitlink in the index: gitlinks carry no content, and `add`
   would otherwise run git inside a populated one under that repository's config.
-  After staging it reads the index again and refuses a gitlink staged in between. A
-  git failure while reading or staging the index (the worktree changing underneath)
-  also refuses the attempt, never the run. Resumed verification uses the attempt's
-  recorded base, else the run's base revision. Every refusal is `WorkspaceError::NestedGit { path, reason }`, a
-  failing `nested-git` evidence row naming the worktree-relative path, and a failed
-  attempt with no repair round. An entry that vanishes during the walk is skipped; any
-  other walk error refuses the attempt rather than aborting the run. This includes a
-  worker that fills an (uninitialised) submodule directory of a repository that uses
-  submodules. A change that adds or moves a gitlink also fails the `gitlinks` check.
+  After staging it reads the index again and refuses a gitlink staged in between.
+  Each of these refusals is `WorkspaceError::NestedGit { path, reason }`, a failing
+  `nested-git` evidence row naming the worktree-relative path, and a failed attempt
+  with no repair round. A git failure while reading or staging the index, or a
+  worktree walk that cannot complete, is `WorkspaceError::StagingFailed`: a failing
+  `staging` evidence row (`staging-failed`), a failed attempt, never a failed run. An
+  entry that vanishes during the walk is skipped. The refusals include a worker that
+  fills an (uninitialised) submodule directory of a repository that uses submodules.
+  A change that adds or moves a gitlink also fails the `gitlinks` check. Resumed
+  verification uses the attempt's recorded base, else the run's base revision.
 - **The worker's process tree ends before verification** (ADR 0025): when a worker
   exits normally, Meshloop ends every process left in its tree before collecting the
   outcome, so nothing the worker started can race host-side git. On Windows it
   terminates the job object and observes it empty; on Unix it kills the process group
-  and polls `kill(-pgid, 0)` until it reports `ESRCH` (ADR 0025, amendment of
-  2026-11-11). If the tree is not observed empty
+  and polls until no member is left: `/proc/<pid>/stat` process-group fields on
+  Linux, `kill -0 -- -<pgid>` elsewhere, where only "No such process" counts as empty
+  (ADR 0025, amendment of 2026-11-11). If the tree is not observed empty
   within 5 s the attempt fails (`worker-process-tree-survived`) and no host-side git
   runs in its worktree.
 - **Inherited environment** that would redirect git or name a program is removed:

@@ -169,6 +169,11 @@ pub enum WorkspaceError {
         path: std::path::PathBuf,
         reason: String,
     },
+    /// Reading or staging the worktree's index failed, or the worktree could not be
+    /// walked; nothing nested was observed. The attempt is refused (#180).
+    StagingFailed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

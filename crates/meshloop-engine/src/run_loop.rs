@@ -3752,6 +3752,9 @@ fn worktree_refusal(error: &WorkspaceError) -> Option<(&'static str, &'static st
                 path.display()
             ),
         )),
+        WorkspaceError::StagingFailed { reason } => {
+            Some(("staging", "staging-failed", format!("refused: {reason}")))
+        }
         _ => None,
     }
 }

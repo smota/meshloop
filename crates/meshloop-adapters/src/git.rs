@@ -26,6 +26,11 @@ pub enum GitError {
         path: PathBuf,
         reason: &'static str,
     },
+    /// Reading or staging the index failed, or the worktree walk failed, with no
+    /// nested entry observed. Refuses the attempt, never the run (#180).
+    StagingFailed {
+        reason: &'static str,
+    },
 }
 
 impl From<GitError> for WorkspaceError {
@@ -41,6 +46,9 @@ impl From<GitError> for WorkspaceError {
             },
             GitError::NestedGit { path, reason } => WorkspaceError::NestedGit {
                 path,
+                reason: reason.to_string(),
+            },
+            GitError::StagingFailed { reason } => WorkspaceError::StagingFailed {
                 reason: reason.to_string(),
             },
         }
@@ -433,7 +441,7 @@ fn nested_git_entry(worktree: &Path) -> Option<(PathBuf, &'static str)> {
                 continue;
             }
             if lower == ".git" || lower == "git~1" {
-                return Some((rel(&entry.path()), "nested .git entry"));
+                return Some((rel(&entry.path()), NESTED_ENTRY));
             }
             // `DirEntry::file_type` does not follow symlinks (or junctions on Windows).
             match entry.file_type() {
@@ -447,13 +455,15 @@ fn nested_git_entry(worktree: &Path) -> Option<(PathBuf, &'static str)> {
     None
 }
 
+/// Reason of a `.git` entry found below the worktree's top level.
+const NESTED_ENTRY: &str = "nested .git entry";
+
 /// A git failure while reading or staging the index (for example `unable to stat`
 /// when the worktree changes underneath) refuses the attempt; it never fails the run.
 fn refuse_index_fault(error: GitError) -> GitError {
     match error {
-        GitError::CommandFailed { .. } => GitError::NestedGit {
-            path: PathBuf::from("."),
-            reason: "staging failed while the worktree changed",
+        GitError::CommandFailed { .. } => GitError::StagingFailed {
+            reason: "index read or staging failed",
         },
         other => other,
     }
@@ -629,8 +639,16 @@ impl WorkspacePort for GitWorktreeAdapter {
         if !self.is_repo_root(worktree) {
             self.verified_admin(worktree)?;
         }
-        if let Some((path, reason)) = nested_git_entry(worktree) {
-            return Err(GitError::NestedGit { path, reason }.into());
+        match nested_git_entry(worktree) {
+            Some((path, NESTED_ENTRY)) => {
+                return Err(GitError::NestedGit {
+                    path,
+                    reason: NESTED_ENTRY,
+                }
+                .into());
+            }
+            Some((_, reason)) => return Err(GitError::StagingFailed { reason }.into()),
+            None => {}
         }
         let allowed = self.base_gitlinks(worktree, base);
         self.check_index_gitlinks(worktree, &allowed)
@@ -988,14 +1006,14 @@ mod tests {
             fs::write(&path, "gitdir: elsewhere\n").unwrap();
             assert_eq!(
                 nested_git_entry(&dir),
-                Some((PathBuf::from("a").join("b").join(name), "nested .git entry"))
+                Some((PathBuf::from("a").join("b").join(name), NESTED_ENTRY))
             );
             fs::remove_file(&path).unwrap();
         }
         fs::write(dir.join("GIT~1"), "x").unwrap();
         assert_eq!(
             nested_git_entry(&dir),
-            Some((PathBuf::from("GIT~1"), "nested .git entry"))
+            Some((PathBuf::from("GIT~1"), NESTED_ENTRY))
         );
         fs::remove_file(dir.join("GIT~1")).unwrap();
         #[cfg(unix)]
