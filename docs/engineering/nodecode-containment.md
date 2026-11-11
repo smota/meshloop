@@ -257,6 +257,13 @@ Toolchain notes, measured on this host (cargo 1.98.0, rustup, Ubuntu on WSL2):
   network off; `target/` is written in the worktree. Fetch dependencies on the host
   first (`cargo fetch`); a check cannot download or extract crates, and rustup cannot
   install a toolchain a `rust-toolchain.toml` asks for.
+- Meshloop removes the worktree's ignored files before every check and after it (#196,
+  see [Verification runs worker-written code](harnesses.md#verification-runs-worker-written-code-181)),
+  so every contained check compiles from a clean tree. The runner has no writable path
+  that outlives a check outside the worktree: `/tmp` and the sandbox home are private
+  tmpfs mounts discarded when the check exits, and every `--ro-path` is read-only. A
+  persistent build cache for contained checks (a dedicated writable cache directory
+  outside the worktree) is not offered yet; it is a follow-up to #196.
 - `/etc/alternatives` is bound read-only, because Debian's `cc` (the Rust linker) is a
   link through it.
 - Every other toolchain (mise, node, python virtualenvs) needs its folder as a

@@ -170,7 +170,10 @@ Neutralised for every host-side git process:
   entry named `.git` in any case, or the NTFS short name `git~1`, below the top level
   refuses the attempt. It then reads the index (`ls-files --stage`, no helper process)
   and refuses any gitlink (mode 160000) that is not in the attempt base or whose
-  `<path>/.git` exists. Staging is `add -A -- . ':(exclude,top,literal)<gitlink>'`
+  `<path>/.git` exists, and any gitlink whose path holds anything but an empty
+  directory (reason `content in an unpopulated gitlink`, #196): `worktree add` leaves
+  an uninitialised submodule's directory empty, and status, `add` and `clean` ignore
+  what is inside it, so content there would reach a check unreviewed. Staging is `add -A -- . ':(exclude,top,literal)<gitlink>'`
   with one exclude per gitlink in the index: gitlinks carry no content, and `add`
   would otherwise run git inside a populated one under that repository's config.
   After staging it reads the index again and refuses a gitlink staged in between.
@@ -273,6 +276,54 @@ exits; one that detaches with `setsid` passes only if it also closes the inherit
 and stderr. On Unix, zombies count as group members, so in a container whose PID 1 does
 not reap orphans (e.g. docker without `--init`) checks can fail with
 `check-process-tree-survived`; run with a reaping init.
+
+Ignored files are not part of the candidate (#196). Right before every check (the first
+check, every repair round's and micro-repair's re-check, and the re-check of an
+orphaned or resumed verification), Meshloop removes the attempt worktree's ignored
+files and directories, so a check cannot pass on ignored build output the worker left
+there: the reviewed diff does not contain it. (The other place git does not look, the
+directory of an uninitialised submodule, is refused before staging; see the nested
+repositories item above.) It removes them again after the check, so the check's own
+ignored output (a `target/`) does not keep a landed run from being reclaimed. With no
+`verify_command`, the one removal is the after-verification one.
+
+The removal runs only in a run-loop attempt worktree,
+`<worktree root>/<graph>/task-<n>-attempt-<m>` compared on canonical paths: never the
+repository checkout, an integrate or a deliverable worktree (no check runs there and
+Meshloop writes no ignored files there), and never a worktree outside the run's root.
+It runs only after the worktree link and the nested-repository walk pass (the same
+checks as `commit_all`; a refusal removes nothing). Meshloop then lists the ignored
+entries (`ls-files --others --ignored --exclude-standard --directory`) and walks them
+without following links, counting their bytes and removing every symlink, junction or
+other reparse point among them as a link (`remove_file`, or `remove_dir` for a Windows
+directory link or junction), never its target. Git therefore never meets a link during
+the removal, whatever its own rules are. An entry that cannot be read or removed, or a
+walk past 5,000,000 entries, refuses the removal. Last comes
+`git clean -f -d -X -q -- .` through `host_git`: `-X` removes ignored entries only, so
+tracked files, even ones an ignore rule matches, and untracked files that are not
+ignored are kept; a single `-f` never removes a nested repository; no `-e` is passed
+(under `-X` it would widen the removal). Each removal is a `clean-ignored` evidence row
+with the count of entries and their bytes, never their names. A removal that fails
+before the check fails it closed (exit 1, the check does not run); one that fails after
+the check is recorded with exit 0, because the check already ran on a clean tree, and
+cleanup then reports what is left.
+
+Cost: every check builds from a clean tree, so an incremental build cache in the
+worktree is never reused. A cache can live outside the worktree (for example
+`CARGO_TARGET_DIR` on an uncontained host check), but only where trusted checks write
+it and the worker cannot: a cache the worker can write is build output the worker left,
+outside the reviewed diff, which is the hole this removal closes. Do not point a worker
+harness's writable paths at it. The contained runner has no writable path outside the
+worktree that outlives a check; see
+[Contained verification](nodecode-containment.md#contained-verification).
+Tests: `crates/meshloop-cli/tests/ignored_clean.rs` (Unix: prebuilt ignored output
+cannot pass a check, a check's ignored output does not block reclaiming a landed run,
+a planted link and the operator's own ignored files survive, a nested repository is
+refused before anything is removed, content in an unpopulated submodule directory is
+refused before the check, a long ignored listing is not `dirty-tracked`),
+`git::tests::clean_ignored_*` (Windows: junctions), `git::tests::links_among_ignored_*`,
+`git::tests::content_in_an_unpopulated_gitlink_is_refused` and
+`run_loop::tests::*removal*`.
 
 ## Nodecode worker (#138)
 

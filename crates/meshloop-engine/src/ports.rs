@@ -192,6 +192,20 @@ pub struct DiffSummary {
     pub gitlinks: Vec<String>,
 }
 
+/// What one removal of ignored files from an attempt worktree did (#196). Counts and
+/// sizes only: never the names of what was removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IgnoredClean {
+    /// Ignored entries removed, as git lists them (an ignored directory counts once).
+    pub entries: u64,
+    /// Bytes in the files and links of those entries, measured before removal
+    /// without following links.
+    pub bytes: u64,
+    /// Ignored entries git still lists after the removal. Non-zero means it could not
+    /// remove everything (a read-only directory, an entry that appeared meanwhile).
+    pub remaining: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessHint {
     pub pid: u32,
@@ -237,6 +251,20 @@ pub trait WorkspacePort {
         base: &str,
         message: &str,
     ) -> Result<String, WorkspaceError>;
+    /// Removes every ignored file and directory (`git clean -d -X`) from an attempt
+    /// worktree Meshloop owns, so a check never sees build output it did not produce
+    /// itself and ignored output does not block reclamation (#196). Tracked and
+    /// untracked-but-not-ignored entries are kept and links are never followed.
+    /// Refused, with nothing removed, unless `worktree` is a run-loop attempt worktree
+    /// (`<attempt_root>/<graph>/task-<n>-attempt-<m>`, compared canonically): never the
+    /// repository checkout or an integrate or deliverable worktree. Also refused for a
+    /// worktree whose `.git` link was modified (`GitLinkModified`) and one holding a
+    /// nested `.git` entry (`NestedGit`, `StagingFailed` when the walk fails).
+    fn clean_ignored(
+        &self,
+        worktree: &Path,
+        attempt_root: &Path,
+    ) -> Result<IgnoredClean, WorkspaceError>;
     fn merge_in_worktree(&self, worktree: &Path, from_ref: &str) -> Result<(), WorkspaceError>;
     /// Replays the commits in `base..head` onto `worktree`'s HEAD, oldest first. An empty
     /// range is a no-op. On conflict the cherry-pick is aborted and `Conflict` returned.
