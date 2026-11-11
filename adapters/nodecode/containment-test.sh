@@ -10,7 +10,9 @@
 # BASE_DIR must be on ext4, xfs or btrfs (default: <repo>/.agent-runs). The test makes a
 # disposable repository with a linked worktree under it and removes it on exit.
 # Exit 0: passed, or skipped with a "SKIP:" line (not Linux, no bwrap, no user
-# namespaces). Exit 1: a containment check failed.
+# namespaces). Exit 1: a containment check failed, or a skip while
+# MESHLOOP_REQUIRE_CONTAINMENT=1 (CI sets it where a probe shows bwrap works).
+# The driver checks need /usr/bin/python3 and are skipped, with a line, without it.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -18,6 +20,10 @@ wrapper="$here/meshloop-nodecode-sandbox"
 repo_root="$(cd -- "$here/../.." && pwd -P)"
 
 skip() {
+  if [[ "${MESHLOOP_REQUIRE_CONTAINMENT:-}" == "1" ]]; then
+    printf 'FAIL: containment test required (MESHLOOP_REQUIRE_CONTAINMENT=1) but would skip: %s\n' "$*"
+    exit 1
+  fi
   printf 'SKIP: %s\n' "$*"
   exit 0
 }
@@ -69,7 +75,9 @@ mkdir -p "$repo" "$fake_home/.nodecode" "$fake_home/.ssh"
 printf 'organism\n' >"$fake_home/.nodecode/config.jsonc"
 printf 'not-a-key\n' >"$fake_home/.ssh/id_test"
 git_q -C "$repo" init -q
-git_q -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed
+printf 'seed\n' >"$repo/README.md"
+git_q -C "$repo" add README.md
+git_q -C "$repo" -c user.email=t@t -c user.name=t commit -q -m seed
 git_q -C "$repo" worktree add -q "$repo/.meshloop/worktrees/w1" -b w1
 wt="$repo/.meshloop/worktrees/w1"
 [[ -f "$wt/.git" ]] || { echo "FAIL: could not create a linked worktree"; exit 1; }
@@ -143,12 +151,35 @@ grep -qx true <<<"$out" && pass "git works read-only inside the worktree" \
   || fail "git does not work inside the worktree: $out"
 
 # --- 2. visibility: the operator's homes and secrets are not mounted -----------------
+# Each path must exist on the host, or the check would prove nothing. The fake home's
+# paths always do; a real-home path that is absent on this host is reported, not passed.
 vis_probe='for p in "$@"; do if [ -e "$p" ]; then echo "visible $p"; else echo "absent $p"; fi; done'
-hidden=("$fake_home/.nodecode" "$fake_home/.ssh" "$real_home/.nodecode" "$real_home/.ssh" "$real_home/.config" "$repo/README.md")
+hidden=("$fake_home/.nodecode" "$fake_home/.ssh" "$repo/README.md" "$real_home")
+for p in "$real_home/.nodecode" "$real_home/.ssh" "$real_home/.config"; do
+  if [[ -e "$p" ]]; then hidden+=("$p"); else printf 'NOTE: %s is absent on this host; not checked\n' "$p"; fi
+done
+# $real_home itself may be an ancestor of the worktree (then it exists in the sandbox as
+# an empty mount point); check its listing instead of its existence.
 out="$(in_sandbox sh -c "$vis_probe" sh "${hidden[@]}")" || true
 for p in "${hidden[@]}"; do
-  grep -qxF "absent $p" <<<"$out" && pass "not visible: $p" || fail "visible in the sandbox: $p"
+  [[ "$p" == "$real_home" ]] && continue
+  if [[ ! -e "$p" ]]; then
+    fail "precondition: $p does not exist on the host"
+  elif grep -qxF "absent $p" <<<"$out"; then
+    pass "not visible: $p"
+  else
+    fail "visible in the sandbox: $p"
+  fi
 done
+host_entries="$(find "$real_home" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+out="$(in_sandbox sh -c 'find "$1" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l' sh "$real_home")" || true
+if ((host_entries == 0)); then
+  printf 'NOTE: %s is empty on this host; listing not checked\n' "$real_home"
+elif ((out <= 1)); then
+  pass "the real home shows at most the one path toward the worktree ($out of $host_entries entries)"
+else
+  fail "the real home lists $out entries in the sandbox (host: $host_entries)"
+fi
 
 # --- 3. environment and the one credential ------------------------------------------
 out="$(in_sandbox sh -c 'env; echo "---"; cat "$HOME/.nodecode/secrets/providers.canary.api_key"' sh)" || true
@@ -172,6 +203,114 @@ if grep -rqF "$canary_value" -- "$wt" 2>/dev/null; then
   fail "the credential value appears in the worktree"
 else
   pass "the credential value appears nowhere in the worktree"
+fi
+
+# --- 3b. privileges, descriptors, terminal, /dev, core dumps -----------------------
+fd_target="$work/host-fd-target"
+: >"$fd_target"
+harden_probe='( echo leak >&9 ) 2>/dev/null && echo fd9-writable || echo fd9-closed
+grep -E "^(CapEff|NoNewPrivs):" /proc/self/status | tr -d "\t"
+unshare -Ur true >/dev/null 2>&1 && echo userns-allowed || echo userns-refused
+(exec 3</dev/tty) 2>/dev/null && echo tty-open || echo tty-none
+echo "tty_nr=$(cut -d" " -f7 /proc/self/stat)"
+( : >/dev/meshloop-probe ) 2>/dev/null && echo dev-writable || echo dev-readonly
+( : >/dev/null ) 2>/dev/null && echo devnull-ok || echo devnull-broken
+echo "shm_bytes=$(( $(stat -f -c %b /dev/shm) * $(stat -f -c %S /dev/shm) ))"
+echo "core_soft=$(ulimit -c) core_hard=$(ulimit -Hc)"'
+out="$(in_sandbox sh -c "$harden_probe" sh 9>>"$fd_target")" || true
+check_line() { # $1 expected line, $2 description
+  grep -qxF -- "$1" <<<"$out" && pass "$2" || fail "$2: expected '$1' in: $(tr '\n' ' ' <<<"$out")"
+}
+check_line fd9-closed "a descriptor the caller left open (fd 9) is closed in the sandbox"
+[[ ! -s "$fd_target" ]] && pass "nothing reached the host file behind fd 9" || fail "a sandbox write reached the host through fd 9"
+check_line "CapEff:0000000000000000" "no effective capabilities"
+check_line "NoNewPrivs:1" "no_new_privs is set"
+check_line userns-refused "unshare -Ur fails (no nested user namespaces)"
+check_line tty-none "no controlling terminal (/dev/tty cannot be opened)"
+check_line tty_nr=0 "the process has no tty (tty_nr 0)"
+check_line dev-readonly "/dev is read-only"
+check_line devnull-ok "/dev/null still works"
+check_line shm_bytes=1073741824 "/dev/shm is a tmpfs capped at --tmpfs-size (1 GiB)"
+check_line "core_soft=0 core_hard=0" "core dumps are off (soft and hard limit 0)"
+
+# --- 3c. refusals: release folder and credential file ---------------------------------
+refused() { # $1 description, $2 expected message fragment, rest: command (run in $wt)
+  local desc="$1" frag="$2" rc=0 msg
+  shift 2
+  msg="$(cd "$wt" && HOME="$fake_home" "$@" 2>&1 >/dev/null)" || rc=$?
+  if ((rc == 125)) && grep -qF -- "$frag" <<<"$msg"; then
+    pass "refused: $desc"
+  else
+    fail "not refused ($rc): $desc: $msg"
+  fi
+}
+fake_release() { # $1 dir: a fake release folder (binary + src/)
+  mkdir -p "$1/src"
+  printf '#!/bin/sh\necho fake\n' >"$1/nodecode"
+  chmod +x "$1/nodecode"
+}
+fake_release "$fake_home"
+refused "a release folder that is the operator's home" "operator's home" \
+  "$wrapper" --nodecode "$fake_home/nodecode" --version
+fake_release "$fake_home/.nodecode/rel"
+refused "a release folder inside ~/.nodecode" "nodecode home" \
+  "$wrapper" --nodecode "$fake_home/.nodecode/rel/nodecode" --version
+fake_release "$wt/rel"
+refused "a release folder inside the worktree" "inside the worktree" \
+  "$wrapper" --nodecode "$wt/rel/nodecode" -- --help
+rm -rf "$wt/rel" "$fake_home/nodecode" "$fake_home/src"
+(umask 077 && printf '%s\n' "$canary_value" >"$wt/key-in-worktree" && printf '%s\n' "$canary_value" >"$repo/key-in-repo")
+refused "a credential file inside the worktree" "inside the worktree" \
+  "$wrapper" --credential-provider canary --credential-file "$wt/key-in-worktree" --run-command -- true
+refused "a credential file inside the repository" "inside the repository" \
+  "$wrapper" --credential-provider canary --credential-file "$repo/key-in-repo" --run-command -- true
+rm -f "$wt/key-in-worktree" "$repo/key-in-repo"
+cp "$cred_file" "$work/loose.key" && chmod 644 "$work/loose.key"
+refused "a group- or world-readable credential file" "readable by group or others" \
+  "$wrapper" --credential-provider canary --credential-file "$work/loose.key" --run-command -- true
+
+# --- 3d. the turn driver scrubs the worker's key ---------------------------------------
+# A fake nodecode release whose `rpc` prints the bound key in a command result, an
+# assistant message and on stderr, plus malformed frames, then ends the turn.
+if [[ -x /usr/bin/python3 ]]; then
+  fake_release "$work/fake-release"
+  cat >"$work/fake-release/nodecode" <<'FAKE'
+#!/bin/sh
+key=$(head -n 1 "$HOME/.nodecode/secrets/providers.canary.api_key")
+read -r line
+case "$line" in *'"provider": "canary"'*'"model": "fake-model"'*) ok=yes ;; *) ok=no ;; esac
+echo "stderr says $key" >&2
+printf '{"sequence":0,"payload":{"type":"gateway_turn_command_result","result":{"command_id":"meshloop-turn-1","status":"accepted","message":"ok %s"}}}\n' "$key"
+printf '[1,2]\n"text"\n{"payload":"x"}\n{"payload":{"type":"gateway_turn_command_result","result":7}}\nnot json\n'
+printf '{"sequence":1,"payload":{"type":"session_stream_event","frame":{"event":{"type":"turn.assistant_message_completed","payload":{"message":{"content":"provider-split=%s the key is %s"}}}}}}\n' "$ok" "$key"
+printf '{"sequence":2,"payload":{"type":"session_stream_event","frame":{"event":{"type":"turn.completed","payload":{}}}}}\n'
+while read -r l; do :; done
+FAKE
+  chmod +x "$work/fake-release/nodecode"
+  printf 'say hi\n' >"$wt/prompt.txt"
+  rc=0
+  (cd "$wt" && HOME="$fake_home" "$wrapper" --nodecode "$work/fake-release/nodecode" \
+    --credential-provider canary --credential-file "$cred_file" \
+    --model canary/fake-model --prompt-file "$wt/prompt.txt" --raw-log "$wt/raw.jsonl") \
+    >"$work/turn.out" 2>"$work/turn.err" || rc=$?
+  if ((rc == 0)) && grep -qx 'nodecode-turn: turn.completed' "$work/turn.out"; then
+    pass "a turn through the wrapper and driver completes (malformed frames ignored)"
+  else
+    fail "fake turn did not complete ($rc): $(cat "$work/turn.out" "$work/turn.err")"
+  fi
+  grep -q 'provider-split=yes' "$work/turn.out" && pass "start_turn names provider and model separately" \
+    || fail "start_turn did not split PROVIDER/MODEL: $(cat "$work/turn.out")"
+  if grep -qF "$canary_value" "$work/turn.out" "$work/turn.err" "$wt/raw.jsonl"; then
+    fail "the key value reached stdout, stderr or the raw log"
+  elif grep -q 'the key is \[redacted\]' "$work/turn.out" && grep -q 'stderr says \[redacted\]' "$work/turn.err" \
+    && grep -q 'ok \[redacted\]' "$wt/raw.jsonl"; then
+    pass "the key value is scrubbed from stdout, stderr and the raw log"
+  else
+    fail "scrubbing not shown: $(cat "$work/turn.out" "$work/turn.err")"
+  fi
+  rm -f "$wt/prompt.txt" "$wt/raw.jsonl"
+else
+  printf 'NOTE: /usr/bin/python3 is absent; driver checks not run\n'
 fi
 
 # --- 4. process tree: killing the owned process group leaves nothing ---------------

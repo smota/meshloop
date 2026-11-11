@@ -5,6 +5,7 @@ Runs inside the sandbox that meshloop-nodecode-sandbox builds; it is plumbing, n
 boundary. Standard library only. Usage:
 
     nodecode-rpc-turn.py --nodecode PATH --model MODEL_REF --prompt-file FILE
+                         [--secret-file PATH] [--raw-log FILE]
 
 The shell (`nodecode --model M --prompt-file F`) refuses to start without a terminal
 (exit 2, "nodecode needs a terminal"), and `nodecode rpc` stops its organism as soon
@@ -20,7 +21,11 @@ the secret file the sandbox binds; unsplit, the whole spec would go to the defau
 lane (OpenCode Zen) as a model id. Prompt text travels inside one JSON string, never
 through a shell.
 
-Stdout: the assistant's messages, then one `nodecode-turn: <outcome>` line.
+Stdout: the assistant's messages, then one `nodecode-turn: <outcome>` line. nodecode's
+stderr is forwarded to stderr. With --secret-file (the worker's bound key file), that
+exact key value is replaced by `[redacted]` in everything this driver prints, in the
+forwarded stderr and in the raw log. Only the exact value is caught: a key the model
+splits, encodes or writes into a file of the worktree is not.
 Exit codes: 0 turn.completed; 1 turn.failed; 2 usage; 3 start_turn rejected;
 4 rpc ended or broke before the turn ended; 5 turn.cancelled.
 """
@@ -29,6 +34,7 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 
 # A fresh home has no models.dev catalog until its first fetch lands, and until then
@@ -39,9 +45,39 @@ END_EVENTS = {"turn.completed": 0, "turn.failed": 1, "turn.cancelled": 5}
 TEXT_KEYS = ("text", "message", "content", "detail", "error", "reason")
 
 
+REDACTED = "[redacted]"
+SECRET = ""
+
+
+def scrub(text):
+    """TEXT with the worker's key value replaced, when one was given."""
+    if SECRET and isinstance(text, str):
+        return text.replace(SECRET, REDACTED)
+    return text
+
+
 def say(line):
-    sys.stdout.write(line + "\n")
+    sys.stdout.write(scrub(line) + "\n")
     sys.stdout.flush()
+
+
+def forward_stderr(stream):
+    """Copy nodecode's stderr to ours, line by line, scrubbed."""
+    try:
+        for line in stream:
+            sys.stderr.write(scrub(line))
+            sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def read_secret(path):
+    """The key nodecode reads from its secret file: the first line, trimmed."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def payload_text(payload, limit=4000):
@@ -65,15 +101,19 @@ def payload_text(payload, limit=4000):
 
 
 def main():
+    global SECRET
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--nodecode", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt-file", required=True)
-    parser.add_argument("--raw-log", help="append every frame to this file (debugging)")
+    parser.add_argument("--secret-file", help="the worker's key file, to scrub its value")
+    parser.add_argument("--raw-log", help="append every frame to this file (spikes only)")
     try:
         args = parser.parse_args()
     except SystemExit:
         return 2
+    if args.secret_file:
+        SECRET = read_secret(args.secret_file)
     provider, slash, model = args.model.strip().partition("/")
     if not slash or not provider or not model or provider.startswith("-"):
         say("nodecode-turn: usage: --model must be PROVIDER/MODEL[:EFFORT]")
@@ -110,47 +150,57 @@ def main():
         [args.nodecode, "rpc", "--ephemeral"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=None,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         bufsize=1,
     )
+    stderr_thread = threading.Thread(target=forward_stderr, args=(rpc.stderr,), daemon=True)
+    stderr_thread.start()
     outcome, code = "rpc ended before the turn ended", 4
     try:
         attempt = 1
         command_id = start_turn(attempt)
         for text in rpc.stdout:
             if raw:
-                raw.write(text)
+                raw.write(scrub(text))
                 raw.flush()
             try:
                 frame = json.loads(text)
             except ValueError:
                 continue
-            payload = frame.get("payload") or {}
+            if not isinstance(frame, dict):
+                continue
+            payload = frame.get("payload")
+            if not isinstance(payload, dict):
+                continue
             kind = payload.get("type")
             if kind == "gateway_turn_command_result":
-                result = payload.get("result") or {}
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    continue
+                message = str(result.get("message") or "")
                 if result.get("command_id") == command_id and result.get("status") == "rejected":
                     if (
-                        CATALOG_NOT_LOADED in result.get("message", "")
+                        CATALOG_NOT_LOADED in message
                         and attempt < CATALOG_WAIT_TRIES
                     ):
                         time.sleep(1)
                         attempt += 1
                         command_id = start_turn(attempt)
                         continue
-                    outcome = "rejected {}: {}".format(
-                        result.get("code", "?"), result.get("message", "")
-                    )
+                    outcome = "rejected {}: {}".format(result.get("code", "?"), message)
                     code = 3
                     break
             elif kind == "sync_protocol_error":
                 outcome, code = "protocol error: " + payload_text(payload), 4
                 break
             elif kind == "session_stream_event":
-                event = (payload.get("frame") or {}).get("event") or {}
-                etype = event.get("type", "")
+                frame_body = payload.get("frame")
+                event = frame_body.get("event") if isinstance(frame_body, dict) else None
+                if not isinstance(event, dict):
+                    continue
+                etype = str(event.get("type") or "")
                 body = event.get("payload")
                 if etype == "turn.provider_retry" and isinstance(body, dict):
                     say(
@@ -189,11 +239,22 @@ def main():
         except subprocess.TimeoutExpired:
             rpc.kill()
             rpc.wait()
+        # A child nodecode left behind may hold stderr open; do not wait on it long.
+        stderr_thread.join(timeout=2)
         if raw:
             raw.close()
     say(f"nodecode-turn: {outcome}")
     return code
 
 
+def guarded_main():
+    """main(), with any unexpected fault reported in one scrubbed line and exit 4."""
+    try:
+        return main()
+    except Exception as error:  # noqa: BLE001 - the worker must end with a code
+        say("nodecode-turn: driver fault: {}: {}".format(type(error).__name__, error))
+        return 4
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main())

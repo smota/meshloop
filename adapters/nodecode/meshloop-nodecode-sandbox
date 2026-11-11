@@ -24,16 +24,20 @@
 #   --model MODEL_REF           PROVIDER/MODEL[:EFFORT], meshloop's {model_ref}. The
 #                               provider is required (see nodecode-rpc-turn.py).
 #   --prompt-file FILE          meshloop's {prompt_file}, inside the worktree.
-#   --raw-log FILE              with --model: append every rpc frame to FILE (inside
-#                               the worktree), for debugging. Frames hold tool output.
+#   --raw-log FILE              with --model: append every rpc frame to FILE, for
+#                               spikes only. FILE must be in the worktree (the only
+#                               writable path), so it is committed with the attempt
+#                               and holds tool output; never put it in a template.
 #   --nodecode PATH             nodecode executable (default: `nodecode` on PATH).
 #                               Prefer a private read-only copy of a release folder
 #                               (the binary and its src/ together), not the operator's
 #                               installed `current` release.
 #   --credential-provider ID    provider id whose key the worker gets, e.g. openrouter.
-#   --credential-file PATH      file holding that one key (first line). It is bound
+#   --credential-file PATH      file holding that one key (first line), mode 0600,
+#                               outside the worktree and repository. It is bound
 #                               read-only at <home>/secrets/providers.<ID>.api_key,
-#                               nodecode's secret-file tier. Never read by this script.
+#                               nodecode's secret-file tier. Never read by this script;
+#                               the driver scrubs its exact value from all output.
 #   --models-catalog FILE       a models.dev api.json to seed the sandbox's catalog
 #                               cache with (copied in; nodecode may refresh it there).
 #                               Without it a fresh home fetches the catalog first and
@@ -56,6 +60,27 @@ die() {
   printf 'meshloop-nodecode-sandbox: %s\n' "$*" >&2
   exit 125
 }
+
+# Homes a sandbox must never bind: the caller's HOME and the account's home.
+op_homes=()
+for h in "${HOME:-}" "$(getent passwd "$(id -u)" | cut -d: -f6 || true)"; do
+  [[ -n "$h" ]] && op_homes+=("$(realpath -m -- "$h")")
+done
+
+# refuse_bind DIR LABEL: DIR is about to be bound into the sandbox. Refuse /, an
+# operator home, a folder containing one, and anything inside a ~/.nodecode.
+refuse_bind() {
+  local dir="$1" label="$2" h
+  [[ "$dir" != "/" ]] || die "refusing / as the $label"
+  for h in "${op_homes[@]}"; do
+    [[ "$dir" != "$h" ]] || die "refusing the operator's home as the $label"
+    case "$h/" in "$dir"/*) die "refusing a $label that contains the operator's home" ;; esac
+    case "$dir/" in "$h/.nodecode/"*) die "refusing a $label inside the operator's nodecode home" ;; esac
+  done
+}
+
+# under DIR PATH: whether PATH is DIR or inside it.
+under() { [[ "$2" == "$1" || "$2" == "$1"/* ]]; }
 
 nodecode=""
 cred_provider=""
@@ -108,15 +133,7 @@ worktree=""
 if [[ "$mode" != "version" ]]; then
   worktree="$(pwd -P)"
   [[ -d "$worktree" && "$worktree" == /* ]] || die "working directory is not an absolute directory"
-  [[ "$worktree" != "/" ]] || die "refusing / as the worktree"
-  op_home="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
-  for h in "${HOME:-}" "$op_home"; do
-    [[ -n "$h" ]] || continue
-    h="$(realpath -m -- "$h")"
-    [[ "$worktree" != "$h" ]] || die "refusing the operator's home as the worktree"
-    case "$h/" in "$worktree"/*) die "refusing a worktree that contains the operator's home" ;; esac
-    case "$worktree/" in "$h/.nodecode/"*) die "refusing a worktree inside the operator's nodecode home" ;; esac
-  done
+  refuse_bind "$worktree" worktree
   # A turn runs only in a linked git worktree, which is what meshloop creates.
   if [[ "$mode" == "turn" ]]; then
     [[ -f "$worktree/.git" ]] || die "refusing a working directory that is not a linked git worktree"
@@ -139,6 +156,11 @@ if [[ "$mode" != "command" ]]; then
   [[ -f "$nodecode" && -x "$nodecode" ]] || die "nodecode is not an executable file"
   release_dir="$(dirname -- "$nodecode")"
   [[ -d "$release_dir/src" ]] || die "nodecode release has no src/ beside the binary: $release_dir"
+  refuse_bind "$release_dir" "nodecode release folder"
+  if [[ -n "$worktree" ]]; then
+    under "$release_dir" "$worktree" && die "refusing a nodecode release folder that contains the worktree"
+    under "$worktree" "$release_dir" && die "refusing a nodecode release folder inside the worktree"
+  fi
 fi
 driver_in="/opt/meshloop/nodecode-rpc-turn.py"
 if [[ "$mode" == "turn" ]]; then
@@ -147,17 +169,8 @@ if [[ "$mode" == "turn" ]]; then
   [[ -x /usr/bin/python3 ]] || die "/usr/bin/python3 is required for the rpc turn driver"
 fi
 
-# --- credential: one provider, one file, bound read-only -------------------------
 sandbox_home="/home/worker"
 nodecode_home="$sandbox_home/.nodecode"
-cred_binds=()
-if [[ -n "$cred_provider" || -n "$cred_file" ]]; then
-  [[ -n "$cred_provider" && -n "$cred_file" ]] || die "--credential-provider and --credential-file go together"
-  [[ "$cred_provider" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "--credential-provider must be a provider id like openrouter"
-  cred_file="$(realpath -e -- "$cred_file")" || die "credential file not found"
-  [[ -f "$cred_file" && -r "$cred_file" ]] || die "credential file is not a readable regular file"
-  cred_binds=(--ro-bind "$cred_file" "$nodecode_home/secrets/providers.$cred_provider.api_key")
-fi
 
 # --- the worker home's config: self-update off ------------------------------------
 # nodecode's `update.mode` defaults to auto on an installed build (a `current` link
@@ -184,10 +197,11 @@ resolve_from() { # $1 base dir, $2 path (absolute or relative to $1)
   if [[ "$2" == /* ]]; then realpath -m -- "$2"; else realpath -m -- "$1/$2"; fi
 }
 git_binds=()
+common=""
+repo_root=""
+git_dirs=()
 if [[ -n "$worktree" && -f "$worktree/.git" ]]; then
   git_binds=(--ro-bind "$worktree/.git" "$worktree/.git")
-fi
-if [[ -n "$worktree" && "$git_metadata" == "ro" && -f "$worktree/.git" ]]; then
   IFS= read -r line <"$worktree/.git" || true
   if [[ "$line" == "gitdir: "* ]]; then
     admin="$(resolve_from "$worktree" "${line#gitdir: }")"
@@ -199,13 +213,40 @@ if [[ -n "$worktree" && "$git_metadata" == "ro" && -f "$worktree/.git" ]]; then
         IFS= read -r rel <"$admin/commondir" || true
         common="$(resolve_from "$admin" "$rel")"
       fi
-      for d in "$admin" "$common"; do
-        [[ -d "$d" ]] || continue
-        case "$d/" in "$worktree"/*) continue ;; esac
-        git_binds+=(--ro-bind "$d" "$d")
-      done
+      if [[ "$(basename -- "$common")" == ".git" ]]; then
+        repo_root="$(dirname -- "$common")"
+      fi
+      git_dirs=("$admin" "$common")
     fi
   fi
+fi
+if [[ "$git_metadata" == "ro" ]]; then
+  for d in "${git_dirs[@]}"; do
+    [[ -d "$d" ]] || continue
+    under "$worktree" "$d" && continue
+    refuse_bind "$d" "git directory"
+    git_binds+=(--ro-bind "$d" "$d")
+  done
+fi
+
+# --- credential: one provider, one file, bound read-only -------------------------
+cred_binds=()
+secret_in=""
+if [[ -n "$cred_provider" || -n "$cred_file" ]]; then
+  [[ -n "$cred_provider" && -n "$cred_file" ]] || die "--credential-provider and --credential-file go together"
+  [[ "$cred_provider" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "--credential-provider must be a provider id like openrouter"
+  cred_file="$(realpath -e -- "$cred_file")" || die "credential file not found"
+  [[ -f "$cred_file" && -r "$cred_file" ]] || die "credential file is not a readable regular file"
+  # Never a key the worker (or a commit) could reach another way.
+  if [[ -n "$worktree" ]]; then
+    under "$worktree" "$cred_file" && die "refusing a credential file inside the worktree"
+  fi
+  [[ -n "$repo_root" ]] && under "$repo_root" "$cred_file" && die "refusing a credential file inside the repository"
+  [[ -n "$common" ]] && under "$common" "$cred_file" && die "refusing a credential file inside the git directory"
+  mode_bits="$(stat -c %a -- "$cred_file")"
+  (( (8#$mode_bits & 8#077) == 0 )) || die "credential file is readable by group or others (mode $mode_bits); chmod 600 it"
+  secret_in="$nodecode_home/secrets/providers.$cred_provider.api_key"
+  cred_binds=(--ro-bind "$cred_file" "$secret_in")
 fi
 
 # --- the sandbox -----------------------------------------------------------------
@@ -244,6 +285,7 @@ args=(
   --ro-bind-try /etc/group /etc/group
   --proc /proc
   --dev /dev
+  --size "$tmpfs_size" --tmpfs /dev/shm
   --size "$tmpfs_size" --tmpfs /tmp
   --size "$tmpfs_size" --tmpfs "$sandbox_home"
   --dir "$nodecode_home"
@@ -261,8 +303,33 @@ if [[ -n "$worktree" ]]; then
 else
   args+=(--chdir /)
 fi
-# Everything not mounted above is the sandbox's own root, now read-only.
-args+=(--remount-ro /)
+# Everything not mounted above is the sandbox's own root, now read-only, and so is the
+# small /dev tmpfs bwrap builds (device nodes still work; /dev/shm is its own capped
+# tmpfs).
+args+=(--remount-ro /dev --remount-ro /)
+
+# --- what the sandbox inherits ------------------------------------------------------
+# bwrap passes every open descriptor on to the sandbox, and meshloop's spawn closes
+# none, so a descriptor the caller left open (a file, a socket, a directory) would be a
+# path out. Close everything above 2 except the two bwrap reads with --file.
+keep_fds=" ${config_fd:-} ${catalog_fd:-} "
+open_fds=()
+for f in /proc/$$/fd/*; do
+  f="${f##*/}"
+  [[ "$f" =~ ^[0-9]+$ ]] && ((f > 2)) || continue
+  [[ "$keep_fds" != *" $f "* ]] || continue
+  # Close-on-exec descriptors (bash's own, such as the script on 255) end at exec.
+  flags="$(sed -n 's/^flags:[[:space:]]*//p' "/proc/$$/fdinfo/$f" 2>/dev/null || true)"
+  [[ -n "$flags" ]] || continue
+  (( (8#$flags & 8#2000000) == 0 )) || continue
+  open_fds+=("$f")
+done
+for f in "${open_fds[@]}"; do
+  exec {f}>&- || true
+done
+# No core files: a crashing worker would write its memory, key included, into the cwd.
+ulimit -c 0
+ulimit -Hc 0
 
 case "$mode" in
   version)
@@ -276,6 +343,7 @@ case "$mode" in
       exit 0
     fi ;;
   turn) cmd=(/usr/bin/python3 -I "$driver_in" --nodecode "$nodecode" --model "$model_ref" --prompt-file "$prompt_file")
+    [[ -z "$secret_in" ]] || cmd+=(--secret-file "$secret_in")
     [[ -z "$raw_log" ]] || cmd+=(--raw-log "$raw_log") ;;
   nodecode) (($#)) || die "no nodecode arguments after --"; cmd=("$nodecode" "$@") ;;
   command) (($#)) || die "no program after --run-command --"; cmd=("$@") ;;

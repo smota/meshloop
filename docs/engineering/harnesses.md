@@ -159,13 +159,14 @@ a fresh nodecode home, with stdin not a terminal (as meshloop runs a worker).
 | 1 | `turn.failed` (for example a provider error after nodecode's own retries) |
 | 2 | driver usage error: `model_ref` without a provider, unreadable or empty prompt file |
 | 3 | `start_turn` rejected (unknown provider or model, refused effort) |
-| 4 | `nodecode rpc` ended or broke before the turn ended |
+| 4 | `nodecode rpc` ended or broke before the turn ended, or a driver fault |
 | 5 | `turn.cancelled` |
 | 125 | wrapper refusal (no bwrap, unsupported filesystem, operator home as worktree, not a linked worktree, bad option) |
 
 Meshloop treats any non-zero exit as a failed attempt. The attempt's stdout evidence holds
 the assistant's messages, one `nodecode-turn: usage PROVIDER/MODEL input N output N
-cost_usd X` line per model call, and a final `nodecode-turn: <outcome>` line.
+cost_usd X` line per model call, and a final `nodecode-turn: <outcome>` line. The exact
+value of the bound key is replaced by `[redacted]` in stdout, stderr and the raw log.
 
 The probe goes through the wrapper (`version_args = ["--version"]`, plus `--nodecode`
 when the operator names a private copy). It runs `nodecode --version` inside the sandbox
