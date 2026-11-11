@@ -1,0 +1,36 @@
+# Offline learning-plane comparison (#140): the measured configuration. Socket-free: the
+# only harness is Meshloop's fixture_harness (the runner fills in its path) and the
+# runner replaces `verify_command = []` with the task's command (tasks.json). It passes
+# --fixture-only to run and resume, which admits only a harness named `fixture`, so the
+# candidates are (fixture, model) pairs.
+#
+# The fixture harness echoes `--model <m>`; a model named `fail-*` exits 1 and changes
+# nothing, which fails Meshloop's git-diff check on every task; any other model writes
+# fixture-touched.txt and passes every task whose verify command accepts it (all but
+# t1-never). Outcomes differ by model and are deterministic.
+#
+# Routing without priors on a fresh store: Tier1 ranks the two lightweight models first
+# and breaks their tie by configured order, so fail-lite goes first; Tier2 ranks fail-mid
+# (mid) before top (top, tier-efficiency penalty 0.5).
+selected_harnesses = ["fixture"]
+
+[limits]
+max_concurrent_workers = 1
+# Attempts per task: enough to reach every Tier1 candidate (four here).
+max_retries = 4
+task_timeout_seconds = 60
+probe_timeout_seconds = 15
+
+[verify]
+verify_command = []
+
+[harnesses.fixture]
+executable = "{FIXTURE}"
+version_args = ["--version"]
+invoke_args_template = ["--model", "{model_ref}", "--prompt-file", "{prompt_file}"]
+models = [
+  { model_ref = "fail-lite", model_tier = "lightweight" },
+  { model_ref = "lite", model_tier = "lightweight" },
+  { model_ref = "fail-mid", model_tier = "mid" },
+  { model_ref = "top", model_tier = "top" },
+]

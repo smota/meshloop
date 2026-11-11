@@ -1,0 +1,38 @@
+{
+  "schema": "meshloop.bench.learning-plane.thresholds.v1",
+  "source": "https://github.com/smota/meshloop/issues/144#issuecomment-6776613560",
+  "recorded": "2026-11-10 by the coordinator (Claude) under authority delegated by the repository owner: final, superseding both earlier comments. Frozen for #140: do not tune.",
+  "task_set_version": "lp-4",
+  "config_sha256": "9cf1307c86179d7ea7ef1287c9b4f2eb85343d56e813a72028cf559fbcdf4923",
+  "reps": 3,
+  "runs": 24,
+  "max_retries": 3,
+  "go": {
+    "success_min": 23,
+    "task_failing_reps_max": 1,
+    "retry_runs_max": 2,
+    "first_dispatch_change_reps_min": 2,
+    "tier2_wall_p50_max_s": 10.5,
+    "tokens_mean_max": {
+      "claude/sonnet": 149152,
+      "codex/gpt-6.1-sol": 10188
+    }
+  },
+  "no_go": {
+    "success_max": 22,
+    "task_failing_reps_min": 2,
+    "retry_runs_max": 3,
+    "wall_p50_max_s": {
+      "Tier1": 28.7,
+      "Tier2": 13.8,
+      "Tier3": 75.9
+    },
+    "overall_p95_max_s": 61.3,
+    "tokens_mean_max": {
+      "claude/sonnet": 196253,
+      "codex/gpt-6-luna": 23209,
+      "codex/gpt-6.1-sol": 33958
+    }
+  },
+  "inconclusive": "NO-GO"
+}
