@@ -1,0 +1,414 @@
+//! Shape tests for the secret scrubber (#183).
+//!
+//! Every key below is generated from a fixed seed at run time. None is a real key;
+//! each only has the prefix, alphabet and length of the provider's format.
+
+use crate::redact::redact;
+
+const MARK: &str = "[REDACTED]";
+const B64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const UPPER_DIGIT: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const HEX: &[u8] = b"0123456789abcdef";
+
+/// xorshift64: deterministic, so a failure reproduces.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next() % n as u64).unwrap_or(0)
+    }
+
+    fn pick(&mut self, alphabet: &[u8], len: usize) -> String {
+        (0..len)
+            .map(|_| char::from(alphabet[self.below(alphabet.len())]))
+            .collect()
+    }
+}
+
+fn fake(seed: u64, alphabet: &[u8], len: usize) -> String {
+    Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1).pick(alphabet, len)
+}
+
+/// One fake value per documented provider shape.
+fn provider_keys() -> Vec<(&'static str, String)> {
+    vec![
+        ("openai legacy", format!("sk-{}", fake(1, ALNUM, 48))),
+        (
+            "openai project",
+            format!("sk-proj-{}", fake(2, B64URL, 120)),
+        ),
+        (
+            "openai svcacct",
+            format!("sk-svcacct-{}", fake(3, B64URL, 100)),
+        ),
+        ("openrouter", format!("sk-or-v1-{}", fake(4, HEX, 64))),
+        (
+            "anthropic",
+            format!("sk-ant-api03-{}AA", fake(5, B64URL, 93)),
+        ),
+        (
+            "anthropic admin",
+            format!("sk-ant-admin01-{}", fake(6, B64URL, 80)),
+        ),
+        ("google", format!("AIza{}", fake(7, B64URL, 35))),
+        ("github classic", format!("ghp_{}", fake(8, ALNUM, 36))),
+        ("github oauth", format!("gho_{}", fake(9, ALNUM, 36))),
+        (
+            "github user-to-server",
+            format!("ghu_{}", fake(10, ALNUM, 36)),
+        ),
+        (
+            "github server-to-server",
+            format!("ghs_{}", fake(11, ALNUM, 36)),
+        ),
+        ("github refresh", format!("ghr_{}", fake(12, ALNUM, 76))),
+        (
+            "github fine-grained",
+            format!("github_pat_{}_{}", fake(13, ALNUM, 22), fake(14, ALNUM, 59)),
+        ),
+        (
+            "slack bot",
+            format!(
+                "xoxb-{}-{}-{}",
+                fake(15, b"0123456789", 12),
+                fake(16, b"0123456789", 13),
+                fake(17, ALNUM, 24)
+            ),
+        ),
+        (
+            "slack user",
+            format!(
+                "xoxp-{}-{}",
+                fake(18, b"0123456789", 12),
+                fake(19, ALNUM, 32)
+            ),
+        ),
+        ("slack app", format!("xoxa-2-{}", fake(20, ALNUM, 40))),
+        (
+            "aws access key id",
+            format!("AKIA{}", fake(21, UPPER_DIGIT, 16)),
+        ),
+        (
+            "aws session key id",
+            format!("ASIA{}", fake(22, UPPER_DIGIT, 16)),
+        ),
+        ("generic base64url", fake(23, B64URL, 40)),
+        ("generic odd-length hex", fake(24, HEX, 48)),
+    ]
+}
+
+fn assert_scrubbed(input: &str, secret: &str) {
+    let out = redact(input);
+    assert!(
+        out.contains(MARK),
+        "nothing redacted in {input:?} -> {out:?}"
+    );
+    assert!(!out.contains(secret), "secret survived: {out:?}");
+}
+
+#[test]
+fn redacts_each_documented_provider_shape_alone() {
+    for (name, key) in provider_keys() {
+        assert_eq!(redact(&key), MARK, "{name}: {key}");
+    }
+}
+
+#[test]
+fn redacts_each_shape_inside_prose_json_urls_and_query_strings() {
+    for (name, key) in provider_keys() {
+        let wrappers = [
+            format!("using key {key} for the call"),
+            format!("{{\"credential\":\"{key}\",\"n\":1}}"),
+            format!("{{\"credential\": [\"{key}\"]}}"),
+            format!("https://api.example.test/v1/models?credential={key}&page=2"),
+            format!("https://api.example.test/{key}/models"),
+            format!("error: provider rejected '{key}': 401"),
+            format!("({key})"),
+            format!("<{key}>"),
+        ];
+        for input in &wrappers {
+            let out = redact(input);
+            assert!(!out.contains(&key), "{name}: survived in {out:?}");
+            assert!(out.contains(MARK), "{name}: {out:?}");
+        }
+    }
+}
+
+#[test]
+fn keeps_the_surrounding_text_around_a_key() {
+    let key = format!("sk-or-v1-{}", fake(30, HEX, 64));
+    let out = redact(&format!(
+        "error: 401 for {key} at https://openrouter.test/api"
+    ));
+    assert_eq!(
+        out,
+        "error: 401 for [REDACTED] at https://openrouter.test/api"
+    );
+}
+
+#[test]
+fn redacts_bearer_tokens_and_authorization_headers() {
+    let jwt = format!(
+        "eyJ{}.eyJ{}.{}",
+        fake(40, B64URL, 30),
+        fake(41, B64URL, 40),
+        fake(42, B64URL, 43)
+    );
+    let opaque = fake(43, ALNUM, 24);
+    let cases = [
+        (
+            format!("curl -H 'Authorization: Bearer {jwt}' x"),
+            jwt.clone(),
+        ),
+        (format!("Authorization: Bearer {opaque}"), opaque.clone()),
+        (format!("authorization: bearer {opaque}"), opaque.clone()),
+        (format!("Authorization: Basic {opaque}=="), opaque.clone()),
+        (
+            format!("Proxy-Authorization: Token {opaque}"),
+            opaque.clone(),
+        ),
+        (
+            format!("{{\"Authorization\": \"Bearer {opaque}\"}}"),
+            opaque.clone(),
+        ),
+        (format!("sent Bearer {jwt} to the proxy"), jwt.clone()),
+        (
+            "Authorization: Bearer my-secret-token".to_string(),
+            "my-secret-token".to_string(),
+        ),
+    ];
+    for (input, secret) in &cases {
+        assert_scrubbed(input, secret);
+    }
+    assert_eq!(
+        redact(&format!("Authorization: Bearer {opaque}\nnext line")),
+        "Authorization: [REDACTED]\nnext line"
+    );
+    assert_eq!(
+        redact(&format!("x Bearer {opaque} y")),
+        "x Bearer [REDACTED] y"
+    );
+}
+
+#[test]
+fn redacts_secret_named_assignments() {
+    let long = fake(50, ALNUM, 20);
+    let cases = [
+        format!("OPENROUTER_API_KEY={long}"),
+        format!("export GITHUB_TOKEN={long}"),
+        format!("CLIENT_SECRET={long}"),
+        format!("DB_PASSWORD={long}"),
+        format!("api_key={long}"),
+        format!("--api-key={long}"),
+        format!("{{\"api_key\": \"{long}\"}}"),
+        format!("{{\"accessToken\":\"{long}\"}}"),
+        format!("password: \"{long}\""),
+        format!("x-api-key: {long}"),
+        format!("https://h.test/cb?access_token={long}&state=1"),
+        format!("{{\\\"api_key\\\":\\\"{long}\\\"}}"),
+        format!("password = '{long}'"),
+    ];
+    for input in &cases {
+        assert_scrubbed(input, &long);
+    }
+    assert_eq!(
+        redact("Config api_key=secretvalue"),
+        "Config api_key=[REDACTED]"
+    );
+    assert_eq!(
+        redact(&format!("https://h.test/cb?token={long}&state=1")),
+        "https://h.test/cb?token=[REDACTED]&state=1"
+    );
+}
+
+#[test]
+fn redacts_pem_private_key_blocks() {
+    let body = fake(60, B64URL, 64);
+    let pem = format!(
+        "before\n-----BEGIN RSA PRIVATE KEY-----\n{body}\n{body}\n-----END RSA PRIVATE KEY-----\nafter"
+    );
+    let out = redact(&pem);
+    assert_eq!(out, "before\n[REDACTED]\nafter");
+    assert_scrubbed("Certificate: -----BEGIN RSA PRIVATE KEY-----", "BEGIN");
+}
+
+#[test]
+fn leaves_digests_ids_and_evidence_fields_unchanged() {
+    let sha1 = fake(70, HEX, 40);
+    let sha256 = fake(71, HEX, 64);
+    let md5 = fake(72, HEX, 32);
+    let sha512 = fake(73, HEX, 128);
+    let upper_sha = sha256.to_ascii_uppercase();
+    let uuid = format!(
+        "{}-{}-4{}-a{}-{}",
+        fake(74, HEX, 8),
+        fake(75, HEX, 4),
+        fake(76, HEX, 3),
+        fake(77, HEX, 3),
+        fake(78, HEX, 12)
+    );
+    let samples = [
+        sha1.clone(),
+        sha256.clone(),
+        md5,
+        sha512,
+        upper_sha,
+        uuid.clone(),
+        format!("commit {sha1}\nAuthor: someone"),
+        format!(
+            "{{\"patch_sha256\":\"{sha256}\",\"commit_sha\":\"{sha1}\",\"priors_sha256\":\"{sha256}\"}}"
+        ),
+        format!("patch_sha256={sha256} commit_sha={sha1}"),
+        format!("sha256:{sha256}"),
+        format!("{}..{}", &sha1[..12], sha1),
+        format!("graph {uuid} task {uuid}"),
+        format!("index {}..{} 100644", &sha1[..7], &sha256[..7]),
+        format!("lattice:{sha256}:2:0"),
+    ];
+    for input in &samples {
+        assert_eq!(&redact(input), input);
+    }
+}
+
+#[test]
+fn leaves_prose_code_and_short_base64_unchanged() {
+    let samples = [
+        // base64 of short text ("hello world", "meshloop rocks!")
+        "aGVsbG8gd29ybGQ=",
+        "bWVzaGxvb3Agcm9ja3Mh",
+        "The task-1-attempt-3 worktree uses a bearer token from the keyring.",
+        "Authorization: required for this endpoint is described in docs",
+        "let token = parse_token(input);",
+        "let api_key: Option<String> = None;",
+        "pub struct Config { pub api_key: Option<String>, pub secret: SecretKind }",
+        "fn redact_secret_value(token: &Token) -> Result<SecretValue, TokenError>",
+        "if token == expected_token_value { return; }",
+        "authorization: Option<HeaderValue>,",
+        "self.api_key = config.api_key",
+        "def test_redacts_openai_key_after_key_equals_and_keeps_tail(self):",
+        "HashMapForTheConfigurationLoaderV2Builder::new()",
+        "SECRET_KEY_BASE=$RAILS_SECRET",
+        "error[E0308]: mismatched types\n --> crates/meshloop-adapters/src/redact.rs:20:5",
+        "target/debug/deps/meshloop_adapters-1a2b3c4d5e6f7890.d",
+        "_ZN4core3fmt5write17h2b7c3a9e1f0d4c6bE",
+        "sk-secret",
+        "ghp_ alone in prose",
+        "A key like sk-... is redacted",
+        "AKIA is the access key id prefix",
+        "C:\\x\\task-1-attempt-3\\crates",
+        "xoxb- tokens start like this",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    ];
+    for input in samples {
+        assert_eq!(redact(input), input, "false positive on {input:?}");
+    }
+}
+
+/// A key split by a line break is two words. The head keeps its provider prefix and is
+/// caught. The tail is caught only when it alone passes the generic rule (32+ chars of
+/// mixed classes); a hex tail of a digest length is indistinguishable from a digest and
+/// is not caught. Callers must not rely on redaction for wrapped keys.
+#[test]
+fn split_key_head_is_redacted_tail_only_when_high_entropy() {
+    let body = fake(80, B64URL, 80);
+    let key = format!("sk-proj-{body}");
+    let (head, tail) = key.split_at(40);
+    let out = redact(&format!("{head}\n{tail}"));
+    assert_eq!(out, "[REDACTED]\n[REDACTED]");
+
+    let hex = fake(81, HEX, 64);
+    let key = format!("sk-or-v1-{hex}");
+    let (head, tail) = key.split_at(key.len() - 32);
+    let out = redact(&format!("{head}\n{tail}"));
+    assert_eq!(out, format!("[REDACTED]\n{tail}"), "documented gap");
+}
+
+#[test]
+fn redaction_is_idempotent_on_generated_inputs() {
+    let fragments: Vec<String> = provider_keys()
+        .into_iter()
+        .map(|(_, k)| k)
+        .chain(
+            [
+                " ",
+                "\n",
+                "\"",
+                "'",
+                "=",
+                ":",
+                "&",
+                "?",
+                "/",
+                "[",
+                "]",
+                "{",
+                "}",
+                "-",
+                "_",
+                "KEY=",
+                "api_key=",
+                "token: ",
+                "Authorization: ",
+                "Bearer ",
+                "bearer ",
+                "-----BEGIN PRIVATE KEY-----",
+                "-----END PRIVATE KEY-----",
+                "[REDACTED]",
+                "error: boom",
+                "task-1",
+                "sk-",
+                "ghp_",
+                "AKIA",
+                "你",
+                "…",
+            ]
+            .map(str::to_string),
+        )
+        .chain([fake(90, HEX, 40), fake(91, HEX, 64), fake(92, B64URL, 33)])
+        .collect();
+    let mut rng = Rng(0x5EED_1830_0000_0001);
+    for _ in 0..2_000 {
+        let n = 1 + rng.below(12);
+        let input: String = (0..n)
+            .map(|_| fragments[rng.below(fragments.len())].as_str())
+            .collect();
+        let once = redact(&input);
+        let twice = redact(&once);
+        assert_eq!(once, twice, "not idempotent for {input:?}");
+    }
+}
+
+#[test]
+fn scrubbing_is_linear_on_adversarial_input() {
+    // Shapes that would make a backtracking or rescanning matcher quadratic.
+    let inputs = [
+        "sk-".repeat(200_000),
+        "a-".repeat(300_000),
+        "KEY ".repeat(150_000),
+        "Bearer ".repeat(100_000),
+        "-----BEGIN ".repeat(60_000),
+        "api_key=\"".repeat(60_000),
+        format!("Authorization:{}", " ".repeat(600_000)),
+    ];
+    let start = std::time::Instant::now();
+    for input in &inputs {
+        let _ = redact(input);
+    }
+    // Generous bound: linear work over ~4 MB is milliseconds; quadratic is hours.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+}

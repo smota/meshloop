@@ -108,10 +108,13 @@ operator's files and credentials, the operator's own nodecode organism and its h
 - **Kernel attack surface.** No seccomp filter is installed. The sandbox relies on
   unprivileged user namespaces and the kernel's enforcement of mounts and namespaces.
 - **Output content beyond the exact key.** Whatever the worker prints is stored as
-  evidence. The driver scrubs only the exact value of the bound key; meshloop's own pattern
-  redaction of harness output misses common provider key formats ([#183](https://github.com/smota/meshloop/issues/183)).
-  A key the model splits, encodes or writes into a file of the worktree is not caught,
-  and neither is any other secret the worker can read.
+  evidence. The driver scrubs the exact value of the bound key, and meshloop's own
+  redaction of harness output replaces the documented provider key shapes (OpenAI,
+  OpenRouter, Anthropic, Google, GitHub, Slack, AWS key ids), bearer and `Authorization`
+  credentials, secret-named assignments and long high-entropy tokens
+  ([#183](https://github.com/smota/meshloop/issues/183)). It is pattern-based: a key the
+  model splits across lines, encodes or writes into a file of the worktree is not reliably
+  caught, and neither is a secret that does not have a known shape.
 - **The prompt file path** ([#180](https://github.com/smota/meshloop/issues/180)).
   meshloop writes `.meshloop-prompt-<attempt>` into the worktree on the host before the
   worker starts. If a symlink stands at that path, the host-side write follows it. This

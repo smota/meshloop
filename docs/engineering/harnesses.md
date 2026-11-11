@@ -167,6 +167,11 @@ Meshloop treats any non-zero exit as a failed attempt. The attempt's stdout evid
 the assistant's messages, one `nodecode-turn: usage PROVIDER/MODEL input N output N
 cost_usd X` line per model call, and a final `nodecode-turn: <outcome>` line. The exact
 value of the bound key is replaced by `[redacted]` in stdout, stderr and the raw log.
+Meshloop then applies its own redaction to every harness's stdout and stderr before
+storing them (`meshloop_adapters::redact`, #183): documented provider key shapes, bearer
+and `Authorization` credentials, secret-named assignments (`API_KEY=…`, `"token": "…"`)
+and long high-entropy tokens become `[REDACTED]`. Commit SHAs, sha256 digests and UUIDs
+are kept. A key split across lines or encoded is not reliably caught.
 
 The probe goes through the wrapper (`version_args = ["--version"]`, plus `--nodecode`
 when the operator names a private copy). It runs `nodecode --version` inside the sandbox
