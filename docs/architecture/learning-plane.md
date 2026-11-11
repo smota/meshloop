@@ -102,12 +102,13 @@ Each field is listed as required for `inspect_attempts` in `contract.json`.
 |---|---|---|
 | `dispatch_mode` | `"subprocess"` | A domain `DispatchMode` enum, read with an exhaustive `match`. Today it has the single variant `Subprocess`, because the binary has one dispatch path. When #147 adds `Native`, the match fails to compile until the value is read from the attempt row's mode column. #147 must not merge without that change. |
 | `check_result` | `"passed"`, `"failed"` or `null` | The attempt's final deterministic-result event. `DeterministicChecksPassed` or `VerifyGatePassed` gives `passed`; `DeterministicChecksFailed` gives `failed`. Anything else gives `null`, including a crash, a timeout, a cancellation, or a result whose append was refused (#167). |
-| `model_passed` | `true`, `false` or `null` | A new nullable `attempts.model_passed` column, written when the attempt row is created for every attempt. It is true when the harness's `invoke_args_template` substitutes `{model_ref}` (`config.rs:156`, `harness.rs:100`). Rows written before #139 hold `null`. |
+| `model_passed` | `true`, `false` or `null` | A new nullable `attempts.model_passed` column, written when the attempt row is created for every attempt. It is true when the harness's `invoke_args_template` substitutes `{model_ref}` (`config.rs:156`, `harness.rs:100`). Rows written before #139 hold `null`. Write-once: attempt upserts keep it with `COALESCE(attempts.model_passed, excluded.model_passed)`. |
 
 A column on `attempts` is the least invasive place that is written for every attempt. The
 other new tables are written only while priors are in effect.
 
-An older binary returns attempt JSON without these fields. The fold treats that as an
+An older binary refuses a schema-v9 store outright; against an older store it returns
+attempt JSON without these fields. The fold treats either as an
 error and fails closed: it writes no proposal and says why.
 
 ### What counts as evidence
@@ -141,6 +142,8 @@ posts.
    `select` call (`router.rs:204`) from a single read of the latest ledger row, and may
    cache it by row sequence number. `None` means `oracle: None`, as today
    (`run_loop.rs:1554`).
+   The snapshot drops every entry listed in the ledger row's ignored JSON (decided at
+   `accept`), plus every entry the loader ignores; routing never re-resolves provenance.
 2. **Derive π.** For each surviving entry, the kernel computes
    π = (successes + 1) / (attempts + 2). The result is never 0 or 1.
 3. **Look up the arm.** The priors oracle implements `PredictiveSuccessOracle`
@@ -239,7 +242,8 @@ used, because its rows are graph and task transitions (`schema.rs:19-31`).
 **`advisory_routing`.** Columns: `attempt_id PRIMARY KEY REFERENCES attempts`,
 `priors_sha256 NOT NULL` and `changed_top BOOLEAN NOT NULL`. A row is written in the same
 transaction as the attempt row, and only while priors are in effect. `changed_top` is true
-when the rank-1 candidate differs from the one `select` returns with the oracle off. This
+when the candidate `dispatch_ready` dispatches differs from the one it would dispatch with
+the oracle off (already-spent candidates excluded in both cases). This
 lets #140 check that an effect is "traceable". It is never an Evidence row.
 
 **`attempts.model_passed`.** The nullable column described above.
@@ -296,7 +300,8 @@ tests, which run in the cell's own suite.
 2. For any π and n, |fused − μ_local| ≤ 0.25.
 3. Without a promoted row, routing order is byte-identical, and so are the plan,
    review-plan and run outputs. This holds with no row, with a revoked row, and with a
-   proposal file present but not promoted. The baseline tests pass unmodified.
+   proposal file present but not promoted. The routing and planning tests pass unmodified
+   (store schema-version asserts change with the v9 bump).
 4. A zero-budget spend ledger does not turn the priors off.
 
 **Evidence and exclusions**
@@ -325,7 +330,7 @@ tests, which run in the cell's own suite.
 13. `accept` reads F once. Changing F after `accept` has no effect.
 14. Routing uses one snapshot per `select` call.
 15. `UPDATE` and `DELETE` on `advisory_promotions` are refused.
-16. `provenance_contradicts` ignores the entry and is recorded in the ledger row.
+16. `provenance_contradicts` ignores the entry and is recorded in the ledger row, and the entry is never applied when routing.
 17. `--as` validation rejects each bad form.
 18. An `advisory_routing` row is written only while priors are in effect, and
     `changed_top` is correct.

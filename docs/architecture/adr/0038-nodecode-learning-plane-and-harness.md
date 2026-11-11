@@ -4,9 +4,9 @@
 - Accepted date: 2026-11-10
 - Implementation: not-started
 - Date: 2026-11-10
-- Amended: 2026-11-10 (#134); 2026-11-10 (#139, advisory input contract: Proposed — pending review)
+- Amended: 2026-11-10 (#134); 2026-11-10 (#139, advisory input contract: Accepted 2026-11-11)
 - Author/executor: Claude (builder sub-agent)
-- Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039
+- Reviewer: fresh-context Claude architecture review (opus), round 1 accept with changes (all applied), round 2 ACCEPT; reviewed jointly with ADR 0039. #139 amendment: fresh-context Claude architecture review (opus), round 1 accept with changes (9 majors, applied), round 2 accept after one sentence (N1, applied by the coordinator)
 - Decision owner: Samuel
 - Approval evidence: accepted 2026-11-10 by the coordinator (Claude) under authority delegated by the repository owner, who waived human approvals for goal #132 ([claim comment](https://github.com/smota/meshloop/issues/132#issuecomment-6770755409)). No human read this record before acceptance.
 - Supersedes: none
@@ -166,7 +166,7 @@ nodecode is refused until #152 proves it and the containment rule of this record
 
 ### Amendment 2026-11-10 (#139): advisory input contract
 
-**Proposed — pending review.** It freezes the "Advisory input" outline above before any
+**Accepted 2026-11-11** by the coordinator (Claude) under authority delegated by the repository owner; no human read this amendment before acceptance. It freezes the "Advisory input" outline above before any
 kernel code is written. The record's Accepted status is unchanged. Names may be refined
 in the build; the rules may not. Mechanism, code references and tests are in
 [learning-plane.md](../learning-plane.md#advisory-input-139). The file format is
@@ -227,7 +227,7 @@ in the build; the rules may not. Mechanism, code references and tests are in
    - **Ledger.** The ledger is append-only: triggers abort any UPDATE or DELETE.
    - **Identity.** `--as` is required. It is rejected when empty, when it starts with
      `-`, when it contains control characters, or when it is over 128 bytes.
-   - **Routing.** Each `select` call reads one snapshot of the latest row.
+   - **Routing.** Each `select` call reads one snapshot of the latest row. The snapshot drops every entry listed in the row's ignored JSON, plus every entry the loader ignores. Routing never re-resolves provenance; the decision made at accept is final.
    - **Read-only.** `meshloop priors show|check` only read.
    - **Cell.** The cell never promotes. Its `:tool` veto refuses `priors accept` and
      `priors revoke` but not `show` or `check`. No MCP tool promotes.
