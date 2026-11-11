@@ -511,27 +511,40 @@ resume, accept, cancel and status then project onto the repository's board
          (rest (format nil "~{~a~^ ~}" (rest words))))
     (if (null words)
         (values +usage+ (panel))
-        (after-command
-         verb (rest words)
-         (cond ((string= verb "doctor") (doctor-of session-id rest))
-               ((string= verb "status") (view-of "status" session-id rest))
-               ((string= verb "inspect") (view-of "inspect" session-id rest))
-               ((string= verb "report") (report-of session-id rest))
-               ((string= verb "hook-check") (hook-check-of (after-first-word args)))
-               ((string= verb "board-sync") (board-sync-of session-id rest))
-               ((string= verb "learn") (learn-of session-id rest))
-               ((string= verb "priors") (priors-of session-id rest))
-               ((string= verb "priors-check") (priors-of session-id (format nil "check ~a" rest)))
-               ((string= verb "plan") (plan-of session-id rest))
-               ((string= verb "review-plan") (review-plan-of session-id rest))
-               ((string= verb "run") (run-plan-of session-id rest))
-               ((string= verb "resume") (resume-of session-id rest))
-               ((string= verb "cancel") (cancel-of session-id rest))
-               ((string= verb "accept") (accept-of session-id rest))
-               ((string= verb "integrate") (integrate-of session-id rest))
-               (t (format nil "meshloop: ~s is no verb here; ~a" (nlk:one-line verb :cap 40)
-                          (subseq +usage+ (length "meshloop: ")))))
-         session-id))))
+        (guarded
+         verb
+         (lambda ()
+           (after-command
+             verb (rest words)
+             (cond ((string= verb "doctor") (doctor-of session-id rest))
+                   ((string= verb "status") (view-of "status" session-id rest))
+                   ((string= verb "inspect") (view-of "inspect" session-id rest))
+                   ((string= verb "report") (report-of session-id rest))
+                   ((string= verb "hook-check") (hook-check-of (after-first-word args)))
+                   ((string= verb "board-sync") (board-sync-of session-id rest))
+                   ((string= verb "learn") (learn-of session-id rest))
+                   ((string= verb "priors") (priors-of session-id rest))
+                   ((string= verb "priors-check") (priors-of session-id (format nil "check ~a" rest)))
+                   ((string= verb "plan") (plan-of session-id rest))
+                   ((string= verb "review-plan") (review-plan-of session-id rest))
+                   ((string= verb "run") (run-plan-of session-id rest))
+                   ((string= verb "resume") (resume-of session-id rest))
+                   ((string= verb "cancel") (cancel-of session-id rest))
+                   ((string= verb "accept") (accept-of session-id rest))
+                   ((string= verb "integrate") (integrate-of session-id rest))
+                   (t (format nil "meshloop: ~s is no verb here; ~a" (nlk:one-line verb :cap 40)
+                              (subseq +usage+ (length "meshloop: ")))))
+             session-id))))))
+
+(defun guarded (verb thunk)
+  "THUNK's answer, or one line when anything in it signals: a /meshloop command
+that fails answers `meshloop VERB: failed: ...' and the cell keeps running.
+Each command already answers its own refusals (ANSWERING); this is the
+backstop for whatever escapes one, the Board sync after it included."
+  (handler-case (funcall thunk)
+    (error (condition)
+      (format nil "meshloop ~a: failed: ~a" (nlk:one-line verb :cap 40)
+              (nlk:one-line condition :cap (* 3 *text-cap*))))))
 
 ;;; --- the declaration --------------------------------------------------------------
 

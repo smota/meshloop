@@ -400,8 +400,12 @@ __ segment a gated verb (mcp__meshloop__accept)."
   "The :TOOL point. OP is (:name TOOL :arguments HASH :call-id ID). A call that
 runs accept, review-plan, integrate, priors accept or priors revoke answers a
 refusal, recorded as the call's failure, and NEXT never runs; every other call
-runs as it would."
-  (let ((reason (gated-call (getf op :name) (getf op :arguments))))
+runs as it would. A fault in the reading itself never escapes the hook: the
+call is refused, failing closed, with one line saying so."
+  (let ((reason (handler-case (gated-call (getf op :name) (getf op :arguments))
+                  (error (condition)
+                    (format nil "the veto could not read the call (~a), so it is refused"
+                            (nlk:one-line condition :cap *text-cap*))))))
     (if reason
         (nle:failure
          (format nil "ERROR: refused by nodecode-meshloop: ~a. Accept, review-plan, integrate, ~

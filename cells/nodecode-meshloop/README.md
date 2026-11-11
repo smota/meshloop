@@ -240,7 +240,10 @@ call when one of them runs `meshloop accept`, `review-plan`, `integrate`, `prior
   `find-package` or `in-package` naming its package.
 
 The meshloop binary takes its verb as the first argument and refuses a flag there, so moving
-the verb after flags is no way around the veto. The refusal is recorded as the call's failure.
+the verb after flags is no way around the veto. The refusal is recorded as the call's failure. A fault in the veto's own reading never escapes the hook:
+the call is refused (failing closed) with one line saying so. Likewise every `/meshloop`
+command answers one line when anything in it fails, the Board sync after it included; the
+cell keeps running.
 
 This is defence in depth, not a security boundary. The organism's eval has the operator's full
 host authority. A call can build the command from pieces or reach meshloop another way, and
@@ -505,7 +508,10 @@ list. To read a new field, add it to `contract.json` first.
   its mention and wakes no one. A restarted cell posts nothing again, and a cursor kept on
   another ledger id resets and says so. The
   throwaway home has no model, so a woken turn ends at once ("no model is chosen yet")
-  with no model call: the wake is delivered and nothing is spent. It never touches the
+  with no model call: the wake is delivered and nothing is spent. The throwaway config turns nodecode's own updates off (`"update": {"mode": "off"}`): an
+  installed build otherwise takes a newer release mid-test, stops every cell and re-execs on
+  another port, so the pinned release would not stay the one tested; the test checks that
+  nodecode neither updated nor restarted. It never touches the
   operator's nodecode home. `--work` must sit inside the repository's
   `.agent-runs/`, the temp directory or `$RUNNER_TEMP`; it is removed when every check
   passes.

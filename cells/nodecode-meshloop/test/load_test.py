@@ -222,7 +222,13 @@ class Organism:
 
 
 def write_config(home, section):
-    (home / ".nodecode" / "config.jsonc").write_text(json.dumps({"meshloop": section}, indent=2) + "\n")
+    """The throwaway home's config: the meshloop SECTION, and nodecode's own
+    updates off. An installed build updates itself by default (`update' mode
+    auto): mid-test it would take the newest release, stop every cell and
+    re-exec on another port, so a pinned release would not stay the one
+    tested (seen on PR #179: 98dd6dc80 became cef1be5a3 during integrate)."""
+    config = {"update": {"mode": "off"}, "meshloop": section}
+    (home / ".nodecode" / "config.jsonc").write_text(json.dumps(config, indent=2) + "\n")
 
 
 def processes_in(path):
@@ -1178,6 +1184,12 @@ def main():
         after_off = run([str(meshloop), "status", "--json"], repo)
         check("meshloop CLI answers as before with the cell off", after_off.stdout == cli_status)
         check("still no write after switching off", snapshot(repo) == before)
+        serve_log = (work / "serve.log").read_text(errors="replace")
+        check(
+            "nodecode neither updated nor restarted itself during the test",
+            "restart:" not in serve_log,
+            [line for line in serve_log.splitlines() if "restart" in line],
+        )
     finally:
         organism.stop()
 

@@ -158,6 +158,7 @@
               (:object (and (hash-table-p value) value))
               (:array (and (vectorp value) (not (stringp value)) value)))
             present)))
+(defun nle::failure (text) (list :failure text))
 (defun nlk::json-array (object &rest path)
   (or (apply #'nlk::json-value object :array path) #()))
 (defun nlk::one-line (value &key cap (ellipsis "..."))
@@ -738,6 +739,31 @@ define-cell) are nodecode's and are only read.")
 (pure-test::check "veto lets MCP priors show and another server's priors_accept through"
                   (notany (lambda (name) (gated-call name (make-hash-table)))
                           '("mcp__meshloop__priors_show" "mcp__meshloop__priors_check" "mcp__github__priors_accept")))
+
+;;; A fault never kills the cell: the :tool hook fails closed in one line, and a
+;;; /meshloop command answers one line, whatever escapes it.
+(let ((original (fdefinition 'gated-call)) (reached nil))
+  (unwind-protect
+       (progn
+         (setf (fdefinition 'gated-call) (lambda (&rest x) (declare (ignore x)) (error "boom in the reading")))
+         (let ((answer (veto-gated-calls (list :name "eval" :arguments (make-hash-table) :call-id "c")
+                                         (lambda (op) (declare (ignore op)) (setf reached t) "ran"))))
+           (pure-test::check "veto: a fault in its reading refuses the call in one line, never signals, never runs it"
+                             (and (not reached) (eq :failure (first answer))
+                                  (search "the veto could not read the call (boom in the reading), so it is refused" (second answer)))
+                             answer)))
+    (setf (fdefinition 'gated-call) original)))
+(pure-test::check "guarded: an answer passes through, a fault is one line"
+                  (and (equal "ok" (guarded "x" (lambda () "ok")))
+                       (equal "meshloop integrate: failed: boom" (guarded "integrate" (lambda () (error "boom"))))))
+(let ((original (fdefinition 'after-command)))
+  (unwind-protect
+       (progn
+         (setf (fdefinition 'after-command) (lambda (&rest x) (declare (ignore x)) (error "the sync after it broke")))
+         (let ((answer (run-slash "doctor" "s-X")))
+           (pure-test::check "run-slash: a fault after the command (the Board sync) is one line, not a dead cell"
+                             (equal answer "meshloop doctor: failed: the sync after it broke") answer)))
+    (setf (fdefinition 'after-command) original)))
 
 ;;; Read from the source: learn asks meshloop only for read verbs, and for priors
 ;;; only show and check; no source runs priors accept or revoke.
