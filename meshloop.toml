@@ -63,14 +63,18 @@ model_tier = "top"
 kind = "claude"
 executable = "claude"
 # 2.1.316 (Claude Code). `claude --help` shows `-p, --print` ("Print response and
-# exit") and argument `prompt` ("Your prompt"). Live dispatch was not run.
+# exit") and argument `prompt` ("Your prompt"). Print mode has nobody to answer a
+# permission prompt, so without a permission mode the worker cannot write files
+# (`meshloop doctor` warns). `--permission-mode acceptEdits` auto-accepts file edits;
+# `--permission-prompts none` (2.1.322) denies anything else that would prompt, so Bash
+# and other tools stay denied. No `--dangerously-skip-permissions`. See harnesses.md.
 prompt_via = "arg"
-invoke_args_template = ["--print", "{prompt}"]
+invoke_args_template = ["--permission-mode", "acceptEdits", "--permission-prompts", "none", "--print", "{prompt}"]
 model_ref = "claude"
 model_tier = "top"
 # Model example (2.1.322: `claude --help` shows `--model <model>`, an alias such as
 # `sonnet` or a full model name). Replace the three lines above with:
-# invoke_args_template = ["--print", "--model", "{model_ref}", "{prompt}"]
+# invoke_args_template = ["--permission-mode", "acceptEdits", "--permission-prompts", "none", "--print", "--model", "{model_ref}", "{prompt}"]
 # models = [{ model_ref = "sonnet", model_tier = "mid" }, { model_ref = "opus", model_tier = "top" }]
 
 [harnesses.codex]

@@ -433,7 +433,14 @@ mod tests {
         assert_eq!(config.harnesses["claude"].prompt_via, "arg");
         assert_eq!(
             config.harnesses["claude"].invoke_args_template,
-            vec!["--print", "{prompt}"]
+            vec![
+                "--permission-mode",
+                "acceptEdits",
+                "--permission-prompts",
+                "none",
+                "--print",
+                "{prompt}"
+            ]
         );
         assert_eq!(config.harnesses["codex"].prompt_via, "stdin");
         assert_eq!(

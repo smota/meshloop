@@ -95,7 +95,7 @@ defaults, and live dispatch was not run.
 |---|---|---|---|
 | codex | `codex-cli 0.167.0` | `codex exec --help`: `-m, --model <MODEL>` "Model the agent should use" | `["exec", "--model", "{model_ref}", "-"]` with `prompt_via = "stdin"` |
 | grok | `grok 1.0.77 (50ca579fa996) [stable]` | `grok --help`: `-m, --model <MODEL>` "Model ID to use"; `grok models` lists IDs | `["--model", "{model_ref}", "--prompt-file", "{prompt_file}"]` |
-| claude | `2.1.322 (Claude Code)` | `claude --help`: `--model <model>` "Model for the current session", an alias or a full name | `["--print", "--model", "{model_ref}", "{prompt}"]` with `prompt_via = "arg"` |
+| claude | `2.1.322 (Claude Code)` | `claude --help`: `--model <model>` "Model for the current session", an alias or a full name | `["--permission-mode", "acceptEdits", "--permission-prompts", "none", "--print", "--model", "{model_ref}", "{prompt}"]` with `prompt_via = "arg"` |
 
 For example:
 
@@ -318,3 +318,36 @@ and reports one line that also names the containment, so `meshloop doctor --json
 for example, `nodecode 0.1.14+cef1be5a3 (contained: meshloop-nodecode-sandbox,
 bubblewrap 0.11.1)`. A probe without bwrap or user namespaces fails, and the harness is
 reported unsupported.
+
+## Claude print mode and permissions
+
+`claude --print` runs one non-interactive turn, so nobody can answer a permission
+prompt, and a worker without a permission mode cannot write files. The shipped
+`[harnesses.claude]` template (`meshloop.toml`, `config/meshloop.example.toml`) is:
+
+```toml
+prompt_via = "arg"
+invoke_args_template = ["--permission-mode", "acceptEdits", "--permission-prompts", "none", "--print", "{prompt}"]
+```
+
+- `--permission-mode acceptEdits` auto-accepts file edits (the attempt worktree is the
+  worker's cwd).
+- `--permission-prompts none` (`claude --help`, 2.1.322) denies automatically anything
+  that would still prompt, such as Bash and other shell tools. That is desirable: the
+  worker edits files but runs no arbitrary shell. Verification belongs to `[verify]`.
+- `--dangerously-skip-permissions` is deliberately not used.
+
+`meshloop doctor` (text and `--json`) warns "claude in print mode cannot write files
+without a permission mode; see harnesses.md" when a selected harness whose executable
+basename is `claude` uses `--print`/`-p` with neither `--permission-mode` nor
+`--permission-prompt-tool` in `invoke_args_template`. The check reads config only.
+
+### Live check (2026-11-11)
+
+`claude` 2.1.322 (Claude Code), meshloop built from this branch, a disposable git repo
+with `selected_harnesses = ["claude"]` and the template above, one task ("append a line
+to notes.txt"). `review-plan --accept --as claude-coordinator`, `run`, `accept`,
+`resume` and `integrate --into main --accept-integrate` all completed: the worker
+appended `hello from claude` and the commit landed on `main`. The deny-on-prompt path
+for Bash was not exercised live; it rests on the documented `--permission-prompts none`
+behaviour.

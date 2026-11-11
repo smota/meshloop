@@ -893,6 +893,37 @@ const PRIORS_NOT_IN_EFFECT_WARNING: &str =
     "a priors ledger row exists but no priors are in effect; see `meshloop priors show`";
 const PRIORS_UNREADABLE_WARNING: &str =
     "the store could not be read to check advisory priors; see `meshloop priors show`";
+const CLAUDE_PRINT_NO_PERMISSION_WARNING: &str =
+    "claude in print mode cannot write files without a permission mode; see harnesses.md";
+
+/// Whether a selected harness runs the `claude` CLI in print mode (`--print`/`-p`)
+/// without `--permission-mode` or `--permission-prompt-tool` (issue #163). Such a worker
+/// cannot write files: print mode has nobody to answer the permission prompt.
+fn claude_print_without_permission(cfg: &crate::config::Config) -> bool {
+    cfg.selected_harnesses.iter().any(|name| {
+        let Some(hc) = cfg.harnesses.get(name) else {
+            return false;
+        };
+        let base = hc
+            .executable
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if base.strip_suffix(".exe").unwrap_or(&base) != "claude" {
+            return false;
+        }
+        let has = |flag: &str| {
+            hc.invoke_args_template
+                .iter()
+                .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+        };
+        (has("--print") || has("-p"))
+            && !has("--permission-mode")
+            && !has("--permission-prompt-tool")
+    })
+}
+
 const NO_PLANNER_WARNING: &str = "no dispatchable harness can run the planner; see data.planner and set [planner] harness or tier";
 const UNCONTAINED_VERIFY_WARNING: &str = "a selected harness runs under containment, but verify_command runs on the host with the operator's authority and executes worker-written code; set [verify] runner (docs/engineering/nodecode-containment.md#contained-verification)";
 const RUNNER_MISSING_WARNING: &str =
@@ -3043,6 +3074,9 @@ fn cmd_doctor(
             Ok(cfg) => {
                 if cfg.verify.verify_command.is_empty() {
                     warnings.push(EMPTY_VERIFY_WARNING);
+                }
+                if claude_print_without_permission(&cfg) {
+                    warnings.push(CLAUDE_PRINT_NO_PERMISSION_WARNING);
                 }
                 let rows = doctor_probe(&cfg);
                 verify = doctor_verify(&cfg, &rows, &mut warnings);
