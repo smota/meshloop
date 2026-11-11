@@ -359,6 +359,11 @@ fn redaction_is_idempotent_on_generated_inputs() {
                 "KEY=",
                 "api_key=",
                 "token: ",
+                "://",
+                "u:p@",
+                "auth: Bearer ",
+                "--auth ",
+                "https://",
                 "Authorization: ",
                 "Bearer ",
                 "bearer ",
@@ -375,7 +380,13 @@ fn redaction_is_idempotent_on_generated_inputs() {
             ]
             .map(str::to_string),
         )
-        .chain([fake(90, HEX, 40), fake(91, HEX, 64), fake(92, B64URL, 33)])
+        .chain([
+            fake(90, HEX, 40),
+            fake(91, HEX, 64),
+            fake(92, B64URL, 33),
+            format!("ghp_{}:x@", fake(93, ALNUM, 36)),
+            fake(94, ALNUM, 20),
+        ])
         .collect();
     let mut rng = Rng(0x5EED_1830_0000_0001);
     for _ in 0..2_000 {
@@ -668,5 +679,60 @@ fn key_name_suffix_needs_a_name_boundary() {
         "x-api-key=abcdefgh",
     ] {
         assert!(redact(hit).ends_with("=[REDACTED]"), "{hit}");
+    }
+}
+
+#[test]
+fn redacts_a_token_used_as_the_url_username() {
+    let ghp = format!("ghp_{}", fake(170, ALNUM, 36));
+    assert_eq!(
+        redact(&format!(
+            "git clone https://{ghp}:x-oauth-basic@github.com/o/r.git"
+        )),
+        "git clone https://[REDACTED]:[REDACTED]@github.com/o/r.git"
+    );
+    let proj = format!("sk-proj-{}", fake(171, B64URL, 60));
+    assert_eq!(
+        redact(&format!("https://{proj}:@api.example.test/")),
+        "https://[REDACTED]:@api.example.test/"
+    );
+    assert_eq!(
+        redact(&format!("https://{ghp}@github.com/o/r.git")),
+        "https://[REDACTED]@github.com/o/r.git"
+    );
+    assert_eq!(
+        redact("https://plain-user:pw123456@h.test/x"),
+        "https://plain-user:[REDACTED]@h.test/x"
+    );
+}
+
+#[test]
+fn redacts_scheme_credentials_after_key_named_values() {
+    let token = fake(180, ALNUM, 20);
+    for prefix in [
+        "auth: Bearer ",
+        "X-Auth: Bearer ",
+        "--auth Bearer ",
+        "token: Bearer ",
+        "proxy_auth: Bearer ",
+        "password: Basic ",
+    ] {
+        assert_eq!(
+            redact(&format!("{prefix}{token}")),
+            format!("{prefix}[REDACTED]"),
+            "{prefix}"
+        );
+    }
+    assert_eq!(
+        redact(&format!("api_key: $X Authorization: Bearer {token}")),
+        "api_key: $X Authorization: [REDACTED]"
+    );
+    for keep in [
+        "warning: Key: 'Bearer'",
+        "error: auth: AuthenticationFailedForUser",
+        "error: token: InvalidTokenFormatError",
+        "pwd: /home/u/code",
+    ] {
+        assert_eq!(redact(keep), keep);
     }
 }

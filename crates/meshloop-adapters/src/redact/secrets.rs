@@ -16,19 +16,31 @@
 //!
 //! - A *hit* replaces what the rule read and moves `i` past it, so those bytes are
 //!   never read again.
-//! - A *context miss* (a secret-named key, `Bearer` or `Authorization` whose value
-//!   does not qualify) records how far it read in `no_context_until`. Words that
-//!   start before that offset skip the context rules, so a value run such as
-//!   `token=$token=$token=$…` is read by one context rule, not by one per key word
-//!   inside it. The remaining rules on those words read only the word itself.
+//! - A *miss* moves `i` only to the end of the word, so the bytes the rule read
+//!   after it are read again as later words. Each rule's read after a word is
+//!   bounded so that these reads overlap at most a constant number of times:
+//!   - Secret-named keys read one blank run, one separator (`=` or `:`), and one
+//!     value. An unquoted value stops at the next `=` or `:` (plus `=` padding), so
+//!     in `token=$token=$…` each key reads only up to the next separator, and every
+//!     byte is in at most two such reads. A quoted value stops at the next quote,
+//!     backslash or newline, and no other key's quoted read can start inside it
+//!     (it holds no quote). A `--flag VALUE` value is an unquoted value.
+//!   - `Bearer` reads one blank run and the token run after it. A later `Bearer`
+//!     with a blank after it cannot start inside that token run (token runs hold
+//!     no blanks), so these reads are disjoint.
+//!   - `Authorization` reads blanks, `:`, blanks, an optional quote and one token
+//!     run (no `:` inside); a later `Authorization` inside that run is the run
+//!     itself, and its read starts after it.
+//!   - A scheme word as a key's value (`auth: Bearer x`) adds one blank run and
+//!     one token run, with the same disjointness as `Bearer`.
 //! - The PEM search for `-----END` runs at most once without a match and is then
 //!   skipped; a match is a hit. The `scheme://userinfo@` scan stops at the next `/`,
 //!   so consecutive scans read disjoint bytes, and it is capped in length.
 //! - Rules that peek at the next word (JWT segments) read at most one extra word.
 //!
 //! A second pass over the output reads each maximal base64 run once (see
-//! [`scrub_b64_runs`]). Each byte is therefore read a constant number of times. There is no
-//! backtracking and no retry from inside a word.
+//! [`scrub_b64_runs`]). Each byte is therefore read a constant number of times.
+//! There is no backtracking and no retry from inside a word.
 
 /// Replacement text. Its brackets are not word bytes, so a second pass sees the
 /// bare word `REDACTED`, which matches no rule (idempotency).
@@ -142,21 +154,10 @@ const HEX_MIN_BITS: f64 = 3.0;
 /// `commit_sha` and `priors_sha256` evidence fields.
 const HEX_DIGEST_LENS: &[usize] = &[32, 40, 56, 64, 96, 128];
 
-/// Result of a context rule at one word.
-enum Context {
-    /// The word opens no context.
-    None,
-    /// Replace `start..end`.
-    Hit(usize, usize),
-    /// The value did not qualify; the rule read up to this offset.
-    Miss(usize),
-}
-
 pub(super) fn scrub(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut no_pem_end = false;
-    let mut no_context_until = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         if !is_word_byte(bytes[i]) {
@@ -166,7 +167,11 @@ pub(super) fn scrub(input: &str) -> String {
                 continue;
             }
             if let Some((pw_start, pw_end)) = url_password(input, i) {
-                out.push_str(&input[i..pw_start]);
+                // The username can itself be a token (`https://ghp_…:x@host`):
+                // its words get the key-shape rules, then the password is replaced.
+                out.push_str("://");
+                push_words_scrubbed(&mut out, &input[i + 3..pw_start - 1]);
+                out.push(':');
                 out.push_str(MARK);
                 i = pw_end;
                 continue;
@@ -204,23 +209,33 @@ pub(super) fn scrub(input: &str) -> String {
             i = end;
             continue;
         }
-        if i >= no_context_until {
-            let opener = i.checked_sub(1).map(|p| bytes[p]).filter(|b| is_quote(*b));
-            match context_value(input, end, word, opener) {
-                Context::Hit(value_start, value_end) => {
-                    out.push_str(&input[i..value_start]);
-                    out.push_str(MARK);
-                    i = value_end;
-                    continue;
-                }
-                Context::Miss(read_to) => no_context_until = read_to,
-                Context::None => {}
-            }
+        let opener = i.checked_sub(1).map(|p| bytes[p]).filter(|b| is_quote(*b));
+        if let Some((value_start, value_end)) = context_value(input, end, word, opener) {
+            out.push_str(&input[i..value_start]);
+            out.push_str(MARK);
+            i = value_end;
+            continue;
         }
         out.push_str(word);
         i = end;
     }
     scrub_b64_runs(&out)
+}
+
+/// Copies ASCII `text`, replacing each word with a key shape.
+fn push_words_scrubbed(out: &mut String, text: &str) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = if is_word_byte(bytes[i]) {
+            run_end(bytes, i, is_word_byte)
+        } else {
+            i + 1
+        };
+        let piece = &text[i..end];
+        out.push_str(if is_secret_word(piece) { MARK } else { piece });
+        i = end;
+    }
 }
 
 /// Second pass: maximal `[A-Za-z0-9+/_-]` runs (plus `=` padding) that join words
@@ -328,9 +343,12 @@ fn url_password(input: &str, i: usize) -> Option<(usize, usize)> {
     if stop >= limit || bytes[stop] != b'@' {
         return None;
     }
+    if has_mark(&input[from..stop]) {
+        return None;
+    }
     let colon = bytes[from..stop].iter().position(|b| *b == b':')?;
     let start = from + colon + 1;
-    (start < stop && !input[start..].starts_with(MARK)).then_some((start, stop))
+    (start < stop).then_some((start, stop))
 }
 
 /// `-----BEGIN …` through the matching `-----END …-----`. With no END after it,
@@ -420,7 +438,15 @@ fn is_secret_b64_run(run: &str) -> bool {
         && is_high_entropy(run.trim_end_matches('='))
 }
 
-fn context_value(input: &str, word_end: usize, word: &str, opener: Option<u8>) -> Context {
+/// The secret value after `word`, when it opens a context. A rule's decision
+/// depends only on the bytes after the word, never on earlier text, so a second
+/// pass over the output decides the same (idempotency).
+fn context_value(
+    input: &str,
+    word_end: usize,
+    word: &str,
+    opener: Option<u8>,
+) -> Option<(usize, usize)> {
     let result = if word.eq_ignore_ascii_case("bearer") {
         bearer_token(input, word_end)
     } else if ends_with_ignore_case(word, "authorization") {
@@ -428,12 +454,14 @@ fn context_value(input: &str, word_end: usize, word: &str, opener: Option<u8>) -
     } else if is_secret_key_name(word) {
         assigned_value(input, word, word_end)
     } else {
-        return Context::None;
+        return None;
     };
-    match result {
-        Ok((start, end)) => Context::Hit(start, end),
-        Err(read_to) => Context::Miss(read_to),
-    }
+    result.ok()
+}
+
+/// Holds an earlier replacement: a second pass must not rescan around it.
+fn has_mark(range: &str) -> bool {
+    range.contains("[REDACTED")
 }
 
 /// `Err` carries how far the rule read.
@@ -491,6 +519,9 @@ fn authorization_value(input: &str, word_end: usize, opener: Option<u8>) -> Valu
     while end > start && is_blank(bytes[end - 1]) {
         end -= 1;
     }
+    if has_mark(&input[start..end]) {
+        return Err(end);
+    }
     Ok((start, end))
 }
 
@@ -506,11 +537,12 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
         && is_value_byte(first)
     {
         let v = word_end + 1;
-        let end = run_end(bytes, v, is_value_byte);
+        let end = value_end(bytes, v);
         let value = &input[v..end];
-        let ok = value.len() >= ASSIGNED_MIN_LEN
-            && is_literal_value(value)
-            && !input[v..].starts_with(MARK);
+        if let Some(hit) = scheme_credential(input, v, end) {
+            return hit;
+        }
+        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value) && !has_mark(value);
         return if ok { Ok((v, end)) } else { Err(end) };
     }
     let mut j = word_end;
@@ -540,18 +572,51 @@ fn assigned_value(input: &str, word: &str, word_end: usize) -> Value {
     if quoted {
         let end = run_end(bytes, v, |b| !is_quote(b) && b != b'\\' && b != b'\n');
         let value = &input[v..end];
-        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value);
+        let ok = value.len() >= ASSIGNED_MIN_LEN && is_literal_value(value) && !has_mark(value);
         return if ok { Ok((v, end)) } else { Err(end) };
     }
-    let end = run_end(bytes, v, is_value_byte);
+    let end = value_end(bytes, v);
     let value = &input[v..end];
+    if let Some(hit) = scheme_credential(input, v, end) {
+        return hit;
+    }
     let ok = is_literal_value(value)
+        && !has_mark(value)
         && if tight && sep == b'=' {
             value.len() >= ASSIGNED_MIN_LEN
         } else {
             value.len() >= KEYED_MIN_LEN && !looks_like_code(value)
         };
     if ok { Ok((v, end)) } else { Err(end) }
+}
+
+/// `auth: Bearer <token>`, `password: Basic <b64>`: a scheme word as the value
+/// means the next token is the credential.
+fn scheme_credential(input: &str, v: usize, end: usize) -> Option<Value> {
+    let value = &input[v..end];
+    if !AUTH_SCHEMES.iter().any(|s| value.eq_ignore_ascii_case(s)) {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    let start = run_end(bytes, end, is_blank);
+    if start == end {
+        return None;
+    }
+    let token_end = run_end(bytes, start, is_token_byte);
+    let token = &input[start..token_end];
+    Some(if is_credential_like(token) && !has_mark(token) {
+        Ok((start, token_end))
+    } else {
+        Err(token_end)
+    })
+}
+
+/// End of an unquoted value: value bytes up to the next `=` or `:`, plus trailing
+/// `=` padding. Stopping at `=` and `:` keeps each value read inside one
+/// `key=value` pair, which bounds the work (see the module docs).
+fn value_end(bytes: &[u8], v: usize) -> usize {
+    let body = run_end(bytes, v, |b| is_value_byte(b) && b != b'=' && b != b':');
+    run_end(bytes, body, |b| b == b'=')
 }
 
 /// Advances past `"`, `'`, `\"` or `\'`, returning the quote.
