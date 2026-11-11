@@ -32,6 +32,10 @@ Records are never deleted. A worktree that is gone retires its record with a rec
 
 Inventory reports a new run's generation and worktrees as `ledger-owned` with lifecycle ids. Its Git worktree, configured-root entry and attempt row are reported once, under the ledger location. An attempt path with no live artifact record is reported unresolved and never selected. A fully reclaimed run is not reported.
 
+### Reading attempt ids
+
+The `attempt-<n>` in a worker's layout path `meshloop/<graph>/task-<id>/attempt-<n>`, the `task-<n>-attempt-<m>` artifact record, and the `<id>` in its commit message `meshloop: attempt <id> for task <task_id>` are all the same **store-global** attempt id. Each id is allocated as `MAX(attempt_id) + 1` over every attempt row in `.meshloop/state.sqlite` — across all graphs, not just the run in front of you — and is never reused. It is **not** a per-task ordinal or retry count. A single-task graph that succeeds on its first and only attempt can therefore land in `meshloop/<graph>/task-<id>/attempt-3` with a `meshloop: attempt 3 for task <task_id>` commit, simply because attempt ids 1 and 2 were already consumed by earlier attempts elsewhere in the store. Do not read the number as "this task's third try."
+
 ## Reclaiming a landed run
 
 A new run is reclaimable when every task is `Integrated` and each worktree's HEAD is an ancestor of the base branch recorded for the run, for example after `meshloop integrate --into main --accept-integrate`, or `git merge --ff-only meshloop/<graph>/integrate` on that branch. The checkout's current HEAD does not count: a detached HEAD or another branch that contains the work is not a landing. Each worktree must also pass every other cleanup rule below.
