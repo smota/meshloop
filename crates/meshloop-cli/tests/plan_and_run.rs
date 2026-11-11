@@ -2331,7 +2331,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&db_path)
         .guarded_output()
         .expect("run initial");
-    assert!(run_out.status.success());
+    assert!(
+        run_out.status.success(),
+        "run initial failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run_out.stdout),
+        String::from_utf8_lossy(&run_out.stderr)
+    );
 
     let accept1 = meshloop()
         .current_dir(&dir)
@@ -2342,7 +2347,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("accept 1");
-    assert!(accept1.status.success());
+    assert!(
+        accept1.status.success(),
+        "accept 1 failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&accept1.stdout),
+        String::from_utf8_lossy(&accept1.stderr)
+    );
 
     let resume1 = meshloop()
         .current_dir(&dir)
@@ -2354,7 +2364,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("resume 1");
-    assert!(resume1.status.success());
+    assert!(
+        resume1.status.success(),
+        "resume 1 failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resume1.stdout),
+        String::from_utf8_lossy(&resume1.stderr)
+    );
 
     // 2. Mutate with --require-review
     let mutation_file = dir.join("mutation.json");
@@ -2376,7 +2391,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("mutate-plan");
-    assert!(mutate_out.status.success());
+    assert!(
+        mutate_out.status.success(),
+        "mutate-plan failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&mutate_out.stdout),
+        String::from_utf8_lossy(&mutate_out.stderr)
+    );
 
     // 3. Resume must be rejected while graph is in AwaitingPlanReview
     let resume_blocked = meshloop()
@@ -2430,7 +2450,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("resume 2");
-    assert!(resume2.status.success());
+    assert!(
+        resume2.status.success(),
+        "resume 2 failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resume2.stdout),
+        String::from_utf8_lossy(&resume2.stderr)
+    );
 
     let accept2 = meshloop()
         .current_dir(&dir)
@@ -2442,7 +2467,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("accept 2");
-    assert!(accept2.status.success());
+    assert!(
+        accept2.status.success(),
+        "accept 2 failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&accept2.stdout),
+        String::from_utf8_lossy(&accept2.stderr)
+    );
 
     let resume3 = meshloop()
         .current_dir(&dir)
@@ -2454,7 +2484,12 @@ fn mutate_plan_with_require_review_gates_resume() {
         .arg(&worktree_base)
         .guarded_output()
         .expect("resume 3");
-    assert!(resume3.status.success());
+    assert!(
+        resume3.status.success(),
+        "resume 3 failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resume3.stdout),
+        String::from_utf8_lossy(&resume3.stderr)
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
