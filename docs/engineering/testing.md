@@ -94,6 +94,29 @@ cargo run -p xtask -- bench-learning --aggregate <results.json>
 
 `--live` dispatches real workers and is never run by `xtask check`, `cargo test` or CI. Each run follows a fixed protocol (`review-plan --accept`, `run`, `resume --retry` while the node is `Failed` and attempts remain, `accept` only when Meshloop's checks passed, `resume`, `integrate --into main`), and success is the exit code of the hidden tests on `main`. Every task and repetition starts from a new repository and an empty Meshloop store, so no `routing_feedback` carries over. The runner stops early when a worker or Meshloop's quota breaker reports a usage limit. Token counts are taken only from what a harness prints (codex `tokens used`, claude `--output-format json`); otherwise they are recorded as not reported.
 
+### 2.4b Learning-plane comparison (`xtask bench-learning`, #140)
+The comparison of runs with and without accepted routing priors. Results and the verdict are in [`learning-plane-results.md`](learning-plane-results.md).
+
+- **Offline, in CI** (separate step, about two minutes, no socket, no nodecode, no model): `cargo run -p xtask -- bench-learning --offline` builds `meshloop` and `fixture_harness` and runs [`benches/learning-plane/offline/`](../../benches/learning-plane/offline/). One fixture harness lists five models whose outcomes are fixed by name (a `fail-*` model leaves no change). A warm-up pins each model on each task in one shared store until every (harness, model, tier) key has 5 counted attempts. The fold (`xtask/src/priors_fold.rs`, a restatement of the cell's `/meshloop learn` fold) writes a priors file, which must match, byte for byte apart from `generated_at` and `generator`, the proposal the real cell wrote for the same fixture (`offline/cell-fold.json`). `priors check` validates it. A baseline arm and a priors-on arm (`priors accept --as bench` into each fresh store) then run 4 tasks × 3 repetitions. The gates in `offline/thresholds.toml` check the mechanism only: the priors are applied, the ±0.25 bound holds, the candidate set is unchanged and `changed_top` is recorded. Outcome metrics per arm are reported but not gated. Results go to `artifacts/bench/learning_offline.json`; `--keep DIR` keeps the scratch stores. If a fixture or the fold changes, record `cell-fold.json` again with the real cell (`benches/learning-plane/cell_learn.py` over the kept warm-up store).
+- **Live, manual** (ADR 0032; uses harness quota; never run by CI):
+
+```bash
+# Warm-up: each Tier-admissible candidate pinned on each task of its tier, in one shared store
+cargo run -p xtask -- bench-learning --warmup --floor 5 --bin <meshloop> --bin-commit <sha> \
+  --out .agent-runs/bench-learning/<warmup> --results benches/learning-plane/results/<warmup>.json
+# Fold it with the real cell over the nodecode gateway (private release copy, throwaway HOME, no model turn)
+python3 -I benches/learning-plane/cell_learn.py --meshloop <meshloop> \
+  --repo .agent-runs/bench-learning/<warmup>/store --graphs-from .agent-runs/bench-learning/<warmup>/results.json \
+  --out .agent-runs/proposal.json --work .agent-runs/cell-learn
+meshloop priors check --file <proposal> --config benches/learning-plane/meshloop.toml
+# Measured arm: the lp-4 protocol, with the file promoted into every fresh store first
+cargo run -p xtask -- bench-learning --live --reps 3 --priors <proposal> --bin <meshloop> --bin-commit <sha> \
+  --out .agent-runs/bench-learning/<name> --results benches/learning-plane/results/<name>.json
+# Verdict against the thresholds fixed on #144 (thresholds-lp-4.json), condition by condition
+cargo run -p xtask -- bench-learning --compare --baseline benches/learning-plane/results/baseline-lp-4-2026-11-10.json \
+  --measured benches/learning-plane/results/<name>.json
+```
+
 ### 2.5 Full-Lifecycle Smoke Test (`xtask smoke`)
 Validates the complete product lifecycle (`doctor` $\to$ `review-plan` $\to$ `run` $\to$ `accept` $\to$ `resume` $\to$ `integrate`) on a disposable Git repository in **<5 seconds**:
 ```bash

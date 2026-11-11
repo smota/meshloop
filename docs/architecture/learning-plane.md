@@ -449,6 +449,11 @@ same. Every fused mean then clips to the same value, and the order matches the b
 Time and token effects cannot flow through a prior. In that case a NO-GO is the expected
 result, and it should be reported as measured.
 
+Measured on 2026-11-11: every warm-up arm passed every attempt (66/66), the promoted
+priors changed no routing decision (`changed_top` 0 of 24), and the #144 thresholds give
+INCONCLUSIVE, which counts as NO-GO. See
+[`learning-plane-results.md`](../engineering/learning-plane-results.md).
+
 ## Platform
 
 The cell and nodecode workers run on Linux and on WSL2 with all state, worktrees and the

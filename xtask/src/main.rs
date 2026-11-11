@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 mod learning_bench;
+mod priors_fold;
 mod system1_bench;
 mod workspace_lifecycle_smoke;
 

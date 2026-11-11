@@ -1,16 +1,23 @@
-//! Learning-plane benchmark (issue #144): a fixed task set run through the full
-//! Meshloop lifecycle with live harnesses, to record the baseline that #140 compares
-//! against.
+//! Learning-plane benchmark: a fixed task set run through the full Meshloop lifecycle
+//! with live harnesses. Issue #144 recorded the baseline with it; issue #140 compares
+//! runs with accepted routing priors against that baseline.
 //!
-//! Live dispatch happens only with `--live`. Nothing here runs from `xtask check`,
-//! `cargo test` or CI: offline CI stays socket-free. `--validate` is offline (each seed
-//! fails its hidden tests and passes them with the reference solution). `--aggregate`
-//! recomputes the summary of an existing results file.
+//! Live dispatch happens only with `--live` or `--warmup`. Neither runs from
+//! `xtask check`, `cargo test` or CI. The other modes are offline:
+//! - `--validate`: each seed fails its hidden tests and passes them with the reference
+//!   solution, and the tamper cases fail;
+//! - `--aggregate`: recomputes the summary of an existing results file;
+//! - `--offline` (`offline.rs`, #140): the comparison on Meshloop's fixture harness,
+//!   socket-free, run in CI;
+//! - `--compare` (`compare.rs`, #140): the verdict of a measured arm against the
+//!   thresholds fixed on #144.
 //!
 //! Protocol per task and repetition: fresh disposable repository from the seed,
 //! `review-plan --accept` -> `run` -> `accept` (only when Meshloop's own checks passed)
 //! -> `resume` -> `integrate --into main`, then the hidden tests on `main` decide
-//! success by exit code. The disposable repository is deleted afterwards.
+//! success. The disposable repository is deleted afterwards. `--priors F` first promotes
+//! F into the fresh store (`priors accept`). `--warmup` pins one candidate per run in one
+//! shared store and stops at Meshloop's checks (see `WARMUP_PROTOCOL`).
 
 use std::{
     fs,
@@ -21,6 +28,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+mod compare;
+mod offline;
 
 const SCHEMA: &str = "meshloop.bench.learning-plane.v1";
 const VERIFY_PLACEHOLDER: &str = "verify_command = []";
@@ -42,8 +52,11 @@ const QUOTA_MARKERS: [&str; 7] = [
 ];
 
 const USAGE: &str = "Usage: cargo run -p xtask -- bench-learning \
-(--live [--reps N] [--out DIR] [--bin PATH] [--bin-commit SHA] [--tasks a,b] \
-[--run-timeout SECS] [--results PATH] [--as IDENTITY] | --validate | --aggregate RESULTS.json [--results PATH])";
+(--live [--priors FILE] [--reps N] [--out DIR] [--bin PATH] [--bin-commit SHA] [--tasks a,b] \
+[--run-timeout SECS] [--results PATH] [--as IDENTITY] \
+| --warmup [--floor N] [--out DIR] [--bin PATH] [--bin-commit SHA] [--results PATH] \
+| --offline [--keep DIR] | --compare --baseline B.json --measured M.json [--thresholds T.json] \
+| --validate | --aggregate RESULTS.json [--results PATH])";
 
 const PROTOCOL: &str = "Fixed automated protocol, no human in the loop: review-plan --accept \
 of a one-node plan with the task's planned tier, run, then resume --retry while the node is \
@@ -83,13 +96,29 @@ struct TaskMeta {
     /// Number of hidden tests verify.py requires to pass (lp-4).
     #[serde(default)]
     expected_tests: u32,
+    /// Offline fixture tasks only: the task's own verify command. Live tasks use
+    /// verify.py.
+    #[serde(default)]
+    verify: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 struct Options {
     live: bool,
+    warmup: bool,
+    offline: bool,
+    compare: bool,
     validate: bool,
     aggregate: Option<PathBuf>,
+    /// `--live`: promote this priors file into every fresh store before its run (#140).
+    priors: Option<PathBuf>,
+    /// `--warmup`: counted attempts each (harness, model, tier) key should reach.
+    floor: u32,
+    /// `--offline`: keep the scratch directory here instead of deleting it.
+    keep: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    measured: Option<PathBuf>,
+    thresholds: Option<PathBuf>,
     reps: u32,
     out: Option<PathBuf>,
     bin: Option<PathBuf>,
@@ -103,6 +132,7 @@ struct Options {
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         reps: 1,
+        floor: 5,
         run_timeout_s: 1560,
         accept_as: "claude-coordinator".into(),
         ..Options::default()
@@ -116,6 +146,22 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         };
         match a.as_str() {
             "--live" => o.live = true,
+            "--warmup" => o.warmup = true,
+            "--offline" => o.offline = true,
+            "--compare" => o.compare = true,
+            "--priors" => o.priors = Some(PathBuf::from(value(a)?)),
+            "--keep" => o.keep = Some(PathBuf::from(value(a)?)),
+            "--baseline" => o.baseline = Some(PathBuf::from(value(a)?)),
+            "--measured" => o.measured = Some(PathBuf::from(value(a)?)),
+            "--thresholds" => o.thresholds = Some(PathBuf::from(value(a)?)),
+            "--floor" => {
+                o.floor = value(a)?
+                    .parse()
+                    .map_err(|_| "--floor must be a positive integer".to_string())?;
+                if o.floor == 0 || o.floor > 50 {
+                    return Err("--floor must be 1..=50".into());
+                }
+            }
             "--validate" => o.validate = true,
             "--aggregate" => o.aggregate = Some(PathBuf::from(value(a)?)),
             "--reps" => {
@@ -142,9 +188,23 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let modes = usize::from(o.live) + usize::from(o.validate) + usize::from(o.aggregate.is_some());
+    let modes = usize::from(o.live)
+        + usize::from(o.warmup)
+        + usize::from(o.offline)
+        + usize::from(o.compare)
+        + usize::from(o.validate)
+        + usize::from(o.aggregate.is_some());
     if modes != 1 {
-        return Err("choose exactly one of --live, --validate, --aggregate".into());
+        return Err(
+            "choose exactly one of --live, --warmup, --offline, --compare, --validate, --aggregate"
+                .into(),
+        );
+    }
+    if o.priors.is_some() && !o.live {
+        return Err("--priors goes with --live".into());
+    }
+    if o.compare && (o.baseline.is_none() || o.measured.is_none()) {
+        return Err("--compare needs --baseline and --measured".into());
     }
     Ok(o)
 }
@@ -161,6 +221,18 @@ pub fn bench_learning(root: &Path, args: &[String]) -> ExitCode {
     if let Some(path) = &opts.aggregate {
         return aggregate_file(root, path, opts.results.as_deref());
     }
+    if opts.offline {
+        return offline::offline(root, &lp, opts.keep.as_deref());
+    }
+    if opts.compare {
+        return compare::compare(
+            root,
+            opts.baseline.as_deref().unwrap_or(Path::new("")),
+            opts.measured.as_deref().unwrap_or(Path::new("")),
+            opts.thresholds.as_deref(),
+            opts.results.as_deref(),
+        );
+    }
     let (set, tasks) = match load_tasks(&lp, opts.tasks.as_deref()) {
         Ok(v) => v,
         Err(e) => {
@@ -170,6 +242,9 @@ pub fn bench_learning(root: &Path, args: &[String]) -> ExitCode {
     };
     if opts.validate {
         return validate(&lp, &tasks);
+    }
+    if opts.warmup {
+        return warmup(root, &lp, &set, &tasks, &opts);
     }
     live(root, &lp, &set, &tasks, &opts)
 }
@@ -432,6 +507,14 @@ struct AttemptRecord {
     checks_passed: bool,
     tokens: TokenReport,
     quota_signal: bool,
+    /// #139 attempt fields, when the binary reports them (what the fold reads).
+    check_result: Option<String>,
+    model_passed: Option<bool>,
+    dispatch_mode: Option<String>,
+    /// `advisory_routing` row of the attempt (#139), written only while priors are in
+    /// effect: the promoted file's digest and whether the priors changed the top pick.
+    priors_sha256: Option<String>,
+    changed_top: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -488,6 +571,17 @@ struct RunRecord {
     quota_hit: Option<String>,
     repo_removed: bool,
     errors: Vec<String>,
+    /// Warm-up (#140): the one candidate this run's configuration allowed.
+    pinned: Option<String>,
+    /// sha256 of the configuration the run used, without its verify line.
+    config_sha256: Option<String>,
+    /// Priors arm (#140): exit of `priors accept` before the run.
+    priors_accept_exit: Option<i32>,
+    /// `priors show` after the run: in effect, digest, routed attempts, changed_top.
+    priors_in_effect: Option<bool>,
+    priors_sha256: Option<String>,
+    routing_attempts: Option<u64>,
+    routing_changed_top: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -514,6 +608,13 @@ struct Results {
     tasks: Vec<String>,
     run_timeout_seconds: u64,
     stopped_early: Option<String>,
+    /// `baseline`, `warm-up` or `priors-on` (#140).
+    arm: String,
+    /// Priors arm: the promoted file and its digest.
+    priors_file: Option<String>,
+    priors_sha256: Option<String>,
+    /// Warm-up: how runs differ from the measured protocol, and the configs used.
+    warmup: Value,
     runs: Vec<RunRecord>,
     summary: Value,
 }
@@ -531,19 +632,70 @@ struct Ctx<'a> {
     run_timeout: Duration,
     accept_as: String,
     max_retries: u32,
+    /// Offline fixture comparison (#140): `run` and `resume` with `--fixture-only`, a
+    /// plain seed repository, and success when Meshloop's own checks passed (no
+    /// integrate, no verify.py).
+    offline: bool,
+    /// Priors arm (#140): promoted into every fresh store before its run.
+    priors: Option<PriorsFile>,
 }
 
-fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Options) -> ExitCode {
+struct PriorsFile {
+    path: PathBuf,
+    sha256: String,
+    identity: String,
+}
+
+/// Where and how one task x repetition runs.
+struct RunPlan<'p> {
+    graph_id: String,
+    /// Evidence folder under `<out>/runs/`.
+    dir_name: String,
+    /// Warm-up: the only (harness, model) the run's configuration allows.
+    pin: Option<(&'p str, &'p str)>,
+    /// Warm-up: one repository and store shared by every warm-up run, so the cell can
+    /// fold them together. None: a new disposable repository and store (measured runs).
+    shared_repo: Option<&'p Path>,
+}
+
+impl RunPlan<'_> {
+    fn measured(task: &str, rep: u32) -> Self {
+        RunPlan {
+            graph_id: format!("lp-{task}-r{rep}"),
+            dir_name: format!("r{rep}-{task}"),
+            pin: None,
+            shared_repo: None,
+        }
+    }
+}
+
+/// What `--live` and `--warmup` share: the binary, the evidence folder, the frozen
+/// configuration, doctor and the candidates per planned tier.
+struct Setup<'a> {
+    ctx: Ctx<'a>,
+    started: u64,
+    version: String,
+    config_path: PathBuf,
+    harnesses: Value,
+    tier_candidates: Value,
+}
+
+fn setup<'a>(
+    root: &Path,
+    lp: &'a Path,
+    set: &TaskSet,
+    tasks: &[TaskMeta],
+    opts: &Options,
+) -> Result<Setup<'a>, String> {
     let bin = opts
         .bin
         .clone()
         .unwrap_or_else(|| crate::meshloop_bin(root));
     if !bin.is_file() {
-        eprintln!(
-            "bench-learning: meshloop binary not found at {} (pass --bin)",
+        return Err(format!(
+            "meshloop binary not found at {} (pass --bin)",
             bin.display()
-        );
-        return ExitCode::FAILURE;
+        ));
     }
     let started = unix_now();
     let out = absolute(&opts.out.clone().unwrap_or_else(|| {
@@ -552,36 +704,43 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
             .join(started.to_string())
     }));
     let bin = absolute(&bin);
-    if let Err(e) = fs::create_dir_all(out.join("runs")) {
-        eprintln!("bench-learning: cannot create {}: {e}", out.display());
-        return ExitCode::FAILURE;
-    }
+    fs::create_dir_all(out.join("runs"))
+        .map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let config_path = lp.join("meshloop.toml");
     let config_template = match fs::read_to_string(&config_path) {
         Ok(t) if t.lines().filter(|l| l.trim() == VERIFY_PLACEHOLDER).count() == 1 => t,
         Ok(_) => {
-            eprintln!(
-                "bench-learning: meshloop.toml must contain exactly one `{VERIFY_PLACEHOLDER}` line"
-            );
-            return ExitCode::FAILURE;
+            return Err(format!(
+                "meshloop.toml must contain exactly one `{VERIFY_PLACEHOLDER}` line"
+            ));
         }
-        Err(e) => {
-            eprintln!("bench-learning: {}: {e}", config_path.display());
-            return ExitCode::FAILURE;
+        Err(e) => return Err(format!("{}: {e}", config_path.display())),
+    };
+    let priors = match &opts.priors {
+        Some(path) => {
+            let path = absolute(path);
+            let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Some(PriorsFile {
+                sha256: meshloop_domain::digest::sha256_hex(&bytes),
+                path,
+                identity: opts.accept_as.clone(),
+            })
         }
+        None => None,
     };
     let version = capture(&bin, &["--version"]).unwrap_or_else(|| "unknown".into());
     let ctx = Ctx {
         lp,
-        bin: bin.clone(),
-        out: out.clone(),
+        bin,
+        out,
         version: set.version.clone(),
         run_timeout: Duration::from_secs(opts.run_timeout_s),
         accept_as: opts.accept_as.clone(),
         max_retries: config_max_retries(&config_template).unwrap_or(1),
         config_template,
+        offline: false,
+        priors,
     };
-
     println!(
         "bench-learning: task set {} ({} tasks), {} repetition(s)",
         set.version,
@@ -591,37 +750,70 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
     println!(
         "bench-learning: meshloop {} at {}",
         version.trim(),
-        bin.display()
+        ctx.bin.display()
     );
-    println!("bench-learning: evidence in {}", out.display());
-
-    let harnesses = match doctor(&ctx, &tasks[0]) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("bench-learning: doctor failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    println!("bench-learning: evidence in {}", ctx.out.display());
+    let harnesses = doctor(&ctx, &tasks[0]).map_err(|e| format!("doctor failed: {e}"))?;
     let mut planned: Vec<&str> = tasks
         .iter()
         .map(|t| set.plan_tiers.get(&t.id).map_or("Tier1", String::as_str))
         .collect();
     planned.sort_unstable();
     planned.dedup();
-    let tier_candidates = match tier_coverage(&harnesses, &planned) {
-        Ok(c) => c,
+    let tier_candidates =
+        tier_coverage(&harnesses, &planned).map_err(|e| format!("doctor: {e}"))?;
+    println!("  doctor: candidates per planned tier {tier_candidates}");
+    Ok(Setup {
+        ctx,
+        started,
+        version,
+        config_path,
+        harnesses,
+        tier_candidates,
+    })
+}
+
+fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Options) -> ExitCode {
+    let Setup {
+        ctx,
+        started,
+        version,
+        config_path,
+        harnesses,
+        tier_candidates,
+    } = match setup(root, lp, set, tasks, opts) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("bench-learning: doctor: {e}");
+            eprintln!("bench-learning: {e}");
             return ExitCode::FAILURE;
         }
     };
-    println!("  doctor: candidates per planned tier {tier_candidates}");
-
+    let out = ctx.out.clone();
+    let bin = ctx.bin.clone();
+    let (arm, learning_plane) = match &ctx.priors {
+        Some(p) => (
+            "priors-on",
+            format!(
+                "priors on: {} (sha256 {}) promoted with `priors accept --as {}` into every fresh store before its run",
+                p.path.display(),
+                p.sha256,
+                p.identity
+            ),
+        ),
+        None => (
+            "baseline",
+            "absent: no priors file is promoted (no learning-plane code exists at the baseline commit)"
+                .to_string(),
+        ),
+    };
     let mut results = Results {
         schema: SCHEMA.into(),
         task_set_version: set.version.clone(),
         mode: "live".into(),
-        learning_plane: "absent (no learning-plane code exists at this commit)".into(),
+        arm: arm.into(),
+        priors_file: ctx.priors.as_ref().map(|p| path_str(&p.path)),
+        priors_sha256: ctx.priors.as_ref().map(|p| p.sha256.clone()),
+        learning_plane,
         started_unix: started,
         started_utc: utc_string(started),
         meshloop: json!({
@@ -650,7 +842,7 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
         for task in tasks {
             println!("\n== rep {rep} task {}", task.id);
             let tier = set.plan_tiers.get(&task.id).map(String::as_str);
-            let record = run_one(&ctx, task, rep, tier);
+            let record = run_one(&ctx, task, rep, tier, &RunPlan::measured(&task.id, rep));
             print_run(&record);
             let quota = record.quota_hit.clone();
             results.runs.push(record);
@@ -691,6 +883,279 @@ fn live(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Option
     }
     print_summary(&results.summary);
     ExitCode::SUCCESS
+}
+
+const WARMUP_PROTOCOL: &str = "Warm-up for #140 (exploration by pinning, ADR 0038 decision (c)). \
+Each run's configuration selects one (harness, model): selected_harnesses names only its harness \
+and that harness's models list only its model; nothing else differs from meshloop.toml. Every \
+run uses one shared repository and store, so the cell folds them together: before each run main \
+becomes a single root commit holding the task's seed (the same tree and message a fresh \
+repository gets). Protocol per run: review-plan --accept, run; no resume --retry (one candidate), \
+no accept or integrate. A run's evidence is the attempt's deterministic check, which runs the \
+task's verify.py, so check_result passed is a trusted verify.py pass in the attempt's worktree. \
+Warm-up runs are never measured.";
+
+/// `--warmup` (#140): every Tier-admissible candidate pinned in turn on every task of its
+/// tier, enough repetitions for each (harness, model, tier) key to reach `--floor` counted
+/// attempts, in one shared store; then the fold input is saved for `/meshloop learn`.
+fn warmup(root: &Path, lp: &Path, set: &TaskSet, tasks: &[TaskMeta], opts: &Options) -> ExitCode {
+    let Setup {
+        ctx,
+        started,
+        version,
+        config_path,
+        harnesses,
+        tier_candidates,
+    } = match setup(root, lp, set, tasks, opts) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("bench-learning: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let out = ctx.out.clone();
+    let store = out.join("store");
+    if store.exists() {
+        eprintln!(
+            "bench-learning: {} exists; warm-up needs a new --out",
+            store.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    let schedule = warmup_schedule(set, tasks, &tier_candidates, opts.floor);
+    let mut configs = serde_json::Map::new();
+    for (_, _, h, m) in &schedule {
+        if let Ok(t) = pin_config(&ctx.config_template, h, m) {
+            configs.insert(
+                format!("{h}/{m}"),
+                json!(meshloop_domain::digest::sha256_hex(t.as_bytes())),
+            );
+        }
+    }
+    let mut reps_by_tier = serde_json::Map::new();
+    for (rep, task, _, _) in &schedule {
+        let tier = set
+            .plan_tiers
+            .get(&tasks[*task].id)
+            .cloned()
+            .unwrap_or_default();
+        let n = reps_by_tier.get(&tier).and_then(Value::as_u64).unwrap_or(0);
+        reps_by_tier.insert(tier, json!(n.max(u64::from(*rep))));
+    }
+    println!(
+        "bench-learning: warm-up of {} pinned runs in one store at {}",
+        schedule.len(),
+        store.display()
+    );
+    let mut results = Results {
+        schema: SCHEMA.into(),
+        task_set_version: set.version.clone(),
+        mode: "live".into(),
+        arm: "warm-up".into(),
+        learning_plane: "warm-up: no priors in effect; these runs are folded, never measured"
+            .into(),
+        started_unix: started,
+        started_utc: utc_string(started),
+        meshloop: json!({
+            "version": version.trim(),
+            "binary_sha256": sha256(&ctx.bin),
+            "commit": opts.bin_commit,
+        }),
+        host_os: std::env::consts::OS.into(),
+        config_file: "benches/learning-plane/meshloop.toml".into(),
+        config_sha256: sha256(&config_path),
+        harnesses,
+        tier_candidates,
+        plan_tiers: tasks
+            .iter()
+            .map(|t| (t.id.clone(), json!(set.plan_tiers.get(&t.id))))
+            .collect(),
+        protocol: WARMUP_PROTOCOL.into(),
+        state_carried:
+            "One repository and store for every warm-up run (the cell folds one store). \
+routing_feedback accumulates across warm-up runs, but a pinned run has one candidate, so it \
+cannot change a choice."
+                .into(),
+        reps_requested: opts.reps,
+        tasks: tasks.iter().map(|t| t.id.clone()).collect(),
+        run_timeout_seconds: opts.run_timeout_s,
+        warmup: json!({
+            "floor": opts.floor,
+            "reps_by_tier": reps_by_tier,
+            "pinned_config_sha256": configs,
+            "runs_planned": schedule.len(),
+        }),
+        ..Results::default()
+    };
+    for (rep, task_index, h, m) in &schedule {
+        let task = &tasks[*task_index];
+        let tier = set.plan_tiers.get(&task.id).map(String::as_str);
+        let graph_id = format!("wu-{}-r{rep}-{}-{}", task.id, id_part(h), id_part(m));
+        println!("\n== warm-up rep {rep} task {} pinned {h}/{m}", task.id);
+        let plan = RunPlan {
+            dir_name: graph_id.clone(),
+            graph_id,
+            pin: Some((h.as_str(), m.as_str())),
+            shared_repo: Some(&store),
+        };
+        let record = run_one(&ctx, task, *rep, tier, &plan);
+        print_run(&record);
+        let quota = record.quota_hit.clone();
+        results.runs.push(record);
+        results.summary = summarize(&results.runs);
+        if let Err(e) = write_results(&out.join("results.json"), &results, &[]) {
+            eprintln!("bench-learning: {e}; stopping");
+            return ExitCode::FAILURE;
+        }
+        if let Some(q) = quota {
+            results.stopped_early = Some(format!(
+                "stopped at rep {rep} task {} pinned {h}/{m}: quota or rate limit signalled ({q})",
+                task.id
+            ));
+            println!(
+                "bench-learning: {}",
+                results.stopped_early.as_deref().unwrap_or("")
+            );
+            break;
+        }
+    }
+    results.finished_unix = unix_now();
+    results.summary = summarize(&results.runs);
+    // The fold input: `inspect --attempts` of every warm-up graph, as the cell reads it.
+    let cfg = out.join("store-meshloop.toml");
+    if let Err(e) = fs::write(&cfg, task_config(&ctx, &tasks[0])) {
+        eprintln!("bench-learning: {e}");
+        return ExitCode::FAILURE;
+    }
+    match fold_input(
+        &ctx.bin,
+        &store,
+        &cfg,
+        results.runs.iter().map(|r| r.graph_id.as_str()),
+    ) {
+        Ok(runs) => {
+            let reduced: serde_json::Map<String, Value> = runs
+                .iter()
+                .map(|(g, d)| (g.clone(), crate::priors_fold::reduce(d)))
+                .collect();
+            let _ = fs::write(
+                out.join("fold-input.json"),
+                serde_json::to_string_pretty(&Value::Object(reduced)).unwrap_or_default() + "\n",
+            );
+            match crate::priors_fold::fold(&runs) {
+                Ok(fold) => {
+                    let text = crate::priors_fold::to_json(
+                        &fold,
+                        &utc_string(unix_now()),
+                        ("xtask-bench-learning", "1"),
+                    );
+                    let _ = fs::write(out.join("rust-fold.json"), &text);
+                    results.warmup["rust_fold"] = json!({
+                        "file": path_str(&out.join("rust-fold.json")),
+                        "counted": fold.counted,
+                        "excluded": fold.excluded.iter().map(|(r, n)| json!({"reason": r, "count": n})).collect::<Vec<_>>(),
+                        "keys": fold.priors.iter().map(|e| json!({
+                            "harness": e.harness, "model_ref": e.model_ref, "tier": e.tier,
+                            "attempts": e.attempts, "successes": e.successes,
+                            "clears_floor": e.attempts >= opts.floor as usize,
+                        })).collect::<Vec<_>>(),
+                    });
+                }
+                Err(e) => eprintln!("bench-learning: fold: {e}"),
+            }
+        }
+        Err(e) => eprintln!("bench-learning: fold input: {e}"),
+    }
+    // The cell runs meshloop in the session's folder with no --config.
+    let _ = fs::copy(&cfg, store.join("meshloop.toml"));
+    let redactions = redactions(root, &out);
+    if let Err(e) = write_results(&out.join("results.json"), &results, &[]) {
+        eprintln!("bench-learning: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Some(path) = &opts.results
+        && let Err(e) = write_results(path, &results, &redactions)
+    {
+        eprintln!("bench-learning: {e}");
+        return ExitCode::FAILURE;
+    }
+    print_summary(&results.summary);
+    println!(
+        "bench-learning: fold the warm-up with the cell in a session at {}:\n  /meshloop learn {} --out .agent-runs/priors/proposal.json",
+        store.display(),
+        results
+            .runs
+            .iter()
+            .map(|r| format!("--graph {}", r.graph_id))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    ExitCode::SUCCESS
+}
+
+/// (rep, task index, harness, model) in run order: repetition-major, then task-set
+/// order, then configured candidate order. A tier with `t` tasks gets ceil(floor / t)
+/// repetitions, so each (harness, model, tier) key reaches the floor.
+fn warmup_schedule(
+    set: &TaskSet,
+    tasks: &[TaskMeta],
+    tier_candidates: &Value,
+    floor: u32,
+) -> Vec<(u32, usize, String, String)> {
+    let tier_of = |t: &TaskMeta| {
+        set.plan_tiers
+            .get(&t.id)
+            .cloned()
+            .unwrap_or_else(|| "Tier1".into())
+    };
+    let reps = |tier: &str| {
+        let n = tasks.iter().filter(|t| tier_of(t) == tier).count().max(1) as u32;
+        floor.div_ceil(n)
+    };
+    let max = tasks.iter().map(|t| reps(&tier_of(t))).max().unwrap_or(0);
+    let mut out = Vec::new();
+    for rep in 1..=max {
+        for (i, task) in tasks.iter().enumerate() {
+            let tier = tier_of(task);
+            if rep > reps(&tier) {
+                continue;
+            }
+            for c in tier_candidates[&tier].as_array().into_iter().flatten() {
+                if let Some((h, m)) = c.as_str().and_then(|c| c.split_once('/')) {
+                    out.push((rep, i, h.to_string(), m.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `inspect --attempts --graph G` of each graph, run in REPO: the data object the cell
+/// folds.
+fn fold_input<'g>(
+    bin: &Path,
+    repo: &Path,
+    config: &Path,
+    graphs: impl Iterator<Item = &'g str>,
+) -> Result<Vec<(String, Value)>, String> {
+    let mut out = Vec::new();
+    for g in graphs {
+        let o = Command::new(bin)
+            .args(["inspect", "--attempts", "--graph", g, "--config"])
+            .arg(config)
+            .arg("--json")
+            .current_dir(repo)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("inspect {g}: {e}"))?;
+        let v: Value =
+            serde_json::from_slice(&o.stdout).map_err(|e| format!("inspect {g}: no JSON ({e})"))?;
+        if v["ok"] != Value::Bool(true) {
+            return Err(format!("inspect {g}: {}", v["error"]));
+        }
+        out.push((g.to_string(), v["data"].clone()));
+    }
+    Ok(out)
 }
 
 fn redactions(root: &Path, out: &Path) -> Vec<(String, String)> {
@@ -830,15 +1295,82 @@ fn config_max_retries(template: &str) -> Option<u32> {
 }
 
 fn task_config(ctx: &Ctx, task: &TaskMeta) -> String {
+    replace_verify_line(&ctx.config_template, &verify_line(ctx, task))
+}
+
+/// The task's verify line: its own command (offline fixture tasks) or verify.py.
+fn verify_line(ctx: &Ctx, task: &TaskMeta) -> String {
+    if !task.verify.is_empty() {
+        let words: Vec<String> = task.verify.iter().map(|w| toml_str(w)).collect();
+        return format!("verify_command = [{}]", words.join(", "));
+    }
     let verify = ctx.lp.join("verify.py");
     let task_dir = ctx.lp.join("tasks").join(&task.id);
-    let line = format!(
+    format!(
         "verify_command = [{}, {}, {}]",
         toml_str("python3"),
         toml_str(&path_str(&verify)),
         toml_str(&path_str(&task_dir))
-    );
-    replace_verify_line(&ctx.config_template, &line)
+    )
+}
+
+/// TEMPLATE restricted to one candidate (warm-up exploration by pinning, #140):
+/// `selected_harnesses` names only HARNESS and its `models` list keeps only MODEL. The
+/// other harness tables stay but are not selected. Everything else is unchanged.
+fn pin_config(template: &str, harness: &str, model: &str) -> Result<String, String> {
+    let section = format!("[harnesses.{harness}]");
+    let wanted = format!("model_ref = {}", toml_str(model));
+    let mut out = Vec::new();
+    let (mut selected, mut in_section, mut in_models, mut kept, mut found_models) =
+        (0, false, false, 0, false);
+    for line in template.lines() {
+        let t = line.trim();
+        if in_models {
+            if t == "]" {
+                in_models = false;
+                out.push(line.to_string());
+            } else if t.contains(&wanted) {
+                kept += 1;
+                out.push(line.to_string());
+            }
+            continue;
+        }
+        if t.starts_with('[') {
+            in_section = t == section;
+        }
+        if t.starts_with("selected_harnesses") && !t.starts_with('#') {
+            selected += 1;
+            out.push(format!("selected_harnesses = [{}]", toml_str(harness)));
+            continue;
+        }
+        if in_section && t.starts_with("models") && t.ends_with('[') {
+            in_models = true;
+            found_models = true;
+        }
+        out.push(line.to_string());
+    }
+    if selected != 1 {
+        return Err("the configuration must set selected_harnesses once".into());
+    }
+    if !found_models || kept != 1 {
+        return Err(format!(
+            "{section} has no one-line models entry for {model} (found {kept})"
+        ));
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// A graph id from free text: ASCII letters, digits and `-` only.
+fn id_part(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn replace_verify_line(template: &str, line: &str) -> String {
@@ -887,11 +1419,15 @@ fn plan_json(graph_id: &str, task: &TaskMeta, tier: Option<&str>) -> Value {
     })
 }
 
-fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecord {
+fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>, plan: &RunPlan) -> RunRecord {
     let total = Instant::now();
-    let graph_id = format!("lp-{}-r{rep}", task.id);
-    let dir = ctx.out.join("runs").join(format!("r{rep}-{}", task.id));
-    let repo = dir.join("repo");
+    let graph_id = plan.graph_id.clone();
+    let dir = ctx.out.join("runs").join(&plan.dir_name);
+    let shared = plan.shared_repo.is_some();
+    let repo = plan
+        .shared_repo
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir.join("repo"));
     let mut rec = RunRecord {
         task_id: task.id.clone(),
         language: task.language.clone(),
@@ -901,26 +1437,59 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
         graph_id: graph_id.clone(),
         plan_tier: tier.map(String::from),
         started_unix: unix_now(),
+        pinned: plan.pin.map(|(h, m)| format!("{h}/{m}")),
         ..RunRecord::default()
     };
+    let cleanup = |rec: &mut RunRecord| {
+        rec.repo_removed = if shared {
+            false
+        } else {
+            remove_repo(&repo, &mut rec.errors)
+        };
+    };
     let _ = fs::remove_dir_all(&dir);
-    if let Err(e) = seed_repo(ctx, task, &repo) {
+    if let Err(e) = fs::create_dir_all(&dir) {
+        rec.errors.push(format!("evidence folder: {e}"));
+        return rec;
+    }
+    let seeded = if shared {
+        reseed_shared(ctx, task, &repo)
+    } else {
+        seed_repo(ctx, task, &repo)
+    };
+    if let Err(e) = seeded {
         rec.errors.push(format!("seed: {e}"));
-        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+        cleanup(&mut rec);
         return rec;
     }
     rec.seed_commit = capture_in(&repo, "git", &["rev-parse", "HEAD"]).map(|s| s.trim().into());
+    let template = match plan.pin {
+        Some((h, m)) => match pin_config(&ctx.config_template, h, m) {
+            Ok(t) => t,
+            Err(e) => {
+                rec.errors.push(format!("pin {h}/{m}: {e}"));
+                cleanup(&mut rec);
+                return rec;
+            }
+        },
+        None => ctx.config_template.clone(),
+    };
+    rec.config_sha256 = Some(meshloop_domain::digest::sha256_hex(template.as_bytes()));
     let config = dir.join("meshloop.toml");
-    let plan = dir.join("plan.json");
-    let written = fs::write(&config, task_config(ctx, task)).and_then(|_| {
+    let plan_path = dir.join("plan.json");
+    let written = fs::write(
+        &config,
+        replace_verify_line(&template, &verify_line(ctx, task)),
+    )
+    .and_then(|_| {
         fs::write(
-            &plan,
+            &plan_path,
             serde_json::to_string_pretty(&plan_json(&graph_id, task, tier)).unwrap_or_default(),
         )
     });
     if let Err(e) = written {
         rec.errors.push(format!("write config/plan: {e}"));
-        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+        cleanup(&mut rec);
         return rec;
     }
     let db = repo.join(".meshloop").join("state.sqlite");
@@ -939,12 +1508,45 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
             timeout,
         )
     };
+    let fixture: &[&str] = if ctx.offline {
+        &["--fixture-only"]
+    } else {
+        &[]
+    };
+
+    if let Some(p) = &ctx.priors {
+        let accept = ml(
+            &[
+                "priors",
+                "accept",
+                "--file",
+                &path_str(&p.path),
+                "--as",
+                &p.identity,
+                "--config",
+                &cfg,
+                "--json",
+            ],
+            "priors-accept",
+            short,
+        );
+        rec.priors_accept_exit = accept.code;
+        if accept.code != Some(0) {
+            rec.errors.push(format!(
+                "priors accept exit {:?}; task aborted before run",
+                accept.code
+            ));
+            rec.total_wall_seconds = round2(total.elapsed().as_secs_f64());
+            cleanup(&mut rec);
+            return rec;
+        }
+    }
 
     let review = ml(
         &[
             "review-plan",
             "--plan",
-            &path_str(&plan),
+            &path_str(&plan_path),
             "--accept",
             "--as",
             &ctx.accept_as,
@@ -962,23 +1564,15 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
             review.code
         ));
         rec.total_wall_seconds = round2(total.elapsed().as_secs_f64());
-        rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+        cleanup(&mut rec);
         return rec;
     }
 
     let run_start = Instant::now();
-    let run = ml(
-        &[
-            "run",
-            "--plan",
-            &path_str(&plan),
-            "--config",
-            &cfg,
-            "--json",
-        ],
-        "run",
-        ctx.run_timeout,
-    );
+    let plan_arg = path_str(&plan_path);
+    let mut run_args = vec!["run", "--plan", &plan_arg, "--config", &cfg, "--json"];
+    run_args.extend_from_slice(fixture);
+    let run = ml(&run_args, "run", ctx.run_timeout);
     rec.run_wall_seconds = round2(run_start.elapsed().as_secs_f64());
     rec.run_exit = run.code;
     rec.run_timed_out = run.timed_out;
@@ -1001,8 +1595,14 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
 
     // Operator retry protocol (lp-2): a node that ends Failed while attempts remain gets
     // `resume --retry`, up to max_retries, so fallback across candidates is exercised.
+    // A pinned warm-up run has one candidate, so it has nothing to fall back to.
     let mut dispatch_secs = rec.run_wall_seconds;
-    for i in 1..=ctx.max_retries {
+    let retries = if plan.pin.is_some() {
+        0
+    } else {
+        ctx.max_retries
+    };
+    for i in 1..=retries {
         let node = &status_v["data"]["nodes"][0];
         let attempts_before = status_v["data"]["summary"]["attempts"]
             .as_u64()
@@ -1015,13 +1615,11 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
         }
         let start = Instant::now();
         let name = format!("retry-{i}");
-        let out = ml(
-            &[
-                "resume", "--graph", &graph_id, "--retry", "--config", &cfg, "--json",
-            ],
-            &name,
-            ctx.run_timeout,
-        );
+        let mut args = vec![
+            "resume", "--graph", &graph_id, "--retry", "--config", &cfg, "--json",
+        ];
+        args.extend_from_slice(fixture);
+        let out = ml(&args, &name, ctx.run_timeout);
         let secs = round2(start.elapsed().as_secs_f64());
         dispatch_secs += secs;
         status_v = read_status(&format!("status-{name}"));
@@ -1066,76 +1664,104 @@ fn run_one(ctx: &Ctx, task: &TaskMeta, rep: u32, tier: Option<&str>) -> RunRecor
     rec.attempts = parse_attempts(&inspect_v);
 
     let state = rec.node_state_after_dispatch.clone().unwrap_or_default();
-    if state == "AwaitingReview" {
-        let accept = ml(
-            &[
-                "accept",
-                "--task",
-                "1",
-                "--as",
-                &ctx.accept_as,
-                "--graph",
-                &graph_id,
-                "--config",
-                &cfg,
-                "--json",
-            ],
-            "accept",
-            short,
-        );
-        rec.accept_exit = accept.code;
-    }
-    if state == "AwaitingReview" || state == "Accepted" {
-        let resume = ml(
-            &["resume", "--graph", &graph_id, "--config", &cfg, "--json"],
-            "resume",
-            short,
-        );
-        rec.resume_exit = resume.code;
-        let integrate = ml(
-            &[
-                "integrate",
-                "--graph",
-                &graph_id,
-                "--into",
-                "main",
-                "--accept-integrate",
-                "--config",
-                &cfg,
-                "--json",
-            ],
-            "integrate",
-            short,
-        );
-        rec.integrate_exit = integrate.code;
-        if integrate.code == Some(0) {
-            let verify = ctx.lp.join("verify.py");
-            let task_dir = ctx.lp.join("tasks").join(&task.id);
-            let final_verify = run_cmd(
-                Path::new("python3"),
-                &[&path_str(&verify), &path_str(&task_dir)],
-                &repo,
-                &dir.join("final-verify.out"),
-                &dir.join("final-verify.err"),
-                Duration::from_secs(300),
-            );
-            rec.final_verify_exit = final_verify.code;
-        }
+    if shared || ctx.offline {
+        // Warm-up and offline runs stop at Meshloop's own checks: the verify command
+        // (verify.py for live tasks) passed when the node awaits review.
+        rec.success = state == "AwaitingReview";
     } else {
-        rec.errors.push(format!(
-            "node {state:?} after dispatch (run idle {:?}); not accepted or integrated",
-            rec.run_idle
-        ));
+        if state == "AwaitingReview" {
+            let accept = ml(
+                &[
+                    "accept",
+                    "--task",
+                    "1",
+                    "--as",
+                    &ctx.accept_as,
+                    "--graph",
+                    &graph_id,
+                    "--config",
+                    &cfg,
+                    "--json",
+                ],
+                "accept",
+                short,
+            );
+            rec.accept_exit = accept.code;
+        }
+        if state == "AwaitingReview" || state == "Accepted" {
+            let resume = ml(
+                &["resume", "--graph", &graph_id, "--config", &cfg, "--json"],
+                "resume",
+                short,
+            );
+            rec.resume_exit = resume.code;
+            let integrate = ml(
+                &[
+                    "integrate",
+                    "--graph",
+                    &graph_id,
+                    "--into",
+                    "main",
+                    "--accept-integrate",
+                    "--config",
+                    &cfg,
+                    "--json",
+                ],
+                "integrate",
+                short,
+            );
+            rec.integrate_exit = integrate.code;
+            if integrate.code == Some(0) {
+                let verify = ctx.lp.join("verify.py");
+                let task_dir = ctx.lp.join("tasks").join(&task.id);
+                let final_verify = run_cmd(
+                    Path::new("python3"),
+                    &[&path_str(&verify), &path_str(&task_dir)],
+                    &repo,
+                    &dir.join("final-verify.out"),
+                    &dir.join("final-verify.err"),
+                    Duration::from_secs(300),
+                );
+                rec.final_verify_exit = final_verify.code;
+            }
+        } else {
+            rec.errors.push(format!(
+                "node {state:?} after dispatch (run idle {:?}); not accepted or integrated",
+                rec.run_idle
+            ));
+        }
+        rec.success = rec.final_verify_exit == Some(0);
     }
-    rec.success = rec.final_verify_exit == Some(0);
     rec.first_attempt_success =
         rec.success && rec.attempts.first().is_some_and(|a| a.checks_passed);
+
+    // #139: which priors routed each attempt. The table exists from store schema v9;
+    // an older binary's store has none, which reads as no rows.
+    let routing = read_routing(&db).unwrap_or_default();
+    for a in &mut rec.attempts {
+        if let Some((sha, changed)) = routing.get(&a.attempt_id) {
+            a.priors_sha256 = Some(sha.clone());
+            a.changed_top = Some(*changed);
+        }
+    }
+    if ctx.priors.is_some() || ctx.offline {
+        let show = ml(
+            &["priors", "show", "--config", &cfg, "--json"],
+            "priors-show",
+            short,
+        );
+        let v: Value = serde_json::from_str(&show.stdout).unwrap_or(Value::Null);
+        rec.priors_in_effect = v["data"]["in_effect"].as_bool();
+        rec.priors_sha256 = v["data"]["priors_sha256"].as_str().map(String::from);
+        rec.routing_attempts = v["data"]["routing"]["attempts"].as_u64();
+        rec.routing_changed_top = v["data"]["routing"]["changed_top"].as_u64();
+    }
 
     rec.routing_feedback_after = read_feedback(&db).unwrap_or_default();
     rec.quota_state_after = read_quota(&db).unwrap_or_default();
     rec.quota_hit = quota_hit(&rec);
     rec.total_wall_seconds = round2(total.elapsed().as_secs_f64());
-    rec.repo_removed = remove_repo(&repo, &mut rec.errors);
+    cleanup(&mut rec);
     rec
 }
 
@@ -1153,7 +1779,16 @@ fn remove_repo(repo: &Path, errors: &mut Vec<String>) -> bool {
     }
 }
 
-fn seed_repo(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
+/// The files a run starts from: the task's seed and the common worker instructions, or
+/// for an offline fixture task a README and a .gitignore.
+fn write_seed_files(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
+    if ctx.offline {
+        fs::create_dir_all(repo).map_err(|e| e.to_string())?;
+        fs::write(repo.join("README.md"), format!("seed {}\n", task.id))
+            .and_then(|_| fs::write(repo.join(".gitignore"), "/.meshloop/\n"))
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let task_dir = ctx.lp.join("tasks").join(&task.id);
     copy_dir(&task_dir.join("seed"), repo).map_err(|e| e.to_string())?;
     let common = ctx.lp.join("common");
@@ -1164,17 +1799,43 @@ fn seed_repo(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
     ] {
         fs::copy(common.join(from), repo.join(to)).map_err(|e| format!("{from}: {e}"))?;
     }
+    Ok(())
+}
+
+fn seed_message(ctx: &Ctx, task: &TaskMeta) -> String {
+    format!("seed {} ({})", task.id, ctx.version)
+}
+
+fn seed_repo(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
+    write_seed_files(ctx, task, repo)?;
     git(repo, &["init", "-q", "-b", "main"])?;
     git(repo, &["add", "-A"])?;
-    git(
-        repo,
-        &[
-            "commit",
-            "-q",
-            "-m",
-            &format!("seed {} ({})", task.id, ctx.version),
-        ],
-    )
+    git(repo, &["commit", "-q", "-m", &seed_message(ctx, task)])
+}
+
+/// Warm-up (#140): the shared repository's `main` becomes a single root commit holding
+/// the task's seed, the same tree and message a fresh repository gets, so the worker sees
+/// what a measured run's worker sees. Meshloop's store, worktrees and the branches of
+/// earlier warm-up graphs stay (Meshloop binds a store to one repository, and the cell
+/// folds one store).
+fn reseed_shared(ctx: &Ctx, task: &TaskMeta, repo: &Path) -> Result<(), String> {
+    if !repo.join(".git").exists() {
+        fs::create_dir_all(repo).map_err(|e| e.to_string())?;
+        git(repo, &["init", "-q", "-b", "main"])?;
+    }
+    let born = git(repo, &["rev-parse", "-q", "--verify", "HEAD"]).is_ok();
+    if born {
+        git(repo, &["checkout", "-q", "--orphan", "bench-reseed"])?;
+        let _ = git(repo, &["rm", "-rqf", "--cached", "."]);
+        git(repo, &["clean", "-qfdx", "-e", ".meshloop"])?;
+    }
+    write_seed_files(ctx, task, repo)?;
+    git(repo, &["add", "-A"])?;
+    git(repo, &["commit", "-q", "-m", &seed_message(ctx, task)])?;
+    if born {
+        git(repo, &["branch", "-M", "main"])?;
+    }
+    Ok(())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
@@ -1340,6 +2001,26 @@ fn read_quota(db: &Path) -> Result<Vec<Value>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// `advisory_routing` (#139): attempt id -> (priors_sha256, changed_top).
+fn read_routing(db: &Path) -> Result<std::collections::HashMap<u64, (String, bool)>, String> {
+    if !db.exists() {
+        return Ok(Default::default());
+    }
+    let conn = open_ro(db)?;
+    let mut stmt = conn
+        .prepare("SELECT attempt_id, priors_sha256, changed_top FROM advisory_routing")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                (r.get::<_, String>(1)?, r.get::<_, bool>(2)?),
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
 fn open_ro(db: &Path) -> Result<rusqlite::Connection, String> {
     rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())
@@ -1386,6 +2067,9 @@ fn parse_attempts(inspect: &Value) -> Vec<AttemptRecord> {
                 ..AttemptRecord::default()
             };
             rec.checks_passed = rec.outcome.as_deref() == Some("DeterministicChecksPassed");
+            rec.check_result = a["check_result"].as_str().map(String::from);
+            rec.model_passed = a["model_passed"].as_bool();
+            rec.dispatch_mode = a["dispatch_mode"].as_str().map(String::from);
             let mut transcript = String::new();
             for e in a["evidence"].as_array().into_iter().flatten() {
                 if e["kind"].as_str() != Some("deterministic") {
@@ -1821,8 +2505,61 @@ fn summarize(runs: &[RunRecord]) -> Value {
         })
         .collect();
 
+    // (harness, model, plan tier): what a warm-up explored and what the fold counts.
+    // ((harness, model, tier), (attempts, check passed, check failed))
+    type KeyCounts = ((String, String, String), (usize, usize, usize));
+    let mut by_key: Vec<KeyCounts> = Vec::new();
+    for r in runs {
+        let tier = r.plan_tier.clone().unwrap_or_else(|| "Tier2".into());
+        for a in &r.attempts {
+            let key = (
+                a.harness.clone().unwrap_or_default(),
+                a.model_ref.clone().unwrap_or_default(),
+                tier.clone(),
+            );
+            let slot = match by_key.iter().position(|(k, _)| *k == key) {
+                Some(i) => &mut by_key[i].1,
+                None => {
+                    by_key.push((key, (0, 0, 0)));
+                    &mut by_key.last_mut().expect("just pushed").1
+                }
+            };
+            slot.0 += 1;
+            match a.check_result.as_deref() {
+                Some("passed") => slot.1 += 1,
+                Some("failed") => slot.2 += 1,
+                _ => {}
+            }
+        }
+    }
+    let by_key: Vec<Value> = by_key
+        .into_iter()
+        .map(|((h, m, t), (n, passed, failed))| {
+            json!({"harness": h, "model_ref": m, "tier": t, "attempts": n,
+                   "check_passed": passed, "check_failed": failed})
+        })
+        .collect();
+    let all_attempts: Vec<&AttemptRecord> = runs.iter().flat_map(|r| &r.attempts).collect();
+    let mut shas: Vec<String> = runs
+        .iter()
+        .filter_map(|r| r.priors_sha256.clone())
+        .chain(all_attempts.iter().filter_map(|a| a.priors_sha256.clone()))
+        .collect();
+    shas.sort();
+    shas.dedup();
+    let priors = json!({
+        "runs_with_priors_in_effect": runs.iter().filter(|r| r.priors_in_effect == Some(true)).count(),
+        "priors_sha256": shas,
+        "attempts_with_routing_row": all_attempts.iter().filter(|a| a.changed_top.is_some()).count(),
+        "attempts_changed_top": all_attempts.iter().filter(|a| a.changed_top == Some(true)).count(),
+        "first_attempts_changed_top": runs.iter()
+            .filter(|r| r.attempts.first().is_some_and(|a| a.changed_top == Some(true))).count(),
+    });
+
     json!({
         "overall": overall,
+        "priors": priors,
+        "by_key": by_key,
         "success_rate_by_rep": rep_rates.iter().map(|r| round4(*r)).collect::<Vec<_>>(),
         "success_rate_rep_range_pp": if rep_rates.is_empty() { Value::Null } else {
             let max = rep_rates.iter().cloned().fold(f64::MIN, f64::max);
@@ -2128,6 +2865,7 @@ mod tests {
             test_command: vec![],
             editable: vec![],
             expected_tests: 0,
+            verify: vec![],
         };
         let p = plan_json("lp-x-r1", &t, None);
         assert_eq!(p["nodes"][0]["tier"], Value::Null);
@@ -2218,6 +2956,63 @@ mod tests {
         assert_eq!(s["by_harness_model"][0]["first_dispatches"], 3);
         assert_eq!(s["by_harness_model"][0]["attempts"], 3);
         assert_eq!(s["by_task"]["a"]["runs"], 2);
+    }
+
+    #[test]
+    fn pin_config_keeps_one_candidate() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let template =
+            fs::read_to_string(root.join("benches/learning-plane/meshloop.toml")).unwrap();
+        let pinned = pin_config(&template, "pi", "openai-codex/gpt-6.1-terra").unwrap();
+        assert!(pinned.contains("selected_harnesses = [\"pi\"]\n"));
+        assert!(pinned.contains("model_ref = \"openai-codex/gpt-6.1-terra\""));
+        assert!(!pinned.contains("openai-codex/gpt-5.6-luna"));
+        // Other harness tables stay, unselected and unchanged.
+        assert!(pinned.contains("model_ref = \"gpt-6-luna\""));
+        assert!(pinned.contains("model_ref = \"haiku\""));
+        assert_eq!(
+            pinned.lines().count(),
+            template.lines().count() - 1,
+            "only the other pi model line goes"
+        );
+        assert!(pin_config(&template, "codex", "nope").is_err());
+        assert!(pin_config(&template, "grok", "x").is_err());
+        assert_eq!(
+            id_part("openai-codex/gpt-6.1-terra"),
+            "openai-codex-gpt-6-1-terra"
+        );
+    }
+
+    #[test]
+    fn warmup_schedule_reaches_the_floor() {
+        let set = TaskSet {
+            version: "x".into(),
+            tasks: vec!["a".into(), "b".into(), "c".into()],
+            plan_tiers: [("a", "Tier1"), ("b", "Tier1"), ("c", "Tier2")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        let meta = |id: &str| TaskMeta {
+            id: id.into(),
+            language: "python".into(),
+            difficulty: "easy".into(),
+            kind: "implement".into(),
+            description: "d".into(),
+            test_command: vec![],
+            editable: vec![],
+            expected_tests: 0,
+            verify: vec![],
+        };
+        let tasks = vec![meta("a"), meta("b"), meta("c")];
+        let cands = json!({"Tier1": ["h/x", "h/y"], "Tier2": ["h/y"]});
+        let s = warmup_schedule(&set, &tasks, &cands, 5);
+        // Tier1: 2 tasks x 3 reps x 2 candidates; Tier2: 1 task x 5 reps x 1 candidate.
+        assert_eq!(s.len(), 12 + 5);
+        let count = |task: usize, m: &str| s.iter().filter(|r| r.1 == task && r.3 == m).count();
+        assert_eq!(count(0, "x") + count(1, "x"), 6);
+        assert_eq!(count(2, "y"), 5);
+        assert_eq!(s[0], (1, 0, "h".into(), "x".into()));
     }
 
     #[test]

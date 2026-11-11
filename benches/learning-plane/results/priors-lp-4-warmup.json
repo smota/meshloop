@@ -1,0 +1,175 @@
+{
+  "schema": "meshloop/advisory-priors",
+  "version": 1,
+  "generated_at": "2026-11-11T10:19:51Z",
+  "generator": {"name": "nodecode-meshloop", "version": "0.4.0"},
+  "source": {"graph_ids": ["wu-py-calc-r1-codex-gpt-6-1-sol", "wu-py-calc-r2-codex-gpt-6-1-sol", "wu-py-calc-r3-codex-gpt-6-1-sol", "wu-py-intervals-r1-claude-sonnet", "wu-py-intervals-r1-codex-gpt-6-1-sol", "wu-py-intervals-r1-pi-openai-codex-gpt-6-1-terra", "wu-py-intervals-r2-claude-sonnet", "wu-py-intervals-r2-codex-gpt-6-1-sol", "wu-py-intervals-r2-pi-openai-codex-gpt-6-1-terra", "wu-py-lru-r1-claude-sonnet", "wu-py-lru-r1-codex-gpt-6-1-sol", "wu-py-lru-r1-pi-openai-codex-gpt-6-1-terra", "wu-py-lru-r2-claude-sonnet", "wu-py-lru-r2-codex-gpt-6-1-sol", "wu-py-lru-r2-pi-openai-codex-gpt-6-1-terra", "wu-py-median-bugfix-r1-claude-haiku", "wu-py-median-bugfix-r1-claude-sonnet", "wu-py-median-bugfix-r1-codex-gpt-6-1-sol", "wu-py-median-bugfix-r1-codex-gpt-6-luna", "wu-py-median-bugfix-r1-pi-openai-codex-gpt-5-6-luna", "wu-py-median-bugfix-r1-pi-openai-codex-gpt-6-1-terra", "wu-py-median-bugfix-r2-claude-haiku", "wu-py-median-bugfix-r2-claude-sonnet", "wu-py-median-bugfix-r2-codex-gpt-6-1-sol", "wu-py-median-bugfix-r2-codex-gpt-6-luna", "wu-py-median-bugfix-r2-pi-openai-codex-gpt-5-6-luna", "wu-py-median-bugfix-r2-pi-openai-codex-gpt-6-1-terra", "wu-py-median-bugfix-r3-claude-haiku", "wu-py-median-bugfix-r3-claude-sonnet", "wu-py-median-bugfix-r3-codex-gpt-6-1-sol", "wu-py-median-bugfix-r3-codex-gpt-6-luna", "wu-py-median-bugfix-r3-pi-openai-codex-gpt-5-6-luna", "wu-py-median-bugfix-r3-pi-openai-codex-gpt-6-1-terra", "wu-py-roman-r1-claude-sonnet", "wu-py-roman-r1-codex-gpt-6-1-sol", "wu-py-roman-r1-pi-openai-codex-gpt-6-1-terra", "wu-py-roman-r2-claude-sonnet", "wu-py-roman-r2-codex-gpt-6-1-sol", "wu-py-roman-r2-pi-openai-codex-gpt-6-1-terra", "wu-py-semver-r1-codex-gpt-6-1-sol", "wu-py-semver-r2-codex-gpt-6-1-sol", "wu-py-semver-r3-codex-gpt-6-1-sol", "wu-py-wordfreq-r1-claude-haiku", "wu-py-wordfreq-r1-claude-sonnet", "wu-py-wordfreq-r1-codex-gpt-6-1-sol", "wu-py-wordfreq-r1-codex-gpt-6-luna", "wu-py-wordfreq-r1-pi-openai-codex-gpt-5-6-luna", "wu-py-wordfreq-r1-pi-openai-codex-gpt-6-1-terra", "wu-py-wordfreq-r2-claude-haiku", "wu-py-wordfreq-r2-claude-sonnet", "wu-py-wordfreq-r2-codex-gpt-6-1-sol", "wu-py-wordfreq-r2-codex-gpt-6-luna", "wu-py-wordfreq-r2-pi-openai-codex-gpt-5-6-luna", "wu-py-wordfreq-r2-pi-openai-codex-gpt-6-1-terra", "wu-py-wordfreq-r3-claude-haiku", "wu-py-wordfreq-r3-claude-sonnet", "wu-py-wordfreq-r3-codex-gpt-6-1-sol", "wu-py-wordfreq-r3-codex-gpt-6-luna", "wu-py-wordfreq-r3-pi-openai-codex-gpt-5-6-luna", "wu-py-wordfreq-r3-pi-openai-codex-gpt-6-1-terra", "wu-rs-brackets-r1-claude-sonnet", "wu-rs-brackets-r1-codex-gpt-6-1-sol", "wu-rs-brackets-r1-pi-openai-codex-gpt-6-1-terra", "wu-rs-brackets-r2-claude-sonnet", "wu-rs-brackets-r2-codex-gpt-6-1-sol", "wu-rs-brackets-r2-pi-openai-codex-gpt-6-1-terra"]},
+  "priors": [
+    {
+      "harness": "claude",
+      "model_ref": "haiku",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-claude-haiku", "task_id": 1, "attempt_id": 3, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-claude-haiku", "task_id": 1, "attempt_id": 29, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-claude-haiku", "task_id": 1, "attempt_id": 55, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-claude-haiku", "task_id": 1, "attempt_id": 9, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-claude-haiku", "task_id": 1, "attempt_id": 35, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-claude-haiku", "task_id": 1, "attempt_id": 61, "passed": true}
+      ]
+    },
+    {
+      "harness": "claude",
+      "model_ref": "sonnet",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-claude-sonnet", "task_id": 1, "attempt_id": 4, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-claude-sonnet", "task_id": 1, "attempt_id": 30, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-claude-sonnet", "task_id": 1, "attempt_id": 56, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-claude-sonnet", "task_id": 1, "attempt_id": 10, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-claude-sonnet", "task_id": 1, "attempt_id": 36, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-claude-sonnet", "task_id": 1, "attempt_id": 62, "passed": true}
+      ]
+    },
+    {
+      "harness": "claude",
+      "model_ref": "sonnet",
+      "tier": "Tier2",
+      "dispatch_mode": "subprocess",
+      "attempts": 8,
+      "successes": 8,
+      "provenance": [
+        {"graph_id": "wu-py-intervals-r1-claude-sonnet", "task_id": 1, "attempt_id": 17, "passed": true},
+        {"graph_id": "wu-py-intervals-r2-claude-sonnet", "task_id": 1, "attempt_id": 43, "passed": true},
+        {"graph_id": "wu-py-lru-r1-claude-sonnet", "task_id": 1, "attempt_id": 14, "passed": true},
+        {"graph_id": "wu-py-lru-r2-claude-sonnet", "task_id": 1, "attempt_id": 40, "passed": true},
+        {"graph_id": "wu-py-roman-r1-claude-sonnet", "task_id": 1, "attempt_id": 20, "passed": true},
+        {"graph_id": "wu-py-roman-r2-claude-sonnet", "task_id": 1, "attempt_id": 46, "passed": true},
+        {"graph_id": "wu-rs-brackets-r1-claude-sonnet", "task_id": 1, "attempt_id": 23, "passed": true},
+        {"graph_id": "wu-rs-brackets-r2-claude-sonnet", "task_id": 1, "attempt_id": 49, "passed": true}
+      ]
+    },
+    {
+      "harness": "codex",
+      "model_ref": "gpt-6-luna",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-codex-gpt-6-luna", "task_id": 1, "attempt_id": 1, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-codex-gpt-6-luna", "task_id": 1, "attempt_id": 27, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-codex-gpt-6-luna", "task_id": 1, "attempt_id": 53, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-codex-gpt-6-luna", "task_id": 1, "attempt_id": 7, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-codex-gpt-6-luna", "task_id": 1, "attempt_id": 33, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-codex-gpt-6-luna", "task_id": 1, "attempt_id": 59, "passed": true}
+      ]
+    },
+    {
+      "harness": "codex",
+      "model_ref": "gpt-6.1-sol",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 2, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 28, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 54, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 8, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 34, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 60, "passed": true}
+      ]
+    },
+    {
+      "harness": "codex",
+      "model_ref": "gpt-6.1-sol",
+      "tier": "Tier2",
+      "dispatch_mode": "subprocess",
+      "attempts": 8,
+      "successes": 8,
+      "provenance": [
+        {"graph_id": "wu-py-intervals-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 16, "passed": true},
+        {"graph_id": "wu-py-intervals-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 42, "passed": true},
+        {"graph_id": "wu-py-lru-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 13, "passed": true},
+        {"graph_id": "wu-py-lru-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 39, "passed": true},
+        {"graph_id": "wu-py-roman-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 19, "passed": true},
+        {"graph_id": "wu-py-roman-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 45, "passed": true},
+        {"graph_id": "wu-rs-brackets-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 22, "passed": true},
+        {"graph_id": "wu-rs-brackets-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 48, "passed": true}
+      ]
+    },
+    {
+      "harness": "codex",
+      "model_ref": "gpt-6.1-sol",
+      "tier": "Tier3",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-calc-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 25, "passed": true},
+        {"graph_id": "wu-py-calc-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 51, "passed": true},
+        {"graph_id": "wu-py-calc-r3-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 65, "passed": true},
+        {"graph_id": "wu-py-semver-r1-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 26, "passed": true},
+        {"graph_id": "wu-py-semver-r2-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 52, "passed": true},
+        {"graph_id": "wu-py-semver-r3-codex-gpt-6-1-sol", "task_id": 1, "attempt_id": 66, "passed": true}
+      ]
+    },
+    {
+      "harness": "pi",
+      "model_ref": "openai-codex/gpt-5.6-luna",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 5, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 31, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 57, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 11, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 37, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-pi-openai-codex-gpt-5-6-luna", "task_id": 1, "attempt_id": 63, "passed": true}
+      ]
+    },
+    {
+      "harness": "pi",
+      "model_ref": "openai-codex/gpt-6.1-terra",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-py-median-bugfix-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 6, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 32, "passed": true},
+        {"graph_id": "wu-py-median-bugfix-r3-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 58, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 12, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 38, "passed": true},
+        {"graph_id": "wu-py-wordfreq-r3-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 64, "passed": true}
+      ]
+    },
+    {
+      "harness": "pi",
+      "model_ref": "openai-codex/gpt-6.1-terra",
+      "tier": "Tier2",
+      "dispatch_mode": "subprocess",
+      "attempts": 8,
+      "successes": 8,
+      "provenance": [
+        {"graph_id": "wu-py-intervals-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 18, "passed": true},
+        {"graph_id": "wu-py-intervals-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 44, "passed": true},
+        {"graph_id": "wu-py-lru-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 15, "passed": true},
+        {"graph_id": "wu-py-lru-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 41, "passed": true},
+        {"graph_id": "wu-py-roman-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 21, "passed": true},
+        {"graph_id": "wu-py-roman-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 47, "passed": true},
+        {"graph_id": "wu-rs-brackets-r1-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 24, "passed": true},
+        {"graph_id": "wu-rs-brackets-r2-pi-openai-codex-gpt-6-1-terra", "task_id": 1, "attempt_id": 50, "passed": true}
+      ]
+    }
+  ]
+}

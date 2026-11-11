@@ -1,0 +1,1322 @@
+{
+  "wu-py-calc-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 25,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-calc-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 51,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-calc-r3-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 65,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 17,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 16,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 18,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 43,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 42,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-intervals-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 44,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 14,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 13,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 15,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 40,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 39,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-lru-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 41,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 3,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 4,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 2,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 1,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 5,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 6,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 29,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 30,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 28,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 27,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 31,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 32,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 55,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 56,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 54,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 53,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 57,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-median-bugfix-r3-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 58,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 20,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 19,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 21,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 46,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 45,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-roman-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 47,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-semver-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 26,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-semver-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 52,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-semver-r3-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 66,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier3"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 9,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 10,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 8,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 7,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 11,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 12,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 35,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 36,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 34,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 33,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 37,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 38,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-claude-haiku": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 61,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "haiku"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 62,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 60,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-codex-gpt-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 59,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-pi-openai-codex-gpt-5-6-luna": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 63,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-5.6-luna"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-py-wordfreq-r3-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 64,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier1"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r1-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 23,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r1-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 22,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r1-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 24,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r2-claude-sonnet": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 49,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "claude",
+            "model_passed": true,
+            "model_ref": "sonnet"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r2-codex-gpt-6-1-sol": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 48,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "codex",
+            "model_passed": true,
+            "model_ref": "gpt-6.1-sol"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  },
+  "wu-rs-brackets-r2-pi-openai-codex-gpt-6-1-terra": {
+    "nodes": [
+      {
+        "attempts": [
+          {
+            "attempt_id": 50,
+            "check_result": "passed",
+            "dispatch_mode": "subprocess",
+            "harness": "pi",
+            "model_passed": true,
+            "model_ref": "openai-codex/gpt-6.1-terra"
+          }
+        ],
+        "id": 1,
+        "state": "AwaitingReview",
+        "tier": "Tier2"
+      }
+    ],
+    "status": "awaiting_acceptance"
+  }
+}

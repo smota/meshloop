@@ -35,6 +35,10 @@ jobs:
         run: cargo run --release -p xtask -- bench
       - name: System 1 offline bench
         run: cargo run --release -p xtask -- bench-system1
+      # #140: socket-free learning-plane comparison on the fixture harness (about two
+      # minutes, so not in xtask check). Gates the mechanism, never "learning wins".
+      - name: Learning-plane offline comparison
+        run: cargo run -p xtask -- bench-learning --offline
       - name: Upload Benchmark & Scorecard Artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -44,6 +48,7 @@ jobs:
             artifacts/bench/run.json
             artifacts/bench/scorecard.md
             artifacts/bench/system1_bench.json
+            artifacts/bench/learning_offline.json
 
   # Optional nodecode cell check (ADR 0038, #135). Non-blocking: it installs a pinned
   # nodecode release on a throwaway HOME, loads cells/nodecode-meshloop and runs its load

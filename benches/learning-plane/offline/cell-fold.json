@@ -1,0 +1,119 @@
+{
+  "schema": "meshloop/advisory-priors",
+  "version": 1,
+  "generated_at": "2026-11-11T10:03:36Z",
+  "generator": {"name": "nodecode-meshloop", "version": "0.4.0"},
+  "source": {"graph_ids": ["wu-t1-any-r1-fixture-extra", "wu-t1-any-r1-fixture-fail-lite", "wu-t1-any-r1-fixture-fail-mid", "wu-t1-any-r1-fixture-lite", "wu-t1-any-r1-fixture-top", "wu-t1-any-r2-fixture-extra", "wu-t1-any-r2-fixture-fail-lite", "wu-t1-any-r2-fixture-fail-mid", "wu-t1-any-r2-fixture-lite", "wu-t1-any-r2-fixture-top", "wu-t1-any-r3-fixture-extra", "wu-t1-any-r3-fixture-fail-lite", "wu-t1-any-r3-fixture-fail-mid", "wu-t1-any-r3-fixture-lite", "wu-t1-any-r3-fixture-top", "wu-t1-file-r1-fixture-extra", "wu-t1-file-r1-fixture-fail-lite", "wu-t1-file-r1-fixture-fail-mid", "wu-t1-file-r1-fixture-lite", "wu-t1-file-r1-fixture-top", "wu-t1-file-r2-fixture-extra", "wu-t1-file-r2-fixture-fail-lite", "wu-t1-file-r2-fixture-fail-mid", "wu-t1-file-r2-fixture-lite", "wu-t1-file-r2-fixture-top", "wu-t1-file-r3-fixture-extra", "wu-t1-file-r3-fixture-fail-lite", "wu-t1-file-r3-fixture-fail-mid", "wu-t1-file-r3-fixture-lite", "wu-t1-file-r3-fixture-top", "wu-t2-file-r1-fixture-fail-mid", "wu-t2-file-r1-fixture-top", "wu-t2-file-r2-fixture-fail-mid", "wu-t2-file-r2-fixture-top", "wu-t2-file-r3-fixture-fail-mid", "wu-t2-file-r3-fixture-top", "wu-t2-file-r4-fixture-fail-mid", "wu-t2-file-r4-fixture-top", "wu-t2-file-r5-fixture-fail-mid", "wu-t2-file-r5-fixture-top"]},
+  "priors": [
+    {
+      "harness": "fixture",
+      "model_ref": "extra",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-t1-any-r1-fixture-extra", "task_id": 1, "attempt_id": 5, "passed": true},
+        {"graph_id": "wu-t1-any-r2-fixture-extra", "task_id": 1, "attempt_id": 17, "passed": true},
+        {"graph_id": "wu-t1-any-r3-fixture-extra", "task_id": 1, "attempt_id": 29, "passed": true},
+        {"graph_id": "wu-t1-file-r1-fixture-extra", "task_id": 1, "attempt_id": 10, "passed": true},
+        {"graph_id": "wu-t1-file-r2-fixture-extra", "task_id": 1, "attempt_id": 22, "passed": true},
+        {"graph_id": "wu-t1-file-r3-fixture-extra", "task_id": 1, "attempt_id": 34, "passed": true}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "fail-lite",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 0,
+      "provenance": [
+        {"graph_id": "wu-t1-any-r1-fixture-fail-lite", "task_id": 1, "attempt_id": 1, "passed": false},
+        {"graph_id": "wu-t1-any-r2-fixture-fail-lite", "task_id": 1, "attempt_id": 13, "passed": false},
+        {"graph_id": "wu-t1-any-r3-fixture-fail-lite", "task_id": 1, "attempt_id": 25, "passed": false},
+        {"graph_id": "wu-t1-file-r1-fixture-fail-lite", "task_id": 1, "attempt_id": 6, "passed": false},
+        {"graph_id": "wu-t1-file-r2-fixture-fail-lite", "task_id": 1, "attempt_id": 18, "passed": false},
+        {"graph_id": "wu-t1-file-r3-fixture-fail-lite", "task_id": 1, "attempt_id": 30, "passed": false}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "fail-mid",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 0,
+      "provenance": [
+        {"graph_id": "wu-t1-any-r1-fixture-fail-mid", "task_id": 1, "attempt_id": 3, "passed": false},
+        {"graph_id": "wu-t1-any-r2-fixture-fail-mid", "task_id": 1, "attempt_id": 15, "passed": false},
+        {"graph_id": "wu-t1-any-r3-fixture-fail-mid", "task_id": 1, "attempt_id": 27, "passed": false},
+        {"graph_id": "wu-t1-file-r1-fixture-fail-mid", "task_id": 1, "attempt_id": 8, "passed": false},
+        {"graph_id": "wu-t1-file-r2-fixture-fail-mid", "task_id": 1, "attempt_id": 20, "passed": false},
+        {"graph_id": "wu-t1-file-r3-fixture-fail-mid", "task_id": 1, "attempt_id": 32, "passed": false}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "fail-mid",
+      "tier": "Tier2",
+      "dispatch_mode": "subprocess",
+      "attempts": 5,
+      "successes": 0,
+      "provenance": [
+        {"graph_id": "wu-t2-file-r1-fixture-fail-mid", "task_id": 1, "attempt_id": 11, "passed": false},
+        {"graph_id": "wu-t2-file-r2-fixture-fail-mid", "task_id": 1, "attempt_id": 23, "passed": false},
+        {"graph_id": "wu-t2-file-r3-fixture-fail-mid", "task_id": 1, "attempt_id": 35, "passed": false},
+        {"graph_id": "wu-t2-file-r4-fixture-fail-mid", "task_id": 1, "attempt_id": 37, "passed": false},
+        {"graph_id": "wu-t2-file-r5-fixture-fail-mid", "task_id": 1, "attempt_id": 39, "passed": false}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "lite",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-t1-any-r1-fixture-lite", "task_id": 1, "attempt_id": 2, "passed": true},
+        {"graph_id": "wu-t1-any-r2-fixture-lite", "task_id": 1, "attempt_id": 14, "passed": true},
+        {"graph_id": "wu-t1-any-r3-fixture-lite", "task_id": 1, "attempt_id": 26, "passed": true},
+        {"graph_id": "wu-t1-file-r1-fixture-lite", "task_id": 1, "attempt_id": 7, "passed": true},
+        {"graph_id": "wu-t1-file-r2-fixture-lite", "task_id": 1, "attempt_id": 19, "passed": true},
+        {"graph_id": "wu-t1-file-r3-fixture-lite", "task_id": 1, "attempt_id": 31, "passed": true}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "top",
+      "tier": "Tier1",
+      "dispatch_mode": "subprocess",
+      "attempts": 6,
+      "successes": 6,
+      "provenance": [
+        {"graph_id": "wu-t1-any-r1-fixture-top", "task_id": 1, "attempt_id": 4, "passed": true},
+        {"graph_id": "wu-t1-any-r2-fixture-top", "task_id": 1, "attempt_id": 16, "passed": true},
+        {"graph_id": "wu-t1-any-r3-fixture-top", "task_id": 1, "attempt_id": 28, "passed": true},
+        {"graph_id": "wu-t1-file-r1-fixture-top", "task_id": 1, "attempt_id": 9, "passed": true},
+        {"graph_id": "wu-t1-file-r2-fixture-top", "task_id": 1, "attempt_id": 21, "passed": true},
+        {"graph_id": "wu-t1-file-r3-fixture-top", "task_id": 1, "attempt_id": 33, "passed": true}
+      ]
+    },
+    {
+      "harness": "fixture",
+      "model_ref": "top",
+      "tier": "Tier2",
+      "dispatch_mode": "subprocess",
+      "attempts": 5,
+      "successes": 5,
+      "provenance": [
+        {"graph_id": "wu-t2-file-r1-fixture-top", "task_id": 1, "attempt_id": 12, "passed": true},
+        {"graph_id": "wu-t2-file-r2-fixture-top", "task_id": 1, "attempt_id": 24, "passed": true},
+        {"graph_id": "wu-t2-file-r3-fixture-top", "task_id": 1, "attempt_id": 36, "passed": true},
+        {"graph_id": "wu-t2-file-r4-fixture-top", "task_id": 1, "attempt_id": 38, "passed": true},
+        {"graph_id": "wu-t2-file-r5-fixture-top", "task_id": 1, "attempt_id": 40, "passed": true}
+      ]
+    }
+  ]
+}

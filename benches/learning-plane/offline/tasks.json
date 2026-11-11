@@ -1,0 +1,12 @@
+{
+  "version": "lp-offline-1",
+  "description": "Offline learning-plane comparison (#140). Fixture tasks with deterministic outcomes per (harness, model), see meshloop.toml: t1-any verifies any tree, t1-file and t2-file need the file a worker writes, t1-never fails for every worker. warmup=false tasks are measured only. Changing a task, a verify command, a tier or a configuration changes the recorded cell fold (cell-fold.json), which must then be recorded again with the real cell.",
+  "reps": 3,
+  "floor": 5,
+  "tasks": [
+    {"id": "t1-any", "tier": "Tier1", "warmup": true, "verify": ["git", "--version"]},
+    {"id": "t1-file", "tier": "Tier1", "warmup": true, "verify": ["git", "ls-files", "--error-unmatch", "fixture-touched.txt"]},
+    {"id": "t2-file", "tier": "Tier2", "warmup": true, "verify": ["git", "ls-files", "--error-unmatch", "fixture-touched.txt"]},
+    {"id": "t1-never", "tier": "Tier1", "warmup": false, "verify": ["git", "ls-files", "--error-unmatch", "no-such-file.txt"]}
+  ]
+}

@@ -1,0 +1,33 @@
+# Offline learning-plane comparison (#140): mechanism invariants. Blocking in CI.
+# They assert how accepted priors act on routing, never that learning wins: the
+# outcome metrics of each arm are reported, not gated. Do not tune these to pass.
+[invariants]
+# Every (harness, model, tier) key the warm-up explored reaches the evidence floor.
+"lp.offline.warmup_keys_below_floor" = { op = "eq", value = 0 }
+# The Rust fold gives the file the real cell wrote for the same fixture (cell-fold.json),
+# but for generated_at and generator.
+"lp.offline.fold_matches_cell" = { op = "eq", value = 1 }
+# `priors check` with the measured configuration: no file fault, nothing ignored, and
+# the prior for fixture/extra reported as not_a_candidate.
+"lp.offline.priors_check_file_fault" = { op = "eq", value = 0 }
+"lp.offline.priors_check_ignored" = { op = "eq", value = 0 }
+"lp.offline.priors_check_not_a_candidate" = { op = "eq", value = 1 }
+# Priors applied: in effect with the promoted digest in every priors-on store, and an
+# advisory_routing row with that digest for every priors-on attempt; none in the baseline.
+"lp.offline.priors_runs_not_in_effect" = { op = "eq", value = 0 }
+"lp.offline.priors_attempts_without_routing_row" = { op = "eq", value = 0 }
+"lp.offline.routing_rows_with_other_digest" = { op = "eq", value = 0 }
+"lp.offline.baseline_runs_with_priors" = { op = "eq", value = 0 }
+# Candidate set unchanged: no dispatch outside the tier's configured candidates (extra
+# included), and t1-never, which every candidate fails, reaches the same set in both arms.
+"lp.offline.dispatch_outside_candidates" = { op = "eq", value = 0 }
+"lp.offline.candidate_set_changes" = { op = "eq", value = 0 }
+# Bound respected: at Tier2 the warm-up separates fixture/fail-mid (0 of 5) and fixture/top
+# (5 of 5) by far more than 0.25, yet the clipped means tie the tier-efficiency penalty,
+# so the first dispatch stays the baseline's.
+"lp.offline.bound_violations" = { op = "eq", value = 0 }
+# changed_top recorded: true exactly on the first attempts whose dispatch differs from the
+# baseline arm's for the same task and repetition, and true at least once.
+"lp.offline.changed_top_mismatches" = { op = "eq", value = 0 }
+"lp.offline.changed_top_first_attempts_min1" = { op = "eq", value = 1 }
+"lp.offline.timeouts_or_aborted" = { op = "eq", value = 0 }
