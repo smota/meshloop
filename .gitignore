@@ -22,3 +22,6 @@
 /.codex/skills/
 /.gemini/
 /.grok/skills/
+
+# graphify knowledge-graph output (regenerated)
+graphify-out/
