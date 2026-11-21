@@ -1,32 +1,42 @@
 ## Summary
 
-<!-- What changed, and why. -->
+<!-- Why this change, and what it changes -->
 
-## Out of scope
+## Implemented issues
 
-<!-- What this PR deliberately does not do. -->
+Closes #<issue-number>
 
-## Links
+## Related issues
 
-- Issue (if any; do not invent IDs):
-- ADR / requirement (if any):
+<!-- `Refs #<n>` for non-closing references, or `none` -->
 
-## Checks
+## Workflow evidence
 
-- [ ] `cargo run -p xtask -- check` (record skipped checks and why)
-- [ ] `cargo run -p xtask -- smoke` (if relevant)
-- [ ] `cargo run -p xtask -- bundle` (if relevant)
+- Workflow-status comment: <issue comment URL>
+- Handover comments: <URL> | exception: <reason>
+- Role-pass summary: <passes completed, for example developer, tester, reviewer>
+- Validation evidence: <where the test output is recorded>
 
-Limitations of this change (WSL2, live harness, packaging, concurrency, …):
+## Agent review
 
-## Review identity
+- Implemented by: <registered platform slug>
+- Launcher: <registered platform slug>
+- Executor: <execution target, for example codex-cli>
+- Transport: local-cli | provider-api | pi-subagent | intercom-session | orchestrated-worktree | manual
+- Delegation boundary: current-session | child-subagent | separate-local-session | child-worktree | human-handoff
+- Model / runtime: <model identifier>
+- Reviewed by: <registered platform slug>
+- Independent reviewer: YES | NO
+- Review: self-review | human-review-requested | human-reviewed
+- Workflow profile: bounded | standard | high-assurance
+- Merge owner: human/operator
+- Mode: single-agent | multi-agent
 
-- Author / executor:
-- Reviewer:
-- [ ] I am **not** claiming independent review for a self-review
+## CI-equivalent validation
 
-## Safety
+- Status: passed | not-run-with-reason | expected-fail-with-follow-up
+- Commands: `cargo run --locked -p xtask -- check`
 
-- [ ] No credentials, private prompts, session transcripts, or unknown-provenance third-party code
-- [ ] Does not claim unused adapters or live Claude/Codex/Pi/Grok/Agy dispatch as product
-- Compatibility / security consequences:
+## Follow-up issues
+
+<!-- `#<n>` for each follow-up, or `none` -->
