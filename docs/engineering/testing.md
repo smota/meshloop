@@ -42,7 +42,64 @@ flowchart TB
 
 ## 2. Test Execution Commands
 
-All verification is orchestrated via `xtask` subcommands to maintain identical behavior across local developer workstations and CI/CD pipelines:
+Run `mise run verify` on the native development platform before a PR or push.
+It fetches locked dependencies, runs `xtask check`, runs the xtask unit tests,
+runs `xtask smoke`, and runs the offline learning comparison. Each failure stops
+the task. The xtask tests run outside xtask itself to avoid relinking a running
+executable on Windows. `cargo test -p xtask --locked --offline` includes the
+former hosted `scaffold_cli` integration target and the xtask unit tests.
+The task sets `RUST_TEST_THREADS=2` to bound test resource use. The harness capture
+registry has 16 process-wide slots; unrestricted host CPU parallelism can exhaust
+them during fixture tests. All tests still run with the same assertions.
+
+The station pre-push hook is the current sole active verification owner. It reads
+`ciCommands`, which delegates to `mise run verify`. `lefthook.yml` is inert source
+configuration until the approved station migration activates it. That migration
+must replace the legacy verification forwarding, so one push runs verification once.
+Do not install Lefthook beside the station hook chain or over `core.hooksPath`.
+
+Run `mise run verify:bench` for algorithm, benchmark, and threshold changes.
+This preserves the `xtask bench` and `xtask bench-system1` acceptance checks
+without running benchmarks on every push. Their existing exit policies still apply.
+AgentFlow registers `workspace-check`, `linux-check`, and `benchmark-check` in
+`delivery.checks`. Local acceptance uses these explicit gates; hosted status is
+not a prerequisite.
+
+Run `mise run verify:linux` for Linux checks through Docker and Dagger.
+`uv` resolves the pinned `dagger-io==0.21.12` SDK declared in
+[`scripts/validation/dagger_check.py`](../../scripts/validation/dagger_check.py).
+The SDK script requires Python 3.12 through 3.14. It rejects source symlinks and
+Windows junctions, including linked parent directories, before staging files.
+The script runs the same `mise run verify` task in a Rust 1.98.0 Debian container.
+The task pins Dagger CLI 0.21.12 and runs the SDK inside `dagger run`.
+Run this task in a real terminal. Its mise task inherits standard input and output.
+On Windows, agent tools that capture pipes can stall Dagger CLI startup. Agents
+must use a terminal session, such as an Orca terminal, for this task.
+It requires a local Docker daemon and downloads dependencies and container images.
+It needs no Dagger Cloud account, and it sets `DO_NOT_TRACK=1`.
+The Python connection awaits have a 90-second timeout, and the async run has a
+one-hour timeout. These bounds do not cover synchronous CLI startup.
+
+Container inputs are build and test files in an explicit allowlist,
+including working-tree edits and nonignored new source files. Git metadata, environment files,
+private directories, and key files are excluded. Host Git identity and configuration
+are never mounted. The container initializes an empty Git repository for the
+smoke test's host worktree leak audit. It has no source history or synthetic commit.
+Tests also create their own disposable Git repositories. The script
+reports HEAD, repository dirty state, file count, and Dagger's frozen source digest.
+It does not claim a pristine commit.
+
+Linux containers exercise Linux behavior. Run native Windows verification for
+Windows process ownership and filesystem coverage. The Linux run probes bubblewrap
+and requires containment tests when the probe succeeds. If nested containment is
+unavailable, it warns that containment was not exercised, runs the other checks,
+and exits 2. Full Linux containment acceptance remains unavailable on that host.
+The optional nodecode cell load test remains a separate local check documented below.
+
+Routine validation does not use GitHub-hosted runners. The manual publication and
+binary packaging workflows remain available for publishing artifacts.
+
+Individual verification commands remain available through `xtask`:
 
 ### 2.1 Standard Development Check (`xtask check`)
 Runs code formatting checks, Clippy with all warnings denied (`-D warnings`), and executes all 142+ unit and integration tests across the workspace:
@@ -97,7 +154,7 @@ cargo run -p xtask -- bench-learning --aggregate <results.json>
 ### 2.4b Learning-plane comparison (`xtask bench-learning`, #140)
 The comparison of runs with and without accepted routing priors. Results and the verdict are in [`learning-plane-results.md`](learning-plane-results.md).
 
-- **Offline, in CI** (separate step, about two minutes, no socket, no nodecode, no model): `cargo run -p xtask -- bench-learning --offline` builds `meshloop` and `fixture_harness` and runs [`benches/learning-plane/offline/`](../../benches/learning-plane/offline/). One fixture harness lists five models whose outcomes are fixed by name (a `fail-*` model leaves no change). A warm-up pins each model on each task in one shared store until every (harness, model, tier) key has 5 counted attempts. The fold (`xtask/src/priors_fold.rs`, a restatement of the cell's `/meshloop learn` fold) writes a priors file, which must match, byte for byte apart from `generated_at` and `generator`, the proposal the real cell wrote for the same fixture (`offline/cell-fold.json`). `priors check` validates it. A baseline arm and a priors-on arm (`priors accept --as bench` into each fresh store) then run 4 tasks × 3 repetitions. The gates in `offline/thresholds.toml` check the mechanism only: the priors are applied, the ±0.25 bound holds, the candidate set is unchanged and `changed_top` is recorded. Outcome metrics per arm are reported but not gated. Results go to `artifacts/bench/learning_offline.json`; `--keep DIR` keeps the scratch stores. If a fixture or the fold changes, record `cell-fold.json` again with the real cell (`benches/learning-plane/cell_learn.py` over the kept warm-up store).
+- **Offline, in `mise run verify`** (about two minutes, no socket, no nodecode, no model): `cargo run -p xtask -- bench-learning --offline` builds `meshloop` and `fixture_harness` and runs [`benches/learning-plane/offline/`](../../benches/learning-plane/offline/). One fixture harness lists five models whose outcomes are fixed by name (a `fail-*` model leaves no change). A warm-up pins each model on each task in one shared store until every (harness, model, tier) key has 5 counted attempts. The fold (`xtask/src/priors_fold.rs`, a restatement of the cell's `/meshloop learn` fold) writes a priors file, which must match, byte for byte apart from `generated_at` and `generator`, the proposal the real cell wrote for the same fixture (`offline/cell-fold.json`). `priors check` validates it. A baseline arm and a priors-on arm (`priors accept --as bench` into each fresh store) then run 4 tasks × 3 repetitions. The gates in `offline/thresholds.toml` check the mechanism only: the priors are applied, the ±0.25 bound holds, the candidate set is unchanged and `changed_top` is recorded. Outcome metrics per arm are reported but not gated. Results go to `artifacts/bench/learning_offline.json`; `--keep DIR` keeps the scratch stores. If a fixture or the fold changes, record `cell-fold.json` again with the real cell (`benches/learning-plane/cell_learn.py` over the kept warm-up store).
 - **Live, manual** (ADR 0032; uses harness quota; never run by CI):
 
 ```bash
@@ -136,7 +193,7 @@ cargo run -p xtask -- publish-dry
 The read-only nodecode cell (ADR 0038, #135) is Common Lisp, and the workspace never builds it. It is tested at two levels:
 
 - **Blocking, offline contract.** [`cells/nodecode-meshloop/contract.json`](../../cells/nodecode-meshloop/contract.json) names every `--json` field the cell reads. `crates/meshloop-cli/tests/nodecode_cell_contract.rs` runs `doctor`, `status` and `inspect` on a fixture repository with the cell's arguments and asserts each field and its type. It runs inside `cargo test --workspace --locked --offline`, needs no nodecode and opens no socket. The cell checks every answer against the same file.
-- **Load test, non-blocking.** `cells/nodecode-meshloop/test/load_test.py` loads the cell into `nodecode serve` on a throwaway `HOME` and runs the commands through the gateway, with no model turn. It checks the summaries, the one-line failures and that nothing in the repository or `.meshloop/` changed. It also checks that switching the cell off leaves meshloop's answers unchanged. The `nodecode-cell` CI job runs it on Linux with `continue-on-error`; `xtask` never calls it. Usage is in the [cell README](../../cells/nodecode-meshloop/README.md#tests).
+- **Load test, non-blocking.** `cells/nodecode-meshloop/test/load_test.py` loads the cell into `nodecode serve` on a throwaway `HOME` and runs the commands through the gateway, with no model turn. It checks the summaries, the one-line failures and that nothing in the repository or `.meshloop/` changed. It also checks that switching the cell off leaves meshloop's answers unchanged. Run this optional test locally on Linux; `xtask` never calls it. Usage is in the [cell README](../../cells/nodecode-meshloop/README.md#tests).
 
 ---
 

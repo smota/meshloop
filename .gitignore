@@ -25,3 +25,4 @@
 
 # graphify knowledge-graph output (regenerated)
 graphify-out/
+__pycache__/

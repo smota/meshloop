@@ -1,7 +1,7 @@
 {
   "posture": "assisted",
   "ciCommands": [
-    "cargo run --locked -p xtask -- check"
+    "mise run verify"
   ],
   "bounded": {
     "allowedExactPaths": [
@@ -129,19 +129,33 @@
       "workspace-check": {
         "id": "workspace-check",
         "criterionId": "workspace-check",
-        "executable": "cargo",
+        "executable": "mise",
         "args": [
           "run",
-          "--locked",
-          "-p",
-          "xtask",
-          "--",
-          "check"
+          "verify"
         ],
         "assertions": [
-          "fmt, clippy -D warnings and workspace tests pass"
+          "native workspace, xtask, smoke, and offline learning checks pass"
         ],
         "timeoutMs": 1800000,
+        "format": "exit-code"
+      },
+      "linux-check": {
+        "id": "linux-check",
+        "criterionId": "linux-check",
+        "executable": "mise",
+        "args": ["run", "verify:linux"],
+        "assertions": ["Linux workspace checks pass with containment exercised"],
+        "timeoutMs": 3600000,
+        "format": "exit-code"
+      },
+      "benchmark-check": {
+        "id": "benchmark-check",
+        "criterionId": "benchmark-check",
+        "executable": "mise",
+        "args": ["run", "verify:bench"],
+        "assertions": ["canonical and System 1 benchmark acceptance commands pass"],
+        "timeoutMs": 3600000,
         "format": "exit-code"
       }
     }
