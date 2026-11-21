@@ -4,12 +4,17 @@ rust = "1.98.0"
 [tasks.verify]
 description = "Native acceptance checks for the current operating system"
 env = { RUST_TEST_THREADS = "2" }
+run = "python3 scripts/validation/benchmark_policy.py --verify"
+
+[tasks."verify:core"]
+description = "Native correctness and isolation checks without benchmarks"
+env = { RUST_TEST_THREADS = "2" }
 run = [
+  "python3 -m unittest discover -s scripts/validation -p test_benchmark_policy.py -v",
   "cargo fetch --locked",
   "cargo run --locked -p xtask -- check",
   "cargo test -p xtask --locked --offline",
   "cargo run --locked -p xtask -- smoke",
-  "cargo run --locked -p xtask -- bench-learning --offline",
 ]
 
 [tasks."verify:bench"]
