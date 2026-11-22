@@ -1,2 +1,33 @@
 [tools]
 rust = "1.98.0"
+
+[tasks.verify]
+description = "Native acceptance checks for the current operating system"
+env = { RUST_TEST_THREADS = "2" }
+run = "python3 scripts/validation/benchmark_policy.py --verify"
+
+[tasks."verify:core"]
+description = "Native correctness and isolation checks without benchmarks"
+env = { RUST_TEST_THREADS = "2" }
+run = [
+  "python3 -m unittest discover -s scripts/validation -p test_benchmark_policy.py -v",
+  "cargo fetch --locked",
+  "cargo run --locked -p xtask -- check",
+  "cargo test -p xtask --locked --offline",
+  "cargo run --locked -p xtask -- smoke",
+]
+
+[tasks."verify:bench"]
+description = "Benchmark acceptance; required for algorithm and benchmark changes"
+run = [
+  "cargo fetch --locked",
+  "cargo run --locked --release -p xtask -- bench",
+  "cargo run --locked --release -p xtask -- bench-system1",
+]
+
+[tasks."verify:linux"]
+description = "Run verify in an isolated Linux container with Dagger 0.21.12"
+raw = true
+tools = { dagger = "0.21.12" }
+env = { DO_NOT_TRACK = "1", DAGGER_NO_UPDATE_CHECK = "1", DAGGER_NO_NAG = "1" }
+run = "dagger --progress plain run -- uv run scripts/validation/dagger_check.py"
